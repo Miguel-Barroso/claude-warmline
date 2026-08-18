@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+
+export WARMLINE_STATE_DIR="$(mktemp -d)"
+trap 'rm -rf "$WARMLINE_STATE_DIR"' EXIT
+
+pass=0 fail=0
+check() { # name expected payload
+  local out
+  out=$(printf '%s' "$3" | ./statusline.py)
+  if [[ "$out" == *"$2"* ]]; then
+    echo "ok   $1: $out"; pass=$((pass + 1))
+  else
+    echo "FAIL $1: expected '$2' in: $out"; fail=$((fail + 1))
+  fi
+}
+
+HOT='{"session_id":"t1","model":{"display_name":"Test"},"workspace":{"current_dir":"/tmp/proj"},"context_window":{"used_percentage":42.7,"total_input_tokens":168432,"current_usage":{"cache_read_input_tokens":165000,"cache_creation_input_tokens":2000}}}'
+COLD='{"session_id":"t2","model":{"display_name":"Test"},"workspace":{"current_dir":"/tmp/proj"},"context_window":{"used_percentage":81.0,"total_input_tokens":325000,"current_usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":310000}}}'
+
+check hot     "cache HOT"           "$HOT"
+check cold    "cache COLD(rebuilt)" "$COLD"
+check sparse  "cache ?"             '{"session_id":"t3","model":{"display_name":"Test"}}'
+check garbage "bad input"           'not json'
+
+# TTL inference: backdate t1's stamp 75 minutes, render the same session again.
+python3 - "$WARMLINE_STATE_DIR/t1.stamp" <<'PY'
+import os, sys, time
+t = time.time() - 75 * 60
+os.utime(sys.argv[1], (t, t))
+PY
+out=$(printf '%s' "$HOT" | ./statusline.py)
+if [[ "$out" == *"cache COLD(ttl?)"* && "$out" == *"gap 75m"* ]]; then
+  echo "ok   ttl-gap: $out"; pass=$((pass + 1))
+else
+  echo "FAIL ttl-gap: expected 'cache COLD(ttl?)' and 'gap 75m' in: $out"; fail=$((fail + 1))
+fi
+
+# Session isolation: t2 rendering in between must not reset t1's clock.
+python3 - "$WARMLINE_STATE_DIR/t1.stamp" <<'PY'
+import os, sys, time
+t = time.time() - 75 * 60
+os.utime(sys.argv[1], (t, t))
+PY
+printf '%s' "$COLD" | ./statusline.py >/dev/null
+out=$(printf '%s' "$HOT" | ./statusline.py)
+if [[ "$out" == *"gap 75m"* ]]; then
+  echo "ok   session-isolation: $out"; pass=$((pass + 1))
+else
+  echo "FAIL session-isolation: t2's render reset t1's gap: $out"; fail=$((fail + 1))
+fi
+
+echo
+echo "$pass passed, $fail failed"
+[ "$fail" = 0 ]

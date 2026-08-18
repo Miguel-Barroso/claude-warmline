@@ -1,0 +1,5 @@
+## Keep the prompt cache warm during long background waits
+
+When launching background work expected to run longer than ~45 minutes (CI pipelines, long builds, long-running background agents) while conversation context is substantial (above roughly 30% used), schedule a wakeup for ~50 minutes out (ScheduleWakeup) before going quiet. On each wake: if the background work is still running, schedule another wakeup ~50 minutes out and end the turn without doing anything else; if the work has finished, continue normally — the results then land against a hot prompt cache. Never let wakeups continue once the wait is over, and skip this entirely when context is small: a cold read of a small context is cheap.
+
+Why: the provider prompt cache expires after a TTL (~1 hour of inactivity on subscription plans). A wakeup refreshes the TTL for the price of one cache read (~0.1× input), while resuming after expiry pays a full cache re-write (~2× input) across the entire context, plus uncached latency at exactly the moment a wave of results arrives.
