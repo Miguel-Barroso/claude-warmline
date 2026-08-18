@@ -105,10 +105,18 @@ babysitting with background CI watchers):
 - Headless probes confirm the TTL bucket: Claude Code writes the cache with
   `ephemeral_1h` (the 1-hour TTL), and a resumed session reads its full prefix back
   (33,614 tokens read, 56 written, in the reference probe).
-- Cache entries demonstrably survive ≥50 minutes of idle: in a controlled two-session
-  probe, a 17,753-token block last touched at T+0 and unused for exactly 50 minutes
-  was read straight back from cache — impossible on the 5-minute tier.
-- The same probe surfaced a subtler failure mode: a headless `--resume` regenerates
+- The TTL boundary itself, measured in a clean-room two-arm run (isolated headless
+  sessions, no MCP servers, frozen environment): after **50 minutes** of total
+  silence, a probe read its full 71,312-token prefix from cache and wrote only 56
+  tokens; after **70 minutes**, an identical session found its cache gone and
+  re-wrote all 45,033 tokens of its content. Warm at 50, cold at 70 — the 1-hour
+  TTL is real, and the keep-warm ping interval (~50 minutes) sits safely inside it.
+- The cold arm also demonstrated *why* pinging works: **reads refresh the TTL**.
+  Its probe still found the shared system block warm, because the other arm had
+  read that block 20 minutes earlier. A keep-warm ping is exactly that refresh,
+  applied to your whole prefix.
+- An earlier, deliberately-dirty run of the same experiment surfaced a subtler
+  failure mode: a headless `--resume` regenerates
   the whole system prompt, so git-status drift, MCP server availability, or an edited
   CLAUDE.md between turns silently diverges the prefix — and everything past the
   divergence re-caches at full price. **Prefix stability matters as much as TTL**:
