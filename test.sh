@@ -51,6 +51,25 @@ else
   echo "FAIL session-isolation: t2's render reset t1's gap: $out"; fail=$((fail + 1))
 fi
 
+# warmline-audit: synthetic transcript with one of each verdict, a duplicate
+# requestId (one API request, two entries) and a sidechain turn to exclude.
+AUDIT_T="$WARMLINE_STATE_DIR/audit-test.jsonl"
+cat > "$AUDIT_T" <<'EOF'
+{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"r1","message":{"usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":30000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T00:02:00Z","requestId":"r2","message":{"usage":{"cache_read_input_tokens":30000,"cache_creation_input_tokens":500,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T00:02:30Z","requestId":"r2","message":{"usage":{"cache_read_input_tokens":30000,"cache_creation_input_tokens":500,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T00:03:00Z","requestId":"r3","isSidechain":true,"message":{"usage":{"cache_read_input_tokens":9,"cache_creation_input_tokens":9,"input_tokens":9}}}
+{"type":"assistant","timestamp":"2026-01-01T01:22:00Z","requestId":"r4","message":{"usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":31000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T01:24:00Z","requestId":"r5","message":{"usage":{"cache_read_input_tokens":10000,"cache_creation_input_tokens":20000,"input_tokens":5}}}
+EOF
+out=$(./warmline-audit "$AUDIT_T")
+if [[ "$out" == *"4 API turns"* && "$out" == *"HOT 1"* && "$out" == *"PARTIAL 1"* \
+   && "$out" == *"COLD(rebuilt) 1"* && "$out" == *"COLD(ttl) 1"* ]]; then
+  echo "ok   audit: ${out##*$'\n'}"; pass=$((pass + 1))
+else
+  echo "FAIL audit: unexpected output:"; echo "$out"; fail=$((fail + 1))
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

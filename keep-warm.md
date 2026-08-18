@@ -1,5 +1,12 @@
 ## Keep the prompt cache warm during long background waits
 
-When launching background work expected to run longer than ~45 minutes (CI pipelines, long builds, long-running background agents) while conversation context is substantial (above roughly 30% used), schedule a wakeup for ~50 minutes out (ScheduleWakeup) before going quiet. On each wake: if the background work is still running, schedule another wakeup ~50 minutes out and end the turn without doing anything else; if the work has finished, continue normally — the results then land against a hot prompt cache. Never let wakeups continue once the wait is over, and skip this entirely when context is small: a cold read of a small context is cheap.
+When launching background work expected to run longer than ~45 minutes (CI pipelines, long builds, long-running remote jobs) while conversation context is substantial (above roughly 30% used), schedule a wakeup for ~50 minutes out before going quiet — via ScheduleWakeup if available, otherwise a recurring scheduled prompt (e.g. `/loop 50m <no-op ping>`). On each wake: if the work is still running, reschedule ~50 minutes out and end the turn without doing anything else; if it has finished, continue normally — the results then land against a hot prompt cache. Never let wakeups continue once the wait is over; delete the schedule the moment work resumes.
 
-Why: the provider prompt cache expires after a TTL (~1 hour of inactivity on subscription plans). A wakeup refreshes the TTL for the price of one cache read (~0.1× input), while resuming after expiry pays a full cache re-write (~2× input) across the entire context, plus uncached latency at exactly the moment a wave of results arrives.
+Skip scheduling entirely when:
+
+- **Local background tasks are already in flight.** Their completion notifications wake the session well inside the TTL, keeping the cache warm for free (measured: ~9-minute notification cadence held a 300k context hot for hours at ~400 cache-write tokens per wake). Only schedule when the wait is *externally* quiet — nothing local will fire.
+- **Context is small.** A cold read of a small context is cheap; wakeups aren't worth it.
+
+Why: the provider prompt cache expires after a TTL (~1 hour of inactivity on subscription plans — Claude Code writes the `ephemeral_1h` bucket). A wakeup refreshes the TTL for the price of one cache read (~0.1× input), while resuming after expiry pays a full cache re-write (~2× input) across the entire context, plus uncached latency at exactly the moment a wave of results arrives.
+
+Known limits, so don't over-promise warmth: wakeups cannot fire while the host machine sleeps (a resume after host sleep should be treated as cold; on macOS `caffeinate -is` keeps a planned wait awake), and `/compact` or any other prefix rewrite invalidates the cache regardless of timing — don't compact mid-wait if the plan is to stay warm.
