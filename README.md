@@ -1,7 +1,7 @@
 # claude-warmline
 
 [![tests](https://github.com/Miguel-Barroso/claude-warmline/actions/workflows/test.yml/badge.svg)](https://github.com/Miguel-Barroso/claude-warmline/actions/workflows/test.yml)
-[![release](https://img.shields.io/github/v/release/Miguel-Barroso/claude-warmline)](https://github.com/Miguel-Barroso/claude-warmline/releases)
+[![version](https://img.shields.io/github/v/tag/Miguel-Barroso/claude-warmline?label=version)](https://github.com/Miguel-Barroso/claude-warmline/tags)
 [![license](https://img.shields.io/github/license/Miguel-Barroso/claude-warmline)](LICENSE)
 
 **Know when your Claude Code session is about to wake up slow and expensive — and prevent it.**
