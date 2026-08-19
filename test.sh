@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 export WARMLINE_STATE_DIR="$(mktemp -d)"
+export WARMLINE_NO_COLOR=1
 trap 'rm -rf "$WARMLINE_STATE_DIR"' EXIT
 
 pass=0 fail=0
@@ -72,6 +73,27 @@ else
   echo "FAIL fresh-turn: expected HOT+gap then HOT+no-gap: $out / $out2"; fail=$((fail + 1))
 fi
 
+# Expiry countdown: still HOT but the gap is 50m of a 60m TTL.
+python3 - "$WARMLINE_STATE_DIR/t1.stamp" <<'PY'
+import os, sys, time
+t = time.time() - 50 * 60
+os.utime(sys.argv[1], (t, t))
+PY
+out=$(printf '%s' "$HOT2" | ./statusline.py)
+if [[ "$out" == *"cache HOT (cold in 10m)"* && "$out" == *"gap 50m"* ]]; then
+  echo "ok   countdown: $out"; pass=$((pass + 1))
+else
+  echo "FAIL countdown: expected 'cache HOT (cold in 10m)': $out"; fail=$((fail + 1))
+fi
+
+# Colors on by default: a fresh session's HOT should carry the green code.
+out=$(printf '%s' "${HOT/t1/t4}" | env -u WARMLINE_NO_COLOR ./statusline.py)
+if [[ "$out" == *$'\033[32mcache HOT\033[0m'* ]]; then
+  echo "ok   color: green HOT emitted"; pass=$((pass + 1))
+else
+  echo "FAIL color: no green ANSI code in: ${out@Q}"; fail=$((fail + 1))
+fi
+
 # warmline-audit: synthetic transcript with one of each verdict, a duplicate
 # requestId (one API request, two entries) and a sidechain turn to exclude.
 AUDIT_T="$WARMLINE_STATE_DIR/audit-test.jsonl"
@@ -89,6 +111,14 @@ if [[ "$out" == *"4 API turns"* && "$out" == *"HOT 1"* && "$out" == *"PARTIAL 1"
   echo "ok   audit: ${out##*$'\n'}"; pass=$((pass + 1))
 else
   echo "FAIL audit: unexpected output:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# --price: 61,000 cold tokens at $10/MTok base input -> 61000*1.9*10/1e6
+out=$(./warmline-audit --price 10 "$AUDIT_T" | tail -1)
+if [[ "$out" == *'cost ~$1.16 more'* ]]; then
+  echo "ok   audit-price: $out"; pass=$((pass + 1))
+else
+  echo "FAIL audit-price: expected '~\$1.16' in: $out"; fail=$((fail + 1))
 fi
 
 echo

@@ -14,6 +14,8 @@ Usage:
     warmline-audit                    # latest session of the current project
     warmline-audit TRANSCRIPT.jsonl   # a specific session
     warmline-audit --ttl 5 --json     # short-TTL setup, machine-readable
+    warmline-audit --price 3          # estimate cold-cache cost in dollars,
+                                      # given the model's base input $/MTok
 
 Verdicts (authoritative here, unlike the statusline's one-turn lag):
   HOT            the turn read its prefix from the cache
@@ -108,6 +110,11 @@ def main():
         global TTL_MIN
         TTL_MIN = float(args[i + 1])
         del args[i:i + 2]
+    price = None
+    if "--price" in args:
+        i = args.index("--price")
+        price = float(args[i + 1])
+        del args[i:i + 2]
     path = find_transcript(args[0] if args else None)
 
     rows, prev = [], None
@@ -129,6 +136,11 @@ def main():
     summary = {"transcript": path, "ttl_min": TTL_MIN, "turns": len(rows),
                "verdicts": counts, "tokens_recached_cold": cold_tokens,
                "tokens_read_from_cache": read_tokens}
+    if price is not None:
+        # a 1h-TTL cache write bills ~2x base input; a warm read ~0.1x --
+        # the avoidable premium of going cold is the 1.9x difference
+        summary["cold_extra_usd"] = round(cold_tokens * 1.9 * price / 1e6, 4)
+        summary["cache_read_usd"] = round(read_tokens * 0.1 * price / 1e6, 4)
 
     if as_json:
         print(json.dumps({"summary": summary, "turns": rows}, indent=1))
@@ -147,6 +159,10 @@ def main():
     print("tokens re-cached while cold: {:,}   read from cache: {:,}".format(
         cold_tokens, read_tokens))
     print("(a cold re-cache bills ~2x base input; a warm wake reads at ~0.1x)")
+    if price is not None:
+        print("at $%g/MTok base input: the cold re-caches cost ~$%.2f more than "
+              "warm reads of the same tokens would have; cache reads billed ~$%.2f"
+              % (price, summary["cold_extra_usd"], summary["cache_read_usd"]))
 
 
 if __name__ == "__main__":

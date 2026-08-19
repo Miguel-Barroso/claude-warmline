@@ -1,5 +1,9 @@
 # claude-warmline
 
+[![tests](https://github.com/Miguel-Barroso/claude-warmline/actions/workflows/test.yml/badge.svg)](https://github.com/Miguel-Barroso/claude-warmline/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/Miguel-Barroso/claude-warmline)](https://github.com/Miguel-Barroso/claude-warmline/releases)
+[![license](https://img.shields.io/github/license/Miguel-Barroso/claude-warmline)](LICENSE)
+
 **Know when your Claude Code session is about to wake up slow and expensive — and prevent it.**
 
 Claude Code re-sends your entire conversation with every message. A server-side
@@ -39,11 +43,15 @@ Claude Code doesn't surface any of this. warmline makes it visible.
 | Field | Meaning |
 |---|---|
 | `ctx 43% (168k)` | context-window utilization and input tokens in the conversation |
-| `cache HOT` | the previous request read from the prompt cache |
-| `cache COLD(rebuilt)` | the previous request found the prefix cold and re-cached it |
-| `cache COLD(ttl?)` | *inferred*: the session has been quiet longer than the TTL, so the cache has expired regardless of the (stale) usage fields |
+| `cache HOT` | the previous request read from the prompt cache (green) |
+| `cache HOT (cold in 9m)` | still warm, but the idle gap is within 15 minutes of the TTL — act now or pay the rebuild (yellow) |
+| `cache COLD(rebuilt)` | the previous request found the prefix cold and re-cached it (yellow) |
+| `cache COLD(ttl?)` | *inferred*: the session has been quiet longer than the TTL, so the cache has expired regardless of the (stale) usage fields (red) |
 | `cache ?` | usage fields unavailable |
 | `gap 12m` | minutes since this session's last API turn (shown from 5m; idle repaints don't reset it) |
+
+Colors are on by default (Claude Code renders ANSI in the statusline); set
+`NO_COLOR` or `WARMLINE_NO_COLOR` to disable them.
 
 Honest limitations: Claude Code hands the statusline the usage numbers of the
 *previous* request, so `HOT`/`COLD(rebuilt)` lag one turn, and `COLD(ttl?)` is a
@@ -186,6 +194,8 @@ the block is inert or the agent falls back to a scheduled recurring prompt —
 ./warmline-audit                      # latest session of the current project
 ./warmline-audit path/to/session.jsonl
 ./warmline-audit --ttl 5 --json       # short-TTL setups, machine-readable
+./warmline-audit --price 3            # add a dollar estimate, given your
+                                      # model's base input price per MTok
 ```
 
 Prints one line per API turn — timestamp, idle gap, cache read/write tokens, verdict —
@@ -211,6 +221,7 @@ overnight gap really cost.
 |---|---|---|
 | `WARMLINE_TTL_MIN` | `60` | prompt-cache TTL in minutes (set `5` for short-TTL setups) |
 | `WARMLINE_STATE_DIR` | `~/.claude/warmline-state` | stamp/state directory |
+| `WARMLINE_NO_COLOR` | unset | if set (or `NO_COLOR`), plain output without ANSI colors |
 | `WARMLINE_DEBUG` | unset | if set, keeps the last raw statusline payload for inspection |
 
 Set these in the environment Claude Code starts from, or in the `env` block of
@@ -225,8 +236,9 @@ Set these in the environment Claude Code starts from, or in the `env` block of
 
 Replays representative statusline payloads (hot, cold-rebuild, TTL-expired, sparse,
 garbage, concurrent-session isolation, idle repaints not resetting the clock, a
-fresh turn overriding the TTL inference) against the script, and a synthetic
-transcript against `warmline-audit`.
+fresh turn overriding the TTL inference, the expiry countdown, ANSI colors)
+against the script, and a synthetic transcript against `warmline-audit`
+including the `--price` estimate. The same suite runs in CI on every push.
 
 ## License
 

@@ -5,14 +5,17 @@ Renders one line:
 
     Fable 5 | my-project | ctx 43% (168k) | cache HOT | gap 12m
 
-Cache verdict:
-  HOT            the previous request read from the prompt cache
-  COLD(rebuilt)  the previous request wrote the cache without reading it
-                 (the prefix was cold and has just been re-cached)
-  COLD(ttl?)     inferred: this session has been quiet for longer than the
-                 cache TTL, so the prefix has expired regardless of what
-                 the stale usage fields say
-  ?              usage fields unavailable
+Cache verdict (colored green/yellow/red unless NO_COLOR or
+WARMLINE_NO_COLOR is set):
+  HOT             the previous request read from the prompt cache
+  HOT (cold in Nm)  still warm, but the idle gap is within 15 minutes of
+                  the TTL -- ping or come back now, or pay the rebuild
+  COLD(rebuilt)   the previous request wrote the cache without reading it
+                  (the prefix was cold and has just been re-cached)
+  COLD(ttl?)      inferred: this session has been quiet for longer than the
+                  cache TTL, so the prefix has expired regardless of what
+                  the stale usage fields say
+  ?               usage fields unavailable
 
 The usage numbers Claude Code passes to the statusline describe the
 PREVIOUS request, so HOT/COLD(rebuilt) are authoritative but lag one
@@ -28,6 +31,7 @@ Configuration (environment variables):
   WARMLINE_TTL_MIN    prompt-cache TTL in minutes (default 60; set 5 if
                       your setup uses the short TTL)
   WARMLINE_STATE_DIR  stamp-file directory (default ~/.claude/warmline-state)
+  WARMLINE_NO_COLOR   if set (or NO_COLOR), plain output without ANSI colors
   WARMLINE_DEBUG      if set, keep the last raw statusline payload in
                       $WARMLINE_STATE_DIR/last-payload.json for inspection
 """
@@ -41,6 +45,16 @@ STATE_DIR = os.path.expanduser(
     os.environ.get("WARMLINE_STATE_DIR", "~/.claude/warmline-state")
 )
 STAMP_MAX_AGE_DAYS = 7
+EXPIRY_WARN_MIN = 15
+
+GREEN, YELLOW, RED, DIM, RESET = (
+    "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
+)
+COLOR = not (os.environ.get("NO_COLOR") or os.environ.get("WARMLINE_NO_COLOR"))
+
+
+def paint(text, color):
+    return color + text + RESET if COLOR else text
 
 
 def session_state(session_id, snapshot, raw):
@@ -112,14 +126,18 @@ def main():
     ws = d.get("workspace") or {}
     cwd = os.path.basename(ws.get("current_dir") or d.get("cwd") or "") or "?"
 
-    if not fresh and gap_min is not None and gap_min > TTL_MIN:
-        cache = "cache COLD(ttl?)"
+    remaining = None if gap_min is None else TTL_MIN - gap_min
+    if not fresh and remaining is not None and remaining <= 0:
+        cache = paint("cache COLD(ttl?)", RED)
     elif cache_read > 0:
-        cache = "cache HOT"
+        if not fresh and remaining is not None and remaining <= EXPIRY_WARN_MIN:
+            cache = paint("cache HOT (cold in %dm)" % max(1, round(remaining)), YELLOW)
+        else:
+            cache = paint("cache HOT", GREEN)
     elif cache_creation > 0:
-        cache = "cache COLD(rebuilt)"
+        cache = paint("cache COLD(rebuilt)", YELLOW)
     else:
-        cache = "cache ?"
+        cache = paint("cache ?", DIM)
 
     parts = [model, cwd]
 
