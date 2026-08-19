@@ -1,21 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 240" font-family="'SF Mono', Menlo, 'Cascadia Code', Consolas, monospace">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 240" font-family="'SF Mono', Menlo, 'Cascadia Code', Consolas, monospace">
   <!-- terminal window -->
-  <rect x="1" y="1" width="778" height="238" rx="10" fill="#0d1117" stroke="#30363d"/>
+  <rect x="1" y="1" width="818" height="238" rx="10" fill="#0d1117" stroke="#30363d"/>
   <circle cx="26" cy="19" r="6" fill="#ff5f57"/>
   <circle cx="46" cy="19" r="6" fill="#febc2e"/>
   <circle cx="66" cy="19" r="6" fill="#28c840"/>
-  <text x="390" y="23" text-anchor="middle" font-size="12" fill="#8b949e">claude — ~/Development/claude-warmline</text>
-  <line x1="1" y1="37" x2="779" y2="37" stroke="#21262d"/>
+  <text x="410" y="23" text-anchor="middle" font-size="12" fill="#8b949e">claude — ~/Development/claude-warmline</text>
+  <line x1="1" y1="37" x2="819" y2="37" stroke="#21262d"/>
 
   <!-- hot -->
-  <text x="24" y="74" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 27% (53k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950" font-weight="bold">cache HOT</tspan></text>
+  <text x="24" y="74" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 27% (53k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950" font-weight="bold">cache HOT</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950">keep-warm on</tspan></text>
   <text x="24" y="93" font-size="11" font-style="italic" fill="#8b949e">warm — the previous request read its whole prefix from the cache</text>
 
   <!-- cold, rebuilt -->
-  <text x="24" y="128" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#d29922" font-weight="bold">cache COLD(rebuilt)</tspan><tspan fill="#6e7681"> | </tspan>gap 9m</text>
+  <text x="24" y="128" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#d29922" font-weight="bold">cache COLD(rebuilt)</tspan><tspan fill="#6e7681"> | </tspan>gap 9m<tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950">keep-warm on</tspan></text>
   <text x="24" y="147" font-size="11" font-style="italic" fill="#8b949e">the prefix was invalidated (e.g. /compact) and has just been re-cached at ~2&#215; input price</text>
 
   <!-- cold, ttl -->
-  <text x="24" y="182" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#f85149" font-weight="bold">cache COLD(ttl?)</tspan><tspan fill="#6e7681"> | </tspan>gap 74m</text>
+  <text x="24" y="182" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#f85149" font-weight="bold">cache COLD(ttl?)</tspan><tspan fill="#6e7681"> | </tspan>gap 74m<tspan fill="#6e7681"> | </tspan><tspan fill="#6e7681">keep-warm off</tspan></text>
   <text x="24" y="201" font-size="11" font-style="italic" fill="#8b949e">quiet for longer than the TTL — the cache has expired; cheapest moment to /compact</text>
 </svg>

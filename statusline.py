@@ -3,7 +3,7 @@
 
 Renders one line:
 
-    Fable 5 | my-project | ctx 43% (168k) | cache HOT | gap 12m
+    Fable 5 | my-project | ctx 43% (168k) | cache HOT | gap 12m | keep-warm on
 
 Cache verdict (colored green/yellow/red unless NO_COLOR or
 WARMLINE_NO_COLOR is set):
@@ -21,6 +21,20 @@ The usage numbers Claude Code passes to the statusline describe the
 PREVIOUS request, so HOT/COLD(rebuilt) are authoritative but lag one
 turn; COLD(ttl?) is a time inference and is marked with a "?".
 
+The keep-warm field reports whether the optional keep-warm policy is
+installed, read from the real CLAUDE.md on every render (never a state
+file), matching `warmline keep-warm status`:
+
+  keep-warm on    the marker-delimited policy block is in CLAUDE.md (green)
+  keep-warm off   it is not (dim)
+  keep-warm ?     one marker without its pair -- a malformed block that the
+                  agent may read as truncated policy (yellow); fix with
+                  `warmline keep-warm off && warmline keep-warm on`
+
+"on" means the policy is installed, not that a ping is scheduled: it is an
+instruction the agent follows during long waits, and `warmline-audit` is
+how you check whether it actually worked.
+
 The gap is measured per session via a stamp file that stores the last-seen
 usage snapshot; its mtime moves only when the snapshot changes -- i.e. when
 an API turn actually happened -- so repaints of an idle session don't reset
@@ -32,8 +46,11 @@ Configuration (environment variables):
                       your setup uses the short TTL)
   WARMLINE_STATE_DIR  stamp-file directory (default ~/.claude/warmline-state)
   WARMLINE_NO_COLOR   if set (or NO_COLOR), plain output without ANSI colors
+  WARMLINE_NO_KEEPWARM  if set, omit the keep-warm field
   WARMLINE_DEBUG      if set, keep the last raw statusline payload in
                       $WARMLINE_STATE_DIR/last-payload.json for inspection
+  CLAUDE_CONFIG_DIR   Claude Code's config directory (default ~/.claude);
+                      its CLAUDE.md is where the keep-warm block lives
 """
 import json
 import os
@@ -47,6 +64,11 @@ STATE_DIR = os.path.expanduser(
 STAMP_MAX_AGE_DAYS = 7
 EXPIRY_WARN_MIN = 15
 
+CLAUDE_DIR = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
+KW_BEGIN = "<!-- >>> claude-warmline keep-warm >>> -->"
+KW_END = "<!-- <<< claude-warmline keep-warm <<< -->"
+SHOW_KEEPWARM = not os.environ.get("WARMLINE_NO_KEEPWARM")
+
 GREEN, YELLOW, RED, DIM, RESET = (
     "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 )
@@ -55,6 +77,24 @@ COLOR = not (os.environ.get("NO_COLOR") or os.environ.get("WARMLINE_NO_COLOR"))
 
 def paint(text, color):
     return color + text + RESET if COLOR else text
+
+
+def keep_warm_state():
+    """'on' | 'off' | '?', from the same markers `warmline keep-warm` writes.
+
+    Read from CLAUDE.md itself on every render, so hand-editing the file is
+    reflected immediately; one marker without its pair is a malformed block
+    and reported as unknown rather than as a confident on/off.
+    """
+    try:
+        with open(os.path.join(CLAUDE_DIR, "CLAUDE.md")) as f:
+            text = f.read()
+    except OSError:
+        return "off"
+    begin, end = KW_BEGIN in text, KW_END in text
+    if begin and end:
+        return "on"
+    return "?" if begin or end else "off"
 
 
 def session_state(session_id, snapshot, raw):
@@ -155,6 +195,11 @@ def main():
 
     if gap_min is not None and gap_min >= 5:
         parts.append(f"gap {int(gap_min)}m")
+
+    if SHOW_KEEPWARM:
+        kw = keep_warm_state()
+        parts.append(paint("keep-warm " + kw,
+                           {"on": GREEN, "off": DIM}.get(kw, YELLOW)))
 
     print(" | ".join(parts))
 

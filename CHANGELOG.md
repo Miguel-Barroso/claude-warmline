@@ -4,6 +4,34 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [1.5.0] — 2026-08-19
+
+### Added
+- **Keep-warm state on the statusline.** The line now ends with
+  `keep-warm on` (green), `off` (dim) or `?` (yellow, a malformed
+  half-block) — read from `$CLAUDE_CONFIG_DIR/CLAUDE.md` on every render,
+  the same source of truth `warmline keep-warm status` uses, so hand edits
+  show up immediately. `on` means the policy is installed, not that a ping
+  is scheduled. `WARMLINE_NO_KEEPWARM=1` omits the field.
+- `docs/SURFACES.md`: which front ends each piece of warmline reaches.
+  Short version: the statusline is terminal-only (graphical front ends
+  don't render custom statuslines — anthropics/claude-code#41456), while
+  `warmline-audit` and the keep-warm policy work unchanged in the desktop
+  app and IDE extensions, which share `~/.claude` and write their
+  transcripts to the same place. Verified by grading a desktop Code-tab
+  session's transcript.
+
+### Changed
+- `warmline-audit` honors `CLAUDE_CONFIG_DIR` when locating transcripts,
+  instead of hardcoding `~/.claude/projects` — matching the statusline and
+  the `warmline` CLI.
+- README cut roughly in half and reorganized around what a newcomer needs
+  first; the reference material moved to `docs/` (`STATUSLINE.md`,
+  `AUDIT.md`, `KEEP-WARM.md`, `SURFACES.md`, `INSTALL.md`,
+  `MEASUREMENTS.md`). "Coming back cold: `/compact`, `/clear`, or neither?"
+  stays on the front page in full. Translations regenerated to match.
+- Hero image updated with the keep-warm field.
+
 ## [1.4.0] — 2026-08-19
 
 ### Added

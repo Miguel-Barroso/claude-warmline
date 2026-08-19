@@ -4,6 +4,10 @@ cd "$(dirname "$0")"
 
 export WARMLINE_STATE_DIR="$(mktemp -d)"
 export WARMLINE_NO_COLOR=1
+# an empty config dir, so the keep-warm field of the statusline tests below
+# reads a known-OFF state instead of whoever's real ~/.claude/CLAUDE.md
+export CLAUDE_CONFIG_DIR="$WARMLINE_STATE_DIR/cfg"
+mkdir -p "$CLAUDE_CONFIG_DIR"
 trap 'rm -rf "$WARMLINE_STATE_DIR"' EXIT
 
 pass=0 fail=0
@@ -93,6 +97,33 @@ if [[ "$out" == *$'\033[32mcache HOT\033[0m'* ]]; then
 else
   echo "FAIL color: no green ANSI code in: ${out@Q}"; fail=$((fail + 1))
 fi
+
+# Keep-warm indicator: the same three states the warmline CLI reports, read
+# out of CLAUDE.md on every render (no state file), plus the opt-out.
+KWMD="$CLAUDE_CONFIG_DIR/CLAUDE.md"
+check kw-off "keep-warm off" "${HOT/t1/k1}"     # no CLAUDE.md at all
+printf 'user text\n' > "$KWMD"
+check kw-off2 "keep-warm off" "${HOT/t1/k2}"    # a CLAUDE.md without the block
+printf '%s\npolicy body\n%s\n' \
+  '<!-- >>> claude-warmline keep-warm >>> -->' \
+  '<!-- <<< claude-warmline keep-warm <<< -->' >> "$KWMD"
+check kw-on  "keep-warm on"  "${HOT/t1/k3}"
+out=$(printf '%s' "${HOT/t1/k4}" | env -u WARMLINE_NO_COLOR ./statusline.py)
+if [[ "$out" == *$'\033[32mkeep-warm on\033[0m'* ]]; then
+  echo "ok   kw-color: green keep-warm on emitted"; pass=$((pass + 1))
+else
+  echo "FAIL kw-color: no green keep-warm in: ${out@Q}"; fail=$((fail + 1))
+fi
+printf 'user text\n%s\npolicy body\n' \
+  '<!-- >>> claude-warmline keep-warm >>> -->' > "$KWMD"   # end marker lost
+check kw-malformed "keep-warm ?" "${HOT/t1/k5}"
+out=$(printf '%s' "${HOT/t1/k6}" | WARMLINE_NO_KEEPWARM=1 ./statusline.py)
+if [[ "$out" != *"keep-warm"* && "$out" == *"cache HOT"* ]]; then
+  echo "ok   kw-optout: field omitted"; pass=$((pass + 1))
+else
+  echo "FAIL kw-optout: $out"; fail=$((fail + 1))
+fi
+rm -f "$KWMD"
 
 # warmline-audit: synthetic transcript with one of each verdict, a duplicate
 # requestId (one API request, two entries) and a sidechain turn to exclude.
@@ -545,6 +576,21 @@ if [[ "$out" == 'estimated avoidable premium ~$39.90  (top 5 sessions: $38.00, o
   echo "ok   concentration: top-5 split correct"; pass=$((pass + 1))
 else
   echo "FAIL concentration: $out"; fail=$((fail + 1))
+fi
+
+# With no path argument, --all discovers transcripts under the configured
+# Claude Code config dir (CLAUDE_CONFIG_DIR), not a hardcoded ~/.claude.
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/proj-cfg"
+cat > "$CLAUDE_CONFIG_DIR/projects/proj-cfg/sess.jsonl" <<'EOF'
+{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/cfg","message":{"id":"g1","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":1000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T00:05:00Z","cwd":"/tmp/cfg","message":{"id":"g2","usage":{"cache_read_input_tokens":1000,"cache_creation_input_tokens":10,"input_tokens":5}}}
+EOF
+out=$(./warmline-audit --all)   # local time varies, so match the row loosely
+if [[ "$out" == *"1 sessions under $CLAUDE_CONFIG_DIR/projects"* ]] \
+   && echo "$out" | grep -qE '^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}  cfg +2 '; then
+  echo "ok   audit-config-dir: --all honors CLAUDE_CONFIG_DIR"; pass=$((pass + 1))
+else
+  echo "FAIL audit-config-dir:"; echo "$out" | head -3; fail=$((fail + 1))
 fi
 
 echo

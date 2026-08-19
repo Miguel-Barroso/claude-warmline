@@ -41,6 +41,10 @@ transcript supports one:
 Subagent (sidechain) turns are excluded: they run on separate prefixes,
 and their transcripts live in separate nested files that --all skips.
 
+Transcripts are read from $CLAUDE_CONFIG_DIR/projects (default
+~/.claude/projects) -- where every local front end of the Claude Code
+engine records them, terminal CLI and desktop app alike.
+
 Reports are colorized and decorated with small bar charts when stdout is
 a terminal; piped/CI output stays plain, and --json never decorates.
 NO_COLOR or WARMLINE_NO_COLOR force plain; WARMLINE_FORCE_COLOR forces
@@ -54,6 +58,11 @@ import re
 import sys
 
 TTL_MIN = float(os.environ.get("WARMLINE_TTL_MIN", "60"))
+# every front end that runs the Claude Code engine locally -- terminal CLI,
+# desktop app, IDE extension -- records its transcripts here
+PROJECTS_DIR = os.path.join(
+    os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"),
+    "projects")
 # a 1h-TTL cache write bills ~2x base input; a warm read ~0.1x -- the
 # avoidable premium of going cold is the 1.9x difference
 PREMIUM_X = 1.9
@@ -261,7 +270,7 @@ def find_transcript(path):
         return path
     if not path:
         slug = re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
-        path = os.path.expanduser("~/.claude/projects/" + slug)
+        path = os.path.join(PROJECTS_DIR, slug)
     if os.path.isdir(path):
         files = glob.glob(os.path.join(path, "*.jsonl"))
         if files:
@@ -485,7 +494,7 @@ def main():
         TTL_MIN = ttl
 
     if do_all:
-        root = args[0] if args else os.path.expanduser("~/.claude/projects")
+        root = args[0] if args else PROJECTS_DIR
         print_all(root, price, as_json)
     else:
         print_single(find_transcript(args[0] if args else None), price, as_json)
