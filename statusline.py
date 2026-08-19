@@ -18,8 +18,11 @@ The usage numbers Claude Code passes to the statusline describe the
 PREVIOUS request, so HOT/COLD(rebuilt) are authoritative but lag one
 turn; COLD(ttl?) is a time inference and is marked with a "?".
 
-The gap is measured per session via a stamp file, so several concurrent
-Claude Code sessions on one machine don't reset each other's idle clock.
+The gap is measured per session via a stamp file that stores the last-seen
+usage snapshot; its mtime moves only when the snapshot changes -- i.e. when
+an API turn actually happened -- so repaints of an idle session don't reset
+the clock, and COLD(ttl?) appears (and persists) on the next repaint after
+the TTL passes. Concurrent sessions don't reset each other's clock.
 
 Configuration (environment variables):
   WARMLINE_TTL_MIN    prompt-cache TTL in minutes (default 60; set 5 if
@@ -40,18 +43,29 @@ STATE_DIR = os.path.expanduser(
 STAMP_MAX_AGE_DAYS = 7
 
 
-def session_gap_minutes(session_id, raw):
-    """Minutes since this session's previous render; None on first render."""
-    gap = None
+def session_state(session_id, snapshot, raw):
+    """(minutes since this session's last API turn or None, fresh_turn).
+
+    The stamp is rewritten -- resetting its mtime -- only when the usage
+    snapshot differs from the stored one. fresh_turn is True when a change
+    was seen against a previous snapshot: the usage fields are then current,
+    not stale, and take precedence over the TTL inference.
+    """
+    gap, fresh = None, False
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         stamp = os.path.join(STATE_DIR, session_id + ".stamp")
+        prev = None
         try:
             gap = (time.time() - os.path.getmtime(stamp)) / 60
+            with open(stamp) as f:
+                prev = f.read()
         except OSError:
             pass
-        with open(stamp, "w"):
-            pass  # the mtime is the data
+        if prev != snapshot:
+            fresh = prev is not None
+            with open(stamp, "w") as f:
+                f.write(snapshot)
         if os.environ.get("WARMLINE_DEBUG"):
             with open(os.path.join(STATE_DIR, "last-payload.json"), "w") as f:
                 f.write(raw)
@@ -65,7 +79,7 @@ def session_gap_minutes(session_id, raw):
                 pass
     except OSError:
         pass
-    return gap
+    return gap, fresh
 
 
 def main():
@@ -76,9 +90,18 @@ def main():
         print("warmline: bad input")
         return
 
+    cw = d.get("context_window") or {}
+    usage = cw.get("current_usage") or {}
+    cache_read = usage.get("cache_read_input_tokens") or 0
+    cache_creation = usage.get("cache_creation_input_tokens") or 0
+    snapshot = json.dumps(
+        [cache_read, cache_creation, cw.get("total_input_tokens"),
+         usage.get("input_tokens")]
+    )
+
     session = str(d.get("session_id") or "default")
     session = "".join(c for c in session if c.isalnum() or c in "-_") or "default"
-    gap_min = session_gap_minutes(session, raw)
+    gap_min, fresh = session_state(session, snapshot, raw)
 
     if gap_min is None:
         tp = d.get("transcript_path")
@@ -89,12 +112,7 @@ def main():
     ws = d.get("workspace") or {}
     cwd = os.path.basename(ws.get("current_dir") or d.get("cwd") or "") or "?"
 
-    cw = d.get("context_window") or {}
-    usage = cw.get("current_usage") or {}
-    cache_read = usage.get("cache_read_input_tokens") or 0
-    cache_creation = usage.get("cache_creation_input_tokens") or 0
-
-    if gap_min is not None and gap_min > TTL_MIN:
+    if not fresh and gap_min is not None and gap_min > TTL_MIN:
         cache = "cache COLD(ttl?)"
     elif cache_read > 0:
         cache = "cache HOT"

@@ -43,17 +43,48 @@ Claude Code doesn't surface any of this. warmline makes it visible.
 | `cache COLD(rebuilt)` | the previous request found the prefix cold and re-cached it |
 | `cache COLD(ttl?)` | *inferred*: the session has been quiet longer than the TTL, so the cache has expired regardless of the (stale) usage fields |
 | `cache ?` | usage fields unavailable |
-| `gap 12m` | minutes since this session's previous statusline render (shown from 5m) |
+| `gap 12m` | minutes since this session's last API turn (shown from 5m; idle repaints don't reset it) |
 
-Honest limitation: Claude Code hands the statusline the usage numbers of the
+Honest limitations: Claude Code hands the statusline the usage numbers of the
 *previous* request, so `HOT`/`COLD(rebuilt)` lag one turn, and `COLD(ttl?)` is a
-time-based inference — hence the `?`. Gaps are tracked per session (stamp files in
-`~/.claude/warmline-state/`), so concurrent Claude Code sessions on one machine don't
-reset each other's idle clock.
+time-based inference — hence the `?`. The line is also pull-based: the script only
+runs when Claude Code repaints it, so while your machine sleeps the last rendered
+line — often a by-then-false `HOT` — stays frozen on screen. What warmline
+guarantees is that the idle clock survives repaints: only a real API turn resets
+it, so the first repaint after you return already reads `COLD(ttl?)` — before
+you've spent anything — and it stays that way until a request actually lands.
+Gaps are tracked per session (stamp files in `~/.claude/warmline-state/`), so
+concurrent Claude Code sessions on one machine don't reset each other's idle clock.
 
-The practical use: when you come back to a session showing a big `ctx` and
-`COLD(ttl?)`, the cache is gone anyway — that's the cheapest possible moment to run
-`/compact <what to keep>` before feeding it new work.
+The practical use: `COLD(ttl?)` on a big `ctx` marks the cheapest possible moment
+to change course — which way to jump is the next section.
+
+## Coming back cold: `/compact`, `/clear`, or neither?
+
+A `COLD(ttl?)` on a big context is a fork in the road. The cache is gone; whatever
+you do next, that context gets processed once more at the expensive uncached rate.
+The only question is what that one unavoidable expensive pass buys you:
+
+- **You still need the conversation history → `/compact`.** Compaction must read
+  the whole conversation once to summarize it. On a warm cache that read would be
+  cheap — but it would also destroy a cache you already paid 2× to build, which is
+  why compacting while `HOT` is the worst-timed move (unless you're out of context
+  window and have no choice). On a cold cache the expensive pass was going to
+  happen on your very next message anyway — compaction just redirects it into
+  producing a small summary, so from then on you cache and carry a few thousand
+  tokens instead of 100k+. That's why `/compact` has the most benefit exactly when
+  the cache is already dead.
+- **Your state is written down outside the conversation → `/clear`.** If what you
+  need to continue lives in memory files, a plan document, or the code and git
+  history themselves, `/clear` skips even the summarization pass — nothing ever
+  pays to read the old context again. And a fresh session does *not* slurp
+  everything back in: its prefix is just the system prompt, your CLAUDE.md, and
+  the one-line memory index — individual memory files and project files are only
+  read when they become relevant. That targeted re-reading costs fresh input
+  tokens, but it's almost always far less than one summarization pass over a
+  100k+ conversation.
+- **Small context → do nothing.** Going cold on 20k tokens is cheap to rebuild.
+  Both the gauge and the keep-warm policy exist for the 100k+ case.
 
 ## Install
 
@@ -193,8 +224,9 @@ Set these in the environment Claude Code starts from, or in the `env` block of
 ```
 
 Replays representative statusline payloads (hot, cold-rebuild, TTL-expired, sparse,
-garbage, concurrent-session isolation) against the script, and a synthetic transcript
-against `warmline-audit`.
+garbage, concurrent-session isolation, idle repaints not resetting the clock, a
+fresh turn overriding the TTL inference) against the script, and a synthetic
+transcript against `warmline-audit`.
 
 ## License
 

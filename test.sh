@@ -51,6 +51,27 @@ else
   echo "FAIL session-isolation: t2's render reset t1's gap: $out"; fail=$((fail + 1))
 fi
 
+# Idle repaints must not reset the clock: rendering t1 again with the same
+# (stale) usage keeps the 75m gap and the COLD(ttl?) verdict on screen.
+out=$(printf '%s' "$HOT" | ./statusline.py)
+if [[ "$out" == *"cache COLD(ttl?)"* && "$out" == *"gap 75m"* ]]; then
+  echo "ok   stale-repaint: $out"; pass=$((pass + 1))
+else
+  echo "FAIL stale-repaint: repaint reset the idle clock: $out"; fail=$((fail + 1))
+fi
+
+# A real API turn (changed usage) is authoritative over the TTL inference,
+# and resets the clock so the next repaint shows no gap.
+HOT2=${HOT/165000/166000}
+out=$(printf '%s' "$HOT2" | ./statusline.py)
+out2=$(printf '%s' "$HOT2" | ./statusline.py)
+if [[ "$out" == *"cache HOT"* && "$out" == *"gap 75m"* \
+   && "$out2" == *"cache HOT"* && "$out2" != *"gap"* ]]; then
+  echo "ok   fresh-turn: $out"; pass=$((pass + 1))
+else
+  echo "FAIL fresh-turn: expected HOT+gap then HOT+no-gap: $out / $out2"; fail=$((fail + 1))
+fi
+
 # warmline-audit: synthetic transcript with one of each verdict, a duplicate
 # requestId (one API request, two entries) and a sidechain turn to exclude.
 AUDIT_T="$WARMLINE_STATE_DIR/audit-test.jsonl"
