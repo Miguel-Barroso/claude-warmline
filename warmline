@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# claude-warmline control CLI.
+#
+# The installer (install.sh) installs, updates and uninstalls; this command
+# controls what's installed. `warmline --help` lists the subcommands.
+
+REPO_RAW="https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+DEST="$CLAUDE_DIR/warmline-statusline.py"
+SETTINGS="$CLAUDE_DIR/settings.json"
+CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
+POLICY="$CLAUDE_DIR/warmline-keep-warm.md"
+MARK_BEGIN="<!-- >>> claude-warmline keep-warm >>> -->"
+MARK_END="<!-- <<< claude-warmline keep-warm <<< -->"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+
+usage() {
+  cat <<EOF
+claude-warmline: cache-aware statusline, session auditor, keep-warm policy.
+The installer (install.sh) installs and updates; this command controls.
+
+  warmline status              what is installed and enabled right now
+  warmline keep-warm on        turn the keep-warm policy ON (global)
+  warmline keep-warm off       turn it OFF -- removes only warmline's block
+  warmline keep-warm status    detailed state; exit 0=ON  1=OFF  2=INCONSISTENT
+  warmline audit [args...]     run warmline-audit (grades past sessions)
+  warmline --help              this text
+
+Config dir: $CLAUDE_DIR  (override with CLAUDE_CONFIG_DIR)
+EOF
+}
+
+kw_usage() {
+  cat <<EOF
+warmline keep-warm: the optional prevention half of claude-warmline.
+ON appends a marker-delimited policy block to
+$CLAUDE_MD
+instructing the agent to keep the prompt cache warm through long waits.
+
+  warmline keep-warm on        append the block (idempotent; global)
+  warmline keep-warm off       remove exactly that block, nothing else
+  warmline keep-warm status    ON / OFF / INCONSISTENT; exit 0 / 1 / 2
+
+Policy text comes from $POLICY (installed),
+falling back to keep-warm.md next to this script, then the repository.
+EOF
+}
+
+# on: both markers present. begin-only/end-only: a malformed block (one
+# marker without its pair -- e.g. a hand edit went wrong). off: neither.
+kw_state() {
+  local b=0 e=0
+  if [ -f "$CLAUDE_MD" ]; then
+    if grep -qF "$MARK_BEGIN" "$CLAUDE_MD"; then b=1; fi
+    if grep -qF "$MARK_END" "$CLAUDE_MD"; then e=1; fi
+  fi
+  if [ "$b$e" = 11 ]; then echo on
+  elif [ "$b$e" = 10 ]; then echo begin-only
+  elif [ "$b$e" = 01 ]; then echo end-only
+  else echo off; fi
+}
+
+kw_remove_block() { # both markers known present; user text around it survives
+  MB="$MARK_BEGIN" ME="$MARK_END" python3 - "$CLAUDE_MD" <<'PY'
+import os, sys
+path = sys.argv[1]
+text = open(path).read()
+mb, me = os.environ["MB"], os.environ["ME"]
+head, rest = text.split(mb, 1)
+_, tail = rest.split(me, 1)
+open(path, "w").write(head.rstrip() + "\n" + tail.lstrip("\n"))
+PY
+}
+
+kw_remove_orphan() { # only the marker line itself is provably warmline's
+  MB="$MARK_BEGIN" ME="$MARK_END" python3 - "$CLAUDE_MD" <<'PY'
+import os, sys
+path = sys.argv[1]
+lines = open(path).read().splitlines(True)
+marks = (os.environ["MB"], os.environ["ME"])
+open(path, "w").write("".join(l for l in lines if l.strip() not in marks))
+PY
+}
+
+policy_body() {
+  if [ -f "$POLICY" ]; then
+    cat "$POLICY"
+  elif [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/keep-warm.md" ]; then
+    cat "$SELF_DIR/keep-warm.md"
+  else
+    curl -fsSL "$REPO_RAW/keep-warm.md"
+  fi
+}
+
+kw_on() {
+  case "$(kw_state)" in
+    on) echo "keep-warm already ON"; return 0 ;;
+    begin-only|end-only)
+      echo "warmline: the keep-warm block in $CLAUDE_MD is malformed" >&2
+      echo "(one marker without its pair). Run 'warmline keep-warm off' to" >&2
+      echo "remove warmline's markers, review the file, then 'on' again." >&2
+      return 2 ;;
+  esac
+  local body
+  body="$(policy_body)" || {
+    echo "warmline: no keep-warm policy text found ($POLICY missing," >&2
+    echo "no checkout copy, no network); re-run install.sh first" >&2
+    return 1
+  }
+  mkdir -p "$CLAUDE_DIR"
+  touch "$CLAUDE_MD"
+  printf '\n%s\n%s\n%s\n' "$MARK_BEGIN" "$body" "$MARK_END" >> "$CLAUDE_MD"
+  echo "keep-warm ON (policy appended to $CLAUDE_MD)"
+}
+
+kw_off() {
+  case "$(kw_state)" in
+    on)
+      kw_remove_block
+      echo "keep-warm OFF (block removed from $CLAUDE_MD)" ;;
+    begin-only|end-only)
+      kw_remove_orphan
+      echo "keep-warm OFF (removed an orphaned warmline marker)"
+      echo "warmline: the block was malformed; review $CLAUDE_MD for leftover policy text" >&2 ;;
+    off) echo "keep-warm already OFF" ;;
+  esac
+}
+
+kw_status() {
+  case "$(kw_state)" in
+    on)
+      local pol="intact"
+      if [ -f "$POLICY" ]; then
+        if ! MB="$MARK_BEGIN" ME="$MARK_END" python3 - "$CLAUDE_MD" "$POLICY" <<'PY'
+import os, re, sys
+text = open(sys.argv[1]).read()
+body = text.split(os.environ["MB"], 1)[1].split(os.environ["ME"], 1)[0]
+norm = lambda s: re.sub(r"\s+", " ", s).strip()
+sys.exit(0 if norm(body) == norm(open(sys.argv[2]).read()) else 1)
+PY
+        then
+          pol="modified -- differs from $POLICY
+           (refresh: warmline keep-warm off && warmline keep-warm on)"
+        fi
+      fi
+      echo "keep-warm  ON"
+      echo "  scope    global -- applies to every project  (block in $CLAUDE_MD)"
+      echo "  policy   $pol"
+      return 0 ;;
+    off)
+      echo "keep-warm  OFF"
+      echo "  enable   warmline keep-warm on"
+      return 1 ;;
+    begin-only)
+      echo "keep-warm  INCONSISTENT"
+      echo "  found    begin marker without its end marker in $CLAUDE_MD"
+      echo "  fix      warmline keep-warm off  (removes warmline's markers only), then on"
+      return 2 ;;
+    end-only)
+      echo "keep-warm  INCONSISTENT"
+      echo "  found    end marker without its begin marker in $CLAUDE_MD"
+      echo "  fix      warmline keep-warm off  (removes warmline's markers only), then on"
+      return 2 ;;
+  esac
+}
+
+find_audit() {
+  if [ -n "$SELF_DIR" ] && [ -x "$SELF_DIR/warmline-audit" ]; then
+    echo "$SELF_DIR/warmline-audit"
+  else
+    command -v warmline-audit || true
+  fi
+}
+
+cmd_status() {
+  local wired=none settings_ttl="" sl_line kw_line audit_line ttl_line audit_path
+  if [ -f "$SETTINGS" ]; then
+    IFS=$'\t' read -r wired settings_ttl < <(DEST="$DEST" python3 - "$SETTINGS" <<'PY'
+import json, os, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    d = {}
+sl = d.get("statusLine") or {}
+cmd = str(sl.get("command", ""))
+state = "warmline" if os.environ["DEST"] in cmd else ("foreign" if cmd else "none")
+print(state + "\t" + str((d.get("env") or {}).get("WARMLINE_TTL_MIN", "")))
+PY
+) || true
+  fi
+  if [ -f "$DEST" ] && [ "$wired" = warmline ]; then
+    sl_line="ON   $DEST"
+  elif [ "$wired" = foreign ] && [ -f "$DEST" ]; then
+    sl_line="OFF  ($DEST installed, but settings.json runs a different statusline; install.sh --force replaces it)"
+  elif [ "$wired" = warmline ]; then
+    sl_line="OFF  (wired in settings.json but $DEST is missing; re-run install.sh)"
+  else
+    sl_line="OFF  (install: install.sh)"
+  fi
+  case "$(kw_state)" in
+    on)  kw_line="ON   (details: warmline keep-warm status)" ;;
+    off) kw_line="OFF  (enable: warmline keep-warm on)" ;;
+    *)   kw_line="INCONSISTENT  (details: warmline keep-warm status)" ;;
+  esac
+  audit_path="$(find_audit)"
+  if [ -n "$audit_path" ]; then
+    audit_line="ON   $audit_path"
+  else
+    audit_line="OFF  (install: install.sh)"
+  fi
+  if [ -n "${WARMLINE_TTL_MIN:-}" ]; then
+    ttl_line="${WARMLINE_TTL_MIN}m (WARMLINE_TTL_MIN)"
+  elif [ -n "${settings_ttl:-}" ]; then
+    ttl_line="${settings_ttl}m (settings.json env)"
+  else
+    ttl_line="60m (default)"
+  fi
+  echo "claude-warmline status  (config: $CLAUDE_DIR)"
+  printf '  %-10s  %s\n' statusline "$sl_line" keep-warm "$kw_line" \
+    auditor "$audit_line" ttl "$ttl_line"
+}
+
+cmd_audit() {
+  local audit_path
+  audit_path="$(find_audit)"
+  if [ -z "$audit_path" ]; then
+    echo "warmline: warmline-audit not found (re-run install.sh)" >&2
+    exit 1
+  fi
+  exec "$audit_path" "$@"
+}
+
+command -v python3 >/dev/null || { echo "warmline needs python3 on PATH" >&2; exit 1; }
+
+case "${1:-}" in
+  status) cmd_status ;;
+  keep-warm)
+    case "${2:-}" in
+      on) kw_on ;;
+      off) kw_off ;;
+      status) kw_status ;;
+      ""|--help|-h|help) kw_usage ;;
+      *) echo "warmline: unknown keep-warm action '${2}' (see warmline keep-warm --help)" >&2; exit 2 ;;
+    esac ;;
+  audit) shift; cmd_audit "$@" ;;
+  ""|--help|-h|help) usage ;;
+  *) echo "warmline: unknown command '${1}' (see warmline --help)" >&2; exit 2 ;;
+esac

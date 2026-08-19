@@ -4,6 +4,54 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [1.4.0] — 2026-08-19
+
+### Added
+- The `warmline` command. The installer installs; `warmline` controls:
+  `warmline status` (what is installed and enabled right now),
+  `warmline keep-warm on|off|status`, `warmline audit …` (runs
+  `warmline-audit`), `--help` at both levels. `keep-warm status` exit
+  codes are API: 0 = ON, 1 = OFF, 2 = INCONSISTENT. Status never trusts a
+  state file — it reads the actual `~/.claude/CLAUDE.md` every time, and a
+  malformed or hand-edited block is reported truthfully (INCONSISTENT /
+  `policy modified`) instead of a false ON. `on`/`off` are idempotent and
+  remove or append only warmline's marker-delimited block; unrelated
+  CLAUDE.md content is preserved.
+- `warmline` and `warmline-audit` are installed to `~/.local/bin`
+  (override: `WARMLINE_BIN_DIR`) — `curl | bash` users previously never
+  got the auditor at all. If that directory isn't on `PATH`, the installer
+  prints the exact line to add; it never edits shell startup files. The
+  policy text is installed to `~/.claude/warmline-keep-warm.md` so
+  `warmline keep-warm on` works without a checkout.
+  `install.sh --keep-warm` remains as install-time shorthand for
+  `warmline keep-warm on`.
+- Audit reports are visual on terminals: colored verdicts, a `cache health`
+  bar, a `cold events` count and a "where the cold came from" cause
+  histogram in `--all`, and a closing `estimated avoidable premium` line
+  with `--price` — including a top-5-sessions concentration split showing
+  whether the leak is a few disasters or spread thin. Piped/CI output
+  stays plain (color is TTY-gated; `NO_COLOR`/`WARMLINE_NO_COLOR`
+  respected, `WARMLINE_FORCE_COLOR` forces), bars degrade to `#`/`.` on
+  ascii-only stdout, and `--json` is unchanged.
+- Policy review (documented in the README as "Is this within Anthropic's
+  terms?"): keep-warm relies on documented cache-TTL-refresh behavior and
+  ordinary billed requests; whether scheduled pings count as "ordinary,
+  individual usage" on subscription plans is honestly unknown. Following
+  the review, `keep-warm.md` gained a hard stop (~12 reschedules ≈ 10
+  hours per wait) and an explicit note that pings bill against the user's
+  own quota.
+
+### Changed
+- README rewritten popular-science-first: a 30-second explainer, a Quick
+  start with the canonical flow (install → `warmline keep-warm on` →
+  `warmline keep-warm status` → audit), the observability ladder, a
+  precise definition of "avoidable" (an estimate of exposure, not money
+  actually wasted), and example outputs captured from real runs.
+- `test.sh`: 18 → 45 cases (CLI state transitions ON/OFF in every order,
+  malformed-block truth-telling, unrelated-CLAUDE.md-content safety,
+  clean-install-provides-`warmline`, foreign-statusline protection, color
+  gating, bars, histogram, encoding fallback, concentration math).
+
 ## [1.3.0] — 2026-08-19
 
 ### Added

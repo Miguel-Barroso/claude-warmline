@@ -40,6 +40,11 @@ transcript supports one:
 
 Subagent (sidechain) turns are excluded: they run on separate prefixes,
 and their transcripts live in separate nested files that --all skips.
+
+Reports are colorized and decorated with small bar charts when stdout is
+a terminal; piped/CI output stays plain, and --json never decorates.
+NO_COLOR or WARMLINE_NO_COLOR force plain; WARMLINE_FORCE_COLOR forces
+color without a tty (the opt-outs still win over it).
 """
 import datetime
 import glob
@@ -52,6 +57,59 @@ TTL_MIN = float(os.environ.get("WARMLINE_TTL_MIN", "60"))
 # a 1h-TTL cache write bills ~2x base input; a warm read ~0.1x -- the
 # avoidable premium of going cold is the 1.9x difference
 PREMIUM_X = 1.9
+
+# ANSI only when a human is watching: stdout is a tty and neither NO_COLOR
+# nor WARMLINE_NO_COLOR is set. WARMLINE_FORCE_COLOR turns color on without
+# a tty (used by the tests); the opt-outs still win over it.
+COLOR = not (os.environ.get("NO_COLOR") or os.environ.get("WARMLINE_NO_COLOR")) \
+    and bool(os.environ.get("WARMLINE_FORCE_COLOR") or sys.stdout.isatty())
+GREEN, YELLOW, RED, DIM, BOLD, RESET = (
+    "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[1m", "\033[0m")
+VERDICT_COLOR = {"HOT": GREEN, "PARTIAL": YELLOW,
+                 "COLD(rebuilt)": YELLOW, "COLD(ttl)": RED}
+
+try:  # a LANG=C pipe can't take U+2588; degrade to '#'/'.' over crashing
+    "█".encode(sys.stdout.encoding or "utf-8")
+    BAR_FULL, BAR_EMPTY = "█", "░"
+except (UnicodeEncodeError, LookupError):
+    BAR_FULL, BAR_EMPTY = "#", "."
+
+
+def paint(text, color):
+    return color + text + RESET if COLOR else text
+
+
+def bar(frac, width=26):
+    n = max(0, min(width, round(frac * width)))
+    return BAR_FULL * n + BAR_EMPTY * (width - n)
+
+
+def health_line(verdicts, turns):
+    hot = verdicts.get("HOT", 0)
+    pct = round(100.0 * hot / turns)
+    color = GREEN if pct >= 90 else YELLOW if pct >= 70 else RED
+    return "cache health  %s  %s  (%s of %s turns)" % (
+        paint(bar(hot / turns), color), paint("%d%% hot" % pct, color),
+        "{:,}".format(hot), "{:,}".format(turns))
+
+
+def cause_histogram(causes):
+    """One bar per cause, scaled to the biggest; pointless under two."""
+    if len(causes) < 2:
+        return []
+    top = max(causes.values())
+    lines = ["where the cold came from"]
+    for c, n in sorted(causes.items(), key=lambda kv: (-kv[1], kv[0])):
+        b = BAR_FULL * max(1, round(n / top * 26))
+        # session start is the unavoidable one -- dim it, leaks stay loud
+        lines.append("  %-19s %s  %d" % (
+            c, paint(b, DIM if c == "session start" else YELLOW), n))
+    return lines
+
+
+def premium_line(usd):
+    return paint("estimated avoidable premium ~$%.2f" % usd,
+                 BOLD + (RED if usd >= 0.005 else ""))
 
 
 def parse_ts(ts):
@@ -263,13 +321,16 @@ def print_single(path, price, as_json):
     print("%s  (ttl %gm)" % (path, TTL_MIN))
     print("%-15s  %6s  %11s  %12s  %s" % ("time", "gap", "cache read", "cache write", "verdict"))
     for r in out_rows:
-        v = r["verdict"]
+        v = paint(r["verdict"], VERDICT_COLOR.get(r["verdict"], DIM))
         if r["cause"] and r["cause"] != "inactivity":
-            v += "  <- " + r["cause"]
+            v += paint("  <- " + r["cause"], DIM)
         print("%-15s  %6s  %11s  %12s  %s"
               % (r["time"], fmt_gap(r["gap_min"]), "{:,}".format(r["read"]),
                  "{:,}".format(r["write"]), v))
     print()
+    if s["turns"] >= 5:  # a 1-turn bar is noise
+        print(health_line(s["verdicts"], s["turns"]))
+        print()
     print("%d API turns; %s" % (s["turns"], "  ".join(
         "%s %d" % (v, s["verdicts"][v]) for v in
         ("HOT", "PARTIAL", "COLD(rebuilt)", "COLD(ttl)", "?") if v in s["verdicts"])))
@@ -282,6 +343,7 @@ def print_single(path, price, as_json):
         print("at $%g/MTok base input: the cold re-caches cost ~$%.2f more than "
               "warm reads of the same tokens would have; cache reads billed ~$%.2f"
               % (price, summary["cold_extra_usd"], summary["cache_read_usd"]))
+        print(premium_line(s["avoidable_cold_tokens"] * PREMIUM_X * price / 1e6))
 
 
 def print_all(root, price, as_json):
@@ -327,6 +389,14 @@ def print_all(root, price, as_json):
     print("%d sessions under %s  (%d more without API turns; ttl %gm)"
           % (len(sessions), root, skipped, TTL_MIN))
     print()
+    print(health_line(total["verdicts"], total["turns"]))
+    rebuilt = total["verdicts"].get("COLD(rebuilt)", 0)
+    expired = total["verdicts"].get("COLD(ttl)", 0)
+    cold_n = rebuilt + expired
+    print("cold events   %s  (%d rebuilt, %d ttl)" % (
+        paint("{:,}".format(cold_n), YELLOW if cold_n else GREEN),
+        rebuilt, expired))
+    print()
     head = "%-12s %-22s %6s %6s %5s %8s %5s %15s" % (
         "start", "project", "turns", "hot", "part", "rebuilt", "ttl", "avoidable cold")
     if price is not None:
@@ -343,7 +413,7 @@ def print_all(root, price, as_json):
             if price is not None:
                 line += "  %9s" % ("$%.2f" % total["avoidable_premium_usd"])
             print()
-            print(line)
+            print(paint(line, BOLD))
             continue
         v = s["verdicts"]
         line = "%-12s %-22s %6d %6d %5d %8d %5d %15s" % (
@@ -352,18 +422,36 @@ def print_all(root, price, as_json):
             v.get("COLD(rebuilt)", 0), v.get("COLD(ttl)", 0),
             "{:,}".format(s["avoidable_cold_tokens"]))
         if price is not None:
-            line += "  %9s" % ("$%.2f" % (
-                s["avoidable_cold_tokens"] * PREMIUM_X * price / 1e6))
+            prem = s["avoidable_cold_tokens"] * PREMIUM_X * price / 1e6
+            # pad before painting: ANSI is zero-width on screen, not to %9s
+            line += "  " + paint("%9s" % ("$%.2f" % prem),
+                                 RED if prem > 1 else DIM)
         print(line)
     print()
     if total["causes"]:
         print("causes: %s" % fmt_causes(total["causes"]))
+        hist = cause_histogram(total["causes"])
+        if hist:
+            print()
+            for ln in hist:
+                print(ln)
+            print()
     print("avoidable cold = tokens re-cached cold, excluding each session's "
           "unavoidable first write")
     if price is not None:
         print("premium = estimated avoidable premium of those re-caches vs warm "
               "reads (%.1fx $%g/MTok);" % (PREMIUM_X, price))
         print("an estimate from recorded token counts, not billing data")
+        print()
+        line = premium_line(total["avoidable_premium_usd"])
+        if len(sessions) > 5:
+            # concentration: is the leak a few bad sessions or everywhere?
+            top_tok = sum(s["avoidable_cold_tokens"] for s in sessions[:5])
+            rest_tok = total["avoidable_cold_tokens"] - top_tok
+            line += "  (top 5 sessions: $%.2f, other %d: $%.2f)" % (
+                top_tok * PREMIUM_X * price / 1e6, len(sessions) - 5,
+                rest_tok * PREMIUM_X * price / 1e6)
+        print(line)
     else:
         print("pass --price <$/MTok base input> for an estimated avoidable "
               "premium in dollars")

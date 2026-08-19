@@ -6,33 +6,64 @@ set -euo pipefail
 #   ./install.sh                     # from a checkout
 #   curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 #
-# Flags:
-#   --keep-warm    also append the keep-cache-warm policy to ~/.claude/CLAUDE.md
-#   --force        replace an existing non-warmline statusLine in settings.json
-#   --uninstall    remove everything this installer added
+# Installs, updates, uninstalls. Post-install control lives in the
+# `warmline` command (warmline --help).
 
 REPO_RAW="https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+BIN_DIR="${WARMLINE_BIN_DIR:-$HOME/.local/bin}"
 DEST="$CLAUDE_DIR/warmline-statusline.py"
+CLI="$BIN_DIR/warmline"
+AUDIT="$BIN_DIR/warmline-audit"
+POLICY="$CLAUDE_DIR/warmline-keep-warm.md"
 SETTINGS="$CLAUDE_DIR/settings.json"
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 STATE_DIR="$CLAUDE_DIR/warmline-state"
 MARK_BEGIN="<!-- >>> claude-warmline keep-warm >>> -->"
 MARK_END="<!-- <<< claude-warmline keep-warm <<< -->"
 
-KEEP_WARM=0 FORCE=0 UNINSTALL=0
+usage() {
+  cat <<EOF
+claude-warmline installer: installs, updates, uninstalls.
+Post-install control lives in the warmline command (warmline --help).
+
+  ./install.sh              install or update everything
+  ./install.sh --keep-warm  install/update, then turn the keep-warm policy ON
+  ./install.sh --force      with install: replace a foreign statusLine
+  ./install.sh --uninstall  remove everything this installer added
+  ./install.sh --help       this text
+
+Installs the statusline to $CLAUDE_DIR, the warmline and
+warmline-audit commands to $BIN_DIR (override: WARMLINE_BIN_DIR).
+
+Piped through curl, flags go after 'bash -s --':
+  curl -fsSL $REPO_RAW/install.sh | bash -s -- --keep-warm
+EOF
+}
+
+KEEP_WARM=0 FORCE=0 MODE=install NMODES=0
 for arg in "$@"; do
   case "$arg" in
     --keep-warm) KEEP_WARM=1 ;;
     --force) FORCE=1 ;;
-    --uninstall) UNINSTALL=1 ;;
-    *) echo "unknown flag: $arg (known: --keep-warm --force --uninstall)" >&2; exit 2 ;;
+    --uninstall) MODE=uninstall; NMODES=$((NMODES + 1)) ;;
+    --help|-h)   MODE=help;      NMODES=$((NMODES + 1)) ;;
+    *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
+if [ "$NMODES" -gt 1 ] || { [ "$MODE" != install ] && [ $((KEEP_WARM + FORCE)) -gt 0 ]; }; then
+  echo "--uninstall and --help each work alone (see --help)" >&2
+  exit 2
+fi
+
+if [ "$MODE" = help ]; then
+  usage
+  exit 0
+fi
 
 command -v python3 >/dev/null || { echo "claude-warmline needs python3 on PATH" >&2; exit 1; }
 
-if [ "$UNINSTALL" = 1 ]; then
+if [ "$MODE" = uninstall ]; then
   if [ -f "$SETTINGS" ]; then
     DEST="$DEST" python3 - "$SETTINGS" <<'PY'
 import json, os, sys
@@ -48,7 +79,7 @@ if os.environ["DEST"] in str(sl.get("command", "")):
     print(f"removed statusLine from {path}")
 PY
   fi
-  rm -f "$DEST"
+  rm -f "$DEST" "$CLI" "$AUDIT" "$POLICY"
   rm -rf "$STATE_DIR"
   if [ -f "$CLAUDE_MD" ]; then
     MB="$MARK_BEGIN" ME="$MARK_END" python3 - "$CLAUDE_MD" <<'PY'
@@ -67,18 +98,23 @@ PY
   exit 0
 fi
 
-mkdir -p "$CLAUDE_DIR"
+mkdir -p "$CLAUDE_DIR" "$BIN_DIR"
 
 # Prefer local files when run from a checkout; fall back to raw GitHub
 # when piped through curl | bash.
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
-if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/statusline.py" ]; then
-  cp "$SRC_DIR/statusline.py" "$DEST"
-else
-  curl -fsSL "$REPO_RAW/statusline.py" -o "$DEST"
-fi
-chmod +x "$DEST"
-echo "installed $DEST"
+fetch() { # repo-file dest
+  if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/$1" ]; then
+    cp "$SRC_DIR/$1" "$2"
+  else
+    curl -fsSL "$REPO_RAW/$1" -o "$2"
+  fi
+  echo "installed $2"
+}
+fetch statusline.py "$DEST";    chmod +x "$DEST"
+fetch warmline "$CLI";          chmod +x "$CLI"
+fetch warmline-audit "$AUDIT";  chmod +x "$AUDIT"
+fetch keep-warm.md "$POLICY"
 
 DEST="$DEST" FORCE="$FORCE" python3 - "$SETTINGS" <<'PY'
 import json, os, shutil, sys
@@ -102,21 +138,18 @@ print(f"statusLine wired in {path}")
 PY
 
 if [ "$KEEP_WARM" = 1 ]; then
-  if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/keep-warm.md" ]; then
-    BODY="$(cat "$SRC_DIR/keep-warm.md")"
-  else
-    BODY="$(curl -fsSL "$REPO_RAW/keep-warm.md")"
-  fi
-  touch "$CLAUDE_MD"
-  if grep -qF "$MARK_BEGIN" "$CLAUDE_MD"; then
-    echo "keep-warm block already present in $CLAUDE_MD"
-  else
-    printf '\n%s\n%s\n%s\n' "$MARK_BEGIN" "$BODY" "$MARK_END" >> "$CLAUDE_MD"
-    echo "keep-warm policy appended to $CLAUDE_MD"
-  fi
+  "$CLI" keep-warm on
 fi
 
 echo
 echo "Done. Claude Code usually picks the statusline up within a few seconds;"
-echo "restart the session if it doesn't. Verify the script itself with:"
-echo "  echo '{\"model\":{\"display_name\":\"Test\"}}' | $DEST"
+echo "restart the session if it doesn't. Next:"
+echo "  warmline status         # what's on right now"
+echo "  warmline keep-warm on   # optional: keep the cache warm through long waits"
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) echo
+     echo "note: $BIN_DIR is not on your PATH, so 'warmline' won't resolve yet."
+     echo "add this line to your ~/.zshrc or ~/.bashrc (we never edit those for you):"
+     printf '  export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
+esac

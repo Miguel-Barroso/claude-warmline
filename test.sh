@@ -113,12 +113,14 @@ else
   echo "FAIL audit: unexpected output:"; echo "$out"; fail=$((fail + 1))
 fi
 
-# --price: 61,000 cold tokens at $10/MTok base input -> 61000*1.9*10/1e6
-out=$(./warmline-audit --price 10 "$AUDIT_T" | tail -1)
-if [[ "$out" == *'cost ~$1.16 more'* ]]; then
-  echo "ok   audit-price: $out"; pass=$((pass + 1))
+# --price: 61,000 cold tokens at $10/MTok base input -> 61000*1.9*10/1e6;
+# the avoidable premium counts only the non-session-start cold write (31,000).
+out=$(./warmline-audit --price 10 "$AUDIT_T")
+if [[ "$out" == *'cost ~$1.16 more'* \
+   && "$out" == *'estimated avoidable premium ~$0.59'* ]]; then
+  echo "ok   audit-price: cold cost \$1.16, avoidable premium \$0.59"; pass=$((pass + 1))
 else
-  echo "FAIL audit-price: expected '~\$1.16' in: $out"; fail=$((fail + 1))
+  echo "FAIL audit-price: expected '~\$1.16' and '~\$0.59' in:"; echo "$out"; fail=$((fail + 1))
 fi
 
 # Synthetic multi-project corpus for --all and cold-cause attribution.
@@ -229,6 +231,320 @@ if [[ "$out" == *"2 sessions under"* ]]; then
   echo "ok   corrupt-ts: bad line skipped, --all survives"; pass=$((pass + 1))
 else
   echo "FAIL corrupt-ts:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# ---- installer + warmline CLI (isolated via CLAUDE_CONFIG_DIR / WARMLINE_BIN_DIR) ----
+IROOT="$(mktemp -d)"
+IBIN="$(mktemp -d)"
+trap 'rm -rf "$WARMLINE_STATE_DIR" "$IROOT" "$IBIN"' EXIT
+MB='<!-- >>> claude-warmline keep-warm >>> -->'
+ME='<!-- <<< claude-warmline keep-warm <<< -->'
+inst() { CLAUDE_CONFIG_DIR="$IROOT" WARMLINE_BIN_DIR="$IBIN" ./install.sh "$@"; }
+wl()   { CLAUDE_CONFIG_DIR="$IROOT" "$IBIN/warmline" "$@"; }
+
+# The checkout CLI before any install: everything OFF, read-only, keep-warm
+# status exits 1.
+out=$(CLAUDE_CONFIG_DIR="$IROOT" ./warmline status)
+rc=0; CLAUDE_CONFIG_DIR="$IROOT" ./warmline keep-warm status >/dev/null || rc=$?
+if [[ "$(echo "$out" | grep statusline)" == *" OFF "* \
+   && "$(echo "$out" | grep keep-warm)" == *" OFF "* \
+   && "$out" == *"60m (default)"* && "$rc" == 1 \
+   && -z "$(ls -A "$IROOT")" ]]; then
+  echo "ok   cli-pre-install: all OFF, exit 1, nothing created"; pass=$((pass + 1))
+else
+  echo "FAIL cli-pre-install: rc=$rc"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Fresh install provides the warmline command, the auditor, the statusline,
+# the policy copy -- and warns that the bin dir isn't on PATH (mktemp isn't).
+out=$(inst)
+if [[ -x "$IBIN/warmline" && -x "$IBIN/warmline-audit" \
+   && -x "$IROOT/warmline-statusline.py" && -f "$IROOT/warmline-keep-warm.md" ]] \
+   && grep -qF "warmline-statusline.py" "$IROOT/settings.json" \
+   && [[ "$out" == *"not on your PATH"* && "$out" == *"export PATH="* ]]; then
+  echo "ok   ins-fresh: warmline + auditor + statusline + policy, PATH note"; pass=$((pass + 1))
+else
+  echo "FAIL ins-fresh:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Help: top-level lists every subcommand; keep-warm help has the exit codes;
+# bare invocations print usage.
+out=$(wl --help); out2=$(wl keep-warm --help); out3=$(wl)
+if [[ "$out" == *"warmline status"* && "$out" == *"keep-warm on"* \
+   && "$out" == *"keep-warm off"* && "$out" == *"keep-warm status"* \
+   && "$out" == *"warmline audit"* \
+   && "$out2" == *"ON / OFF / INCONSISTENT"* && "$out2" == *"exit 0 / 1 / 2"* \
+   && "$out3" == *"warmline status"* ]]; then
+  echo "ok   cli-help: subcommands and exit codes documented"; pass=$((pass + 1))
+else
+  echo "FAIL cli-help:"; echo "$out"; echo "$out2"; fail=$((fail + 1))
+fi
+
+# Overall status after a plain install: statusline ON, keep-warm OFF, auditor ON.
+out=$(wl status)
+if [[ "$(echo "$out" | grep statusline)" == *" ON "* \
+   && "$(echo "$out" | grep keep-warm)" == *" OFF "* \
+   && "$(echo "$out" | grep auditor)" == *" ON   $IBIN/warmline-audit"* ]]; then
+  echo "ok   cli-status-installed: statusline+auditor ON, keep-warm OFF"; pass=$((pass + 1))
+else
+  echo "FAIL cli-status-installed:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# OFF->ON, then ON->ON: idempotent, exactly one block, user text survives.
+printf 'text before block\n' > "$IROOT/CLAUDE.md"
+out_on=$(wl keep-warm on)
+printf 'text after block\n' >> "$IROOT/CLAUDE.md"
+out_on2=$(wl keep-warm on)
+rc=0; wl keep-warm status >/dev/null || rc=$?
+if [[ "$out_on" == *"keep-warm ON"* && "$out_on2" == *"already ON"* \
+   && "$(grep -cF "$MB" "$IROOT/CLAUDE.md")" == 1 && "$rc" == 0 ]]; then
+  echo "ok   cli-on-idempotent: one block, already-ON on repeat, exit 0"; pass=$((pass + 1))
+else
+  echo "FAIL cli-on-idempotent: rc=$rc / $out_on / $out_on2"; fail=$((fail + 1))
+fi
+
+# Detailed ON status: greppable first line, scope, intact policy.
+out=$(wl keep-warm status)
+if [[ "$out" == "keep-warm  ON"* && "$out" == *"scope    global"* \
+   && "$out" == *"policy   intact"* ]]; then
+  echo "ok   cli-status-on: ON, global scope, policy intact"; pass=$((pass + 1))
+else
+  echo "FAIL cli-status-on:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# ON->OFF removes only the block (text before AND after survives); OFF->OFF
+# is a no-op; status exits 1.
+out_off=$(wl keep-warm off)
+out_off2=$(wl keep-warm off)
+rc=0; wl keep-warm status >/dev/null || rc=$?
+if [[ "$out_off" == *"keep-warm OFF"* && "$out_off2" == *"already OFF"* && "$rc" == 1 ]] \
+   && ! grep -qF "$MB" "$IROOT/CLAUDE.md" && ! grep -qF "$ME" "$IROOT/CLAUDE.md" \
+   && grep -q 'text before block' "$IROOT/CLAUDE.md" \
+   && grep -q 'text after block' "$IROOT/CLAUDE.md"; then
+  echo "ok   cli-off-safe: block gone, surrounding text intact, exit 1"; pass=$((pass + 1))
+else
+  echo "FAIL cli-off-safe: rc=$rc / $out_off / $out_off2"; fail=$((fail + 1))
+fi
+
+# Malformed block (end marker hand-deleted): status tells the truth (exit 2),
+# on refuses (exit 2), off removes only warmline's orphaned marker.
+wl keep-warm on >/dev/null
+python3 - "$IROOT/CLAUDE.md" <<'PY'
+import sys
+p = sys.argv[1]
+lines = open(p).read().splitlines(True)
+open(p, "w").write("".join(l for l in lines if "claude-warmline keep-warm <<<" not in l))
+PY
+rc_s=0; out=$(wl keep-warm status) || rc_s=$?
+rc_o=0; wl keep-warm on >/dev/null 2>&1 || rc_o=$?
+wl keep-warm off >/dev/null 2>&1
+if [[ "$rc_s" == 2 && "$out" == *"INCONSISTENT"* \
+   && "$out" == *"begin marker without its end marker"* && "$rc_o" == 2 ]] \
+   && ! grep -qF "$MB" "$IROOT/CLAUDE.md" \
+   && grep -q 'text before block' "$IROOT/CLAUDE.md" \
+   && grep -q 'text after block' "$IROOT/CLAUDE.md"; then
+  echo "ok   cli-malformed: truthful status, on refused, orphan removed"; pass=$((pass + 1))
+else
+  echo "FAIL cli-malformed: rc_s=$rc_s rc_o=$rc_o"; echo "$out"; fail=$((fail + 1))
+fi
+
+# From nothing: no CLAUDE.md at all, then an empty one -- on works in both.
+rm -f "$IROOT/CLAUDE.md"
+rc=0; wl keep-warm status >/dev/null || rc=$?
+wl keep-warm on >/dev/null
+ok_nofile=$([[ "$rc" == 1 ]] && grep -qF "$MB" "$IROOT/CLAUDE.md" \
+  && grep -qF "$ME" "$IROOT/CLAUDE.md" && echo yes || echo no)
+wl keep-warm off >/dev/null
+: > "$IROOT/CLAUDE.md"
+wl keep-warm on >/dev/null
+if [[ "$ok_nofile" == yes ]] && grep -qF "$MB" "$IROOT/CLAUDE.md"; then
+  echo "ok   cli-from-nothing: on works with missing and empty CLAUDE.md"; pass=$((pass + 1))
+else
+  echo "FAIL cli-from-nothing: ok_nofile=$ok_nofile"; fail=$((fail + 1))
+fi
+
+# A hand-edited policy body is still ON (exit 0) but reported as modified;
+# off && on refreshes it back to intact.
+python3 - "$IROOT/CLAUDE.md" <<'PY'
+import sys
+p = sys.argv[1]
+t = open(p).read()
+open(p, "w").write(t.replace("wakeup", "wakeupX", 1))
+PY
+rc=0; out=$(wl keep-warm status) || rc=$?
+wl keep-warm off >/dev/null && wl keep-warm on >/dev/null
+out2=$(wl keep-warm status)
+if [[ "$rc" == 0 && "$out" == *"policy   modified"* \
+   && "$out2" == *"policy   intact"* ]]; then
+  echo "ok   cli-modified-detect: edit reported, refresh restores intact"; pass=$((pass + 1))
+else
+  echo "FAIL cli-modified-detect: rc=$rc"; echo "$out"; fail=$((fail + 1))
+fi
+
+# warmline audit passes through to warmline-audit.
+out=$(wl audit "$ROOT/proj-a/sess1.jsonl")
+if [[ "$out" == *"7 API turns"* ]]; then
+  echo "ok   cli-audit-passthrough: audits via the warmline command"; pass=$((pass + 1))
+else
+  echo "FAIL cli-audit-passthrough:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Unknown commands exit 2 with a pointer to --help.
+rc=0; wl bogus >/dev/null 2>&1 || rc=$?
+rc2=0; wl keep-warm bogus >/dev/null 2>&1 || rc2=$?
+if [[ "$rc" == 2 && "$rc2" == 2 ]]; then
+  echo "ok   cli-unknown: unknown commands rejected with exit 2"; pass=$((pass + 1))
+else
+  echo "FAIL cli-unknown: rc=$rc rc2=$rc2"; fail=$((fail + 1))
+fi
+
+# Installer help: install-side flags only, pointing control at warmline.
+out=$(inst --help)
+if [[ "$out" == *"--keep-warm"* && "$out" == *"--uninstall"* \
+   && "$out" == *"--force"* && "$out" == *"warmline --help"* \
+   && "$out" != *"--status"* && "$out" != *"--keep-warm-off"* ]]; then
+  echo "ok   ins-help: install flags only, control deferred to warmline"; pass=$((pass + 1))
+else
+  echo "FAIL ins-help:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# A foreign statusLine is refused without --force, replaced (and backed up) with it.
+printf '{"statusLine":{"type":"command","command":"/usr/bin/other-line"}}\n' > "$IROOT/settings.json"
+if inst >/dev/null 2>&1; then refused=no; else refused=yes; fi
+inst --force >/dev/null
+if [[ "$refused" == yes && -f "$IROOT/settings.json.warmline-bak" ]] \
+   && grep -qF "warmline-statusline.py" "$IROOT/settings.json"; then
+  echo "ok   ins-foreign: refused bare, replaced with --force, backup kept"; pass=$((pass + 1))
+else
+  echo "FAIL ins-foreign: refused=$refused"; fail=$((fail + 1))
+fi
+
+# install.sh --keep-warm delegates to the installed warmline CLI.
+printf 'my own rules\n' > "$IROOT/CLAUDE.md"
+inst --keep-warm >/dev/null
+if grep -qF "$MB" "$IROOT/CLAUDE.md" && grep -qF "$ME" "$IROOT/CLAUDE.md"; then
+  echo "ok   ins-keep-warm-delegates: enabled through the CLI"; pass=$((pass + 1))
+else
+  echo "FAIL ins-keep-warm-delegates"; fail=$((fail + 1))
+fi
+
+# --uninstall removes everything warmline added, keeps the user's own text.
+inst --uninstall >/dev/null
+if [[ ! -e "$IROOT/warmline-statusline.py" && ! -e "$IBIN/warmline" \
+   && ! -e "$IBIN/warmline-audit" && ! -e "$IROOT/warmline-keep-warm.md" ]] \
+   && ! grep -q statusLine "$IROOT/settings.json" \
+   && ! grep -qF "$MB" "$IROOT/CLAUDE.md" \
+   && grep -q 'my own rules' "$IROOT/CLAUDE.md"; then
+  echo "ok   ins-uninstall: files, wiring and block removed; own text kept"; pass=$((pass + 1))
+else
+  echo "FAIL ins-uninstall: leftovers in $IROOT / $IBIN"; fail=$((fail + 1))
+fi
+
+# The removed switchboard flags are gone, and modes stay exclusive.
+rc1=0; inst --status >/dev/null 2>&1 || rc1=$?
+rc2=0; inst --keep-warm-off >/dev/null 2>&1 || rc2=$?
+rc3=0; inst --uninstall --keep-warm >/dev/null 2>&1 || rc3=$?
+if [[ "$rc1" == 2 && "$rc2" == 2 && "$rc3" == 2 ]]; then
+  echo "ok   ins-flags-rejected: --status/--keep-warm-off gone, modes exclusive"; pass=$((pass + 1))
+else
+  echo "FAIL ins-flags-rejected: rc1=$rc1 rc2=$rc2 rc3=$rc3"; fail=$((fail + 1))
+fi
+
+# Color gating: piped output carries no ANSI even with the opt-outs unset
+# (stdout is not a tty).
+out=$(env -u WARMLINE_NO_COLOR ./warmline-audit "$ROOT/proj-a/sess1.jsonl")
+if [[ "$out" != *$'\033'* ]]; then
+  echo "ok   audit-no-tty: piped output stays plain"; pass=$((pass + 1))
+else
+  echo "FAIL audit-no-tty: ANSI in piped output"; fail=$((fail + 1))
+fi
+
+# WARMLINE_FORCE_COLOR overrides the tty check (green HOT, red COLD(ttl))...
+out=$(env -u WARMLINE_NO_COLOR WARMLINE_FORCE_COLOR=1 ./warmline-audit "$ROOT/proj-a/sess1.jsonl")
+if [[ "$out" == *$'\033[32m'* && "$out" == *$'\033[31m'* ]]; then
+  echo "ok   audit-force-color: ANSI emitted without a tty"; pass=$((pass + 1))
+else
+  echo "FAIL audit-force-color: no ANSI in: ${out@Q}"; fail=$((fail + 1))
+fi
+
+# ...but the opt-outs still win over the force.
+out=$(env -u WARMLINE_NO_COLOR NO_COLOR=1 WARMLINE_FORCE_COLOR=1 ./warmline-audit "$ROOT/proj-a/sess1.jsonl")
+if [[ "$out" != *$'\033'* ]]; then
+  echo "ok   audit-color-precedence: NO_COLOR beats FORCE_COLOR"; pass=$((pass + 1))
+else
+  echo "FAIL audit-color-precedence: ANSI despite NO_COLOR"; fail=$((fail + 1))
+fi
+
+# Cache-health bar: sess1 is 1 HOT of 7 turns; skipped below 5 turns.
+out=$(./warmline-audit "$ROOT/proj-a/sess1.jsonl")
+if [[ "$out" == *"cache health"* && "$out" == *"14% hot"* \
+   && "$out" == *"(1 of 7 turns)"* ]]; then
+  echo "ok   health-bar: 14% hot (1 of 7 turns)"; pass=$((pass + 1))
+else
+  echo "FAIL health-bar:"; echo "$out"; fail=$((fail + 1))
+fi
+out=$(./warmline-audit "$AUDIT_T")
+if [[ "$out" != *"cache health"* ]]; then
+  echo "ok   health-bar-skip: no bar under 5 turns"; pass=$((pass + 1))
+else
+  echo "FAIL health-bar-skip: bar rendered for a 4-turn session"; fail=$((fail + 1))
+fi
+
+# Encoding fallback: an ascii-only stdout gets '#'/'.' bars, not a crash.
+out=$(PYTHONIOENCODING=ascii ./warmline-audit "$ROOT/proj-a/sess1.jsonl")
+if [[ "$out" == *"#"* && "$out" != *"█"* && "$out" == *"cache health"* ]]; then
+  echo "ok   ascii-fallback: bars degrade to #"; pass=$((pass + 1))
+else
+  echo "FAIL ascii-fallback:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# --all cause histogram: counts right, bars scaled to the max (2 -> 26
+# cells, 1 -> 13), aggregate health bar above the table.
+out=$(./warmline-audit --all "$ROOT")
+if [[ "$out" == *"where the cold came from"* \
+   && "$out" == *$'\n'"  /compact            ██████████████████████████  2"* \
+   && "$out" == *$'\n'"  model change        █████████████  1"* \
+   && "$out" == *"(2 of 10 turns)"* ]]; then
+  echo "ok   histogram: cause bars + aggregate health"; pass=$((pass + 1))
+else
+  echo "FAIL histogram:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# --all --price ends on the prominent avoidable-premium line.
+out=$(./warmline-audit --all --price 10 "$ROOT" | tail -1)
+if [[ "$out" == 'estimated avoidable premium ~$0.57' ]]; then
+  echo "ok   premium-line: $out"; pass=$((pass + 1))
+else
+  echo "FAIL premium-line: $out"; fail=$((fail + 1))
+fi
+
+# --all cold-events summary: corpus totals are 4 rebuilt + 2 ttl.
+out=$(./warmline-audit --all "$ROOT")
+if [[ "$out" == *"cold events   6  (4 rebuilt, 2 ttl)"* ]]; then
+  echo "ok   cold-events: 6 (4 rebuilt, 2 ttl)"; pass=$((pass + 1))
+else
+  echo "FAIL cold-events:"; echo "$out" | head -5; fail=$((fail + 1))
+fi
+
+# Concentration suffix: >5 sessions, avoidable 600k..100k -> top 5 hold
+# 2.0M of 2.1M; at $10/MTok that is $38.00 of ~$39.90. With <=5 sessions
+# (the main corpus) the premium line must stay bare -- already asserted
+# by the premium-line equality test above.
+CROOT="$WARMLINE_STATE_DIR/conc"
+i=0
+for tok in 600000 500000 400000 300000 200000 100000; do
+  i=$((i + 1))
+  mkdir -p "$CROOT/proj-$i"
+  cat > "$CROOT/proj-$i/sess.jsonl" <<EOF
+{"type":"assistant","timestamp":"2026-01-0${i}T00:00:00Z","cwd":"/tmp/conc-$i","message":{"id":"c${i}a","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":1000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-0${i}T00:05:00Z","cwd":"/tmp/conc-$i","message":{"id":"c${i}b","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":${tok},"input_tokens":5}}}
+EOF
+done
+out=$(./warmline-audit --all --price 10 "$CROOT" | tail -1)
+if [[ "$out" == 'estimated avoidable premium ~$39.90  (top 5 sessions: $38.00, other 1: $1.90)' ]]; then
+  echo "ok   concentration: top-5 split correct"; pass=$((pass + 1))
+else
+  echo "FAIL concentration: $out"; fail=$((fail + 1))
 fi
 
 echo
