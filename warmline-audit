@@ -16,6 +16,9 @@ Usage:
     warmline-audit --ttl 5 --json     # short-TTL setup, machine-readable
     warmline-audit --price 3          # estimate cold-cache cost in dollars,
                                       # given the model's base input $/MTok
+    warmline-audit --all              # one summary line per session across
+                                      # all projects, ranked by avoidable
+                                      # cold tokens; --all DIR audits DIR
 
 Verdicts (authoritative here, unlike the statusline's one-turn lag):
   HOT            the turn read its prefix from the cache
@@ -25,7 +28,18 @@ Verdicts (authoritative here, unlike the statusline's one-turn lag):
                  (invalidation: /compact, context edits, model change)
   COLD(ttl)      nothing read, prefix re-cached after a gap beyond the TTL
 
-Subagent (sidechain) turns are excluded: they run on separate prefixes.
+Cold turns (and compact-explained PARTIALs) carry a cause where the
+transcript supports one:
+  session start   the first turn of a session always writes its prefix
+  /compact        a compact_boundary marker (manual trigger) sits between
+                  this turn and the previous one; auto-compact likewise
+  model change    the model differs from the previous turn's
+  inactivity      the COLD(ttl) case; "inactivity+compact" when a compact
+                  also happened inside the same gap (either explains it)
+  unknown         a rebuild the transcript can't explain (env/prefix drift)
+
+Subagent (sidechain) turns are excluded: they run on separate prefixes,
+and their transcripts live in separate nested files that --all skips.
 """
 import datetime
 import glob
@@ -35,6 +49,152 @@ import re
 import sys
 
 TTL_MIN = float(os.environ.get("WARMLINE_TTL_MIN", "60"))
+# a 1h-TTL cache write bills ~2x base input; a warm read ~0.1x -- the
+# avoidable premium of going cold is the 1.9x difference
+PREMIUM_X = 1.9
+
+
+def parse_ts(ts):
+    """None on malformed input -- one corrupt line must not kill an
+    --all run; naive timestamps are pinned to UTC so sorting never mixes
+    aware and naive datetimes."""
+    try:
+        t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    return t
+
+
+def parse_transcript(path):
+    """(turns, compacts, label): turns are (time, read, write, model) per
+    API request; compacts are sorted (time, trigger); label is the basename
+    of the first assistant entry's cwd."""
+    turns, seen, compacts, label = [], set(), [], None
+    with open(path) as f:
+        for line in f:
+            # cheap prefilter: most transcript bytes are tool results in
+            # user entries; only parse lines that can matter
+            if "assistant" not in line and "compact_boundary" not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("isSidechain"):
+                continue
+            if e.get("type") == "system" and e.get("subtype") == "compact_boundary":
+                bt = parse_ts(e["timestamp"]) if e.get("timestamp") else None
+                if bt:
+                    compacts.append((bt, (e.get("compactMetadata") or {}).get("trigger")))
+                continue
+            if e.get("type") != "assistant":
+                continue
+            msg = e.get("message") or {}
+            usage = msg.get("usage") or {}
+            t = parse_ts(e["timestamp"]) if e.get("timestamp") else None
+            if not usage or t is None:
+                continue
+            # one API response spans several entries; message.id is the
+            # reliable per-request key (requestId is absent on ~28% of
+            # entries depending on the Claude Code version)
+            rid = msg.get("id") or e.get("requestId") or e.get("uuid")
+            if rid in seen:
+                continue
+            seen.add(rid)
+            read = usage.get("cache_read_input_tokens") or 0
+            write = usage.get("cache_creation_input_tokens") or 0
+            if read == 0 and write == 0 and not usage.get("input_tokens"):
+                continue  # synthetic entry, no real request behind it
+            if label is None:
+                label = os.path.basename(e.get("cwd") or "") or None
+            turns.append((t, read, write, msg.get("model")))
+    turns.sort(key=lambda x: x[0])
+    compacts.sort(key=lambda x: x[0])
+    return turns, compacts, label
+
+
+def verdict_of(read, write, gap_min):
+    if read > 0:
+        return "PARTIAL" if write > read else "HOT"
+    if write > 0:
+        if gap_min is not None and gap_min > TTL_MIN:
+            return "COLD(ttl)"
+        return "COLD(rebuilt)"
+    return "?"
+
+
+def cause_of(verdict, prev_t, t, prev_model, model, compacts):
+    """Attribute a cold or rewritten turn to what the transcript can
+    actually show; 'unknown' rather than a guess when it can't."""
+    if verdict not in ("PARTIAL", "COLD(ttl)", "COLD(rebuilt)"):
+        return None
+    trig = 0
+    for ct, g in compacts:
+        if (prev_t is None or ct > prev_t) and ct <= t:
+            trig = g
+    # a marker without trigger metadata is still certainly a compaction,
+    # but manual-vs-auto would be a guess -- label it generically
+    compact = None if trig == 0 else {
+        "manual": "/compact", "auto": "auto-compact"}.get(trig, "compact")
+    if verdict == "PARTIAL":
+        # after a compact the shared prefix head often stays warm, so the
+        # rebuild grades PARTIAL; only compact-explained ones get a cause
+        return compact
+    if verdict == "COLD(ttl)":
+        return "inactivity+compact" if compact else "inactivity"
+    if prev_t is None:
+        # the first write of a session is unavoidable regardless of any
+        # boundary that precedes it (e.g. a resumed continuation)
+        return "session start"
+    if compact:
+        return compact
+    if prev_model and model and model != prev_model:
+        return "model change"
+    return "unknown"
+
+
+def grade(turns, compacts):
+    """Rows with gap, verdict and cause for one session's turns."""
+    rows, prev = [], None
+    for t, read, write, model in turns:
+        gap = (t - prev[0]).total_seconds() / 60 if prev else None
+        v = verdict_of(read, write, gap)
+        rows.append({"time": t, "gap_min": None if gap is None else round(gap, 1),
+                     "read": read, "write": write, "verdict": v,
+                     "cause": cause_of(v, prev[0] if prev else None, t,
+                                       prev[1] if prev else None, model, compacts)})
+        prev = (t, model)
+    return rows
+
+
+def summarize(rows):
+    counts, causes = {}, {}
+    for r in rows:
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+        if r["cause"]:
+            causes[r["cause"]] = causes.get(r["cause"], 0) + 1
+    cold = [r for r in rows if r["verdict"].startswith("COLD")]
+    cold_tokens = sum(r["write"] for r in cold)
+    # a session's first cache write is the price of admission, not a leak
+    avoidable = sum(r["write"] for r in cold if r["cause"] != "session start")
+    return {"turns": len(rows), "verdicts": counts, "causes": causes,
+            "tokens_recached_cold": cold_tokens,
+            "avoidable_cold_tokens": avoidable,
+            "tokens_read_from_cache": sum(r["read"] for r in rows)}
+
+
+def audit_session(path):
+    turns, compacts, label = parse_transcript(path)
+    if not turns:
+        return None
+    rows = grade(turns, compacts)
+    s = summarize(rows)
+    s["transcript"] = path
+    s["project"] = label or os.path.basename(os.path.dirname(path))
+    s["start"] = rows[0]["time"]
+    return s, rows
 
 
 def find_transcript(path):
@@ -52,43 +212,14 @@ def find_transcript(path):
              "(pass a session .jsonl or run inside a project)" % path)
 
 
-def turns_of(path):
-    """One (timestamp, cache_read, cache_write) per API request."""
-    turns, seen = [], set()
-    with open(path) as f:
-        for line in f:
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            if e.get("type") != "assistant" or e.get("isSidechain"):
-                continue
-            usage = (e.get("message") or {}).get("usage") or {}
-            ts = e.get("timestamp")
-            if not usage or not ts:
-                continue
-            rid = e.get("requestId") or (e.get("message") or {}).get("id") or e.get("uuid")
-            if rid in seen:
-                continue
-            seen.add(rid)
-            read = usage.get("cache_read_input_tokens") or 0
-            write = usage.get("cache_creation_input_tokens") or 0
-            if read == 0 and write == 0 and not usage.get("input_tokens"):
-                continue  # synthetic entry, no real request behind it
-            t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            turns.append((t, read, write))
-    turns.sort(key=lambda x: x[0])
-    return turns
-
-
-def verdict_of(read, write, gap_min):
-    if read > 0:
-        return "PARTIAL" if write > read else "HOT"
-    if write > 0:
-        if gap_min is not None and gap_min > TTL_MIN:
-            return "COLD(ttl)"
-        return "COLD(rebuilt)"
-    return "?"
+def discover(root):
+    """Session transcripts under a projects root (or one project dir).
+    Subagent transcripts live deeper (<session>/subagents/) and are skipped."""
+    if os.path.isfile(root):
+        return [root]
+    files = set(glob.glob(os.path.join(root, "*", "*.jsonl")))
+    files.update(glob.glob(os.path.join(root, "*.jsonl")))
+    return sorted(files)
 
 
 def fmt_gap(m):
@@ -101,68 +232,175 @@ def fmt_gap(m):
     return "%dh%02dm" % (m // 60, m % 60)
 
 
-def main():
-    args = sys.argv[1:]
-    as_json = "--json" in args
-    args = [a for a in args if a != "--json"]
-    if "--ttl" in args:
-        i = args.index("--ttl")
-        global TTL_MIN
-        TTL_MIN = float(args[i + 1])
-        del args[i:i + 2]
-    price = None
-    if "--price" in args:
-        i = args.index("--price")
-        price = float(args[i + 1])
-        del args[i:i + 2]
-    path = find_transcript(args[0] if args else None)
+def fmt_causes(causes):
+    order = ["inactivity", "inactivity+compact", "/compact", "auto-compact",
+             "compact", "model change", "unknown", "session start"]
+    return "  ".join("%s %d" % (c, causes[c]) for c in order if causes.get(c))
 
-    rows, prev = [], None
-    for t, read, write in turns_of(path):
-        gap = (t - prev).total_seconds() / 60 if prev else None
-        rows.append({"time": t.astimezone().strftime("%m-%d %H:%M:%S"),
-                     "gap_min": None if gap is None else round(gap, 1),
-                     "read": read, "write": write,
-                     "verdict": verdict_of(read, write, gap)})
-        prev = t
-    if not rows:
+
+def print_single(path, price, as_json):
+    audited = audit_session(path)
+    if audited is None:
         sys.exit("warmline-audit: no API turns with usage in %s" % path)
-
-    counts = {}
-    for r in rows:
-        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
-    cold_tokens = sum(r["write"] for r in rows if r["verdict"].startswith("COLD"))
-    read_tokens = sum(r["read"] for r in rows)
-    summary = {"transcript": path, "ttl_min": TTL_MIN, "turns": len(rows),
-               "verdicts": counts, "tokens_recached_cold": cold_tokens,
-               "tokens_read_from_cache": read_tokens}
+    s, rows = audited
+    out_rows = [{"time": r["time"].astimezone().strftime("%m-%d %H:%M:%S"),
+                 "gap_min": r["gap_min"], "read": r["read"], "write": r["write"],
+                 "verdict": r["verdict"], "cause": r["cause"]} for r in rows]
+    summary = {"transcript": path, "ttl_min": TTL_MIN, "turns": s["turns"],
+               "verdicts": s["verdicts"], "causes": s["causes"],
+               "tokens_recached_cold": s["tokens_recached_cold"],
+               "avoidable_cold_tokens": s["avoidable_cold_tokens"],
+               "tokens_read_from_cache": s["tokens_read_from_cache"]}
     if price is not None:
-        # a 1h-TTL cache write bills ~2x base input; a warm read ~0.1x --
-        # the avoidable premium of going cold is the 1.9x difference
-        summary["cold_extra_usd"] = round(cold_tokens * 1.9 * price / 1e6, 4)
-        summary["cache_read_usd"] = round(read_tokens * 0.1 * price / 1e6, 4)
-
+        summary["cold_extra_usd"] = round(
+            s["tokens_recached_cold"] * PREMIUM_X * price / 1e6, 4)
+        summary["cache_read_usd"] = round(
+            s["tokens_read_from_cache"] * 0.1 * price / 1e6, 4)
     if as_json:
-        print(json.dumps({"summary": summary, "turns": rows}, indent=1))
+        print(json.dumps({"summary": summary, "turns": out_rows}, indent=1))
         return
 
     print("%s  (ttl %gm)" % (path, TTL_MIN))
     print("%-15s  %6s  %11s  %12s  %s" % ("time", "gap", "cache read", "cache write", "verdict"))
-    for r in rows:
+    for r in out_rows:
+        v = r["verdict"]
+        if r["cause"] and r["cause"] != "inactivity":
+            v += "  <- " + r["cause"]
         print("%-15s  %6s  %11s  %12s  %s"
               % (r["time"], fmt_gap(r["gap_min"]), "{:,}".format(r["read"]),
-                 "{:,}".format(r["write"]), r["verdict"]))
+                 "{:,}".format(r["write"]), v))
     print()
-    print("%d API turns; %s" % (len(rows), "  ".join(
-        "%s %d" % (v, counts[v]) for v in
-        ("HOT", "PARTIAL", "COLD(rebuilt)", "COLD(ttl)", "?") if v in counts)))
+    print("%d API turns; %s" % (s["turns"], "  ".join(
+        "%s %d" % (v, s["verdicts"][v]) for v in
+        ("HOT", "PARTIAL", "COLD(rebuilt)", "COLD(ttl)", "?") if v in s["verdicts"])))
+    if s["causes"]:
+        print("causes: %s" % fmt_causes(s["causes"]))
     print("tokens re-cached while cold: {:,}   read from cache: {:,}".format(
-        cold_tokens, read_tokens))
+        s["tokens_recached_cold"], s["tokens_read_from_cache"]))
     print("(a cold re-cache bills ~2x base input; a warm wake reads at ~0.1x)")
     if price is not None:
         print("at $%g/MTok base input: the cold re-caches cost ~$%.2f more than "
               "warm reads of the same tokens would have; cache reads billed ~$%.2f"
               % (price, summary["cold_extra_usd"], summary["cache_read_usd"]))
+
+
+def print_all(root, price, as_json):
+    sessions, skipped = [], 0
+    for path in discover(root):
+        audited = audit_session(path)
+        if audited is None:
+            skipped += 1
+            continue
+        sessions.append(audited[0])
+    if not sessions:
+        sys.exit("warmline-audit: no auditable sessions under %s" % root)
+    sessions.sort(key=lambda s: (-s["avoidable_cold_tokens"],
+                                 -s["tokens_recached_cold"], s["start"]))
+
+    total = {"sessions": len(sessions), "skipped": skipped, "turns": 0,
+             "verdicts": {}, "causes": {}, "tokens_recached_cold": 0,
+             "avoidable_cold_tokens": 0, "tokens_read_from_cache": 0}
+    for s in sessions:
+        total["turns"] += s["turns"]
+        for k in ("tokens_recached_cold", "avoidable_cold_tokens",
+                  "tokens_read_from_cache"):
+            total[k] += s[k]
+        for d, src in (("verdicts", s["verdicts"]), ("causes", s["causes"])):
+            for k, n in src.items():
+                total[d][k] = total[d].get(k, 0) + n
+    if price is not None:
+        total["avoidable_premium_usd"] = round(
+            total["avoidable_cold_tokens"] * PREMIUM_X * price / 1e6, 2)
+
+    if as_json:
+        out = []
+        for s in sessions:
+            o = dict(s, start=s["start"].isoformat())
+            if price is not None:
+                o["avoidable_premium_usd"] = round(
+                    s["avoidable_cold_tokens"] * PREMIUM_X * price / 1e6, 2)
+            out.append(o)
+        print(json.dumps({"root": root, "ttl_min": TTL_MIN,
+                          "sessions": out, "total": total}, indent=1))
+        return
+
+    print("%d sessions under %s  (%d more without API turns; ttl %gm)"
+          % (len(sessions), root, skipped, TTL_MIN))
+    print()
+    head = "%-12s %-22s %6s %6s %5s %8s %5s %15s" % (
+        "start", "project", "turns", "hot", "part", "rebuilt", "ttl", "avoidable cold")
+    if price is not None:
+        head += "  %9s" % "premium"
+    print(head)
+    for s in sessions + [None]:
+        if s is None:
+            line = "%-12s %-22s %6d %6d %5d %8d %5d %15s" % (
+                "TOTAL", "", total["turns"], total["verdicts"].get("HOT", 0),
+                total["verdicts"].get("PARTIAL", 0),
+                total["verdicts"].get("COLD(rebuilt)", 0),
+                total["verdicts"].get("COLD(ttl)", 0),
+                "{:,}".format(total["avoidable_cold_tokens"]))
+            if price is not None:
+                line += "  %9s" % ("$%.2f" % total["avoidable_premium_usd"])
+            print()
+            print(line)
+            continue
+        v = s["verdicts"]
+        line = "%-12s %-22s %6d %6d %5d %8d %5d %15s" % (
+            s["start"].astimezone().strftime("%m-%d %H:%M"), s["project"][:22],
+            s["turns"], v.get("HOT", 0), v.get("PARTIAL", 0),
+            v.get("COLD(rebuilt)", 0), v.get("COLD(ttl)", 0),
+            "{:,}".format(s["avoidable_cold_tokens"]))
+        if price is not None:
+            line += "  %9s" % ("$%.2f" % (
+                s["avoidable_cold_tokens"] * PREMIUM_X * price / 1e6))
+        print(line)
+    print()
+    if total["causes"]:
+        print("causes: %s" % fmt_causes(total["causes"]))
+    print("avoidable cold = tokens re-cached cold, excluding each session's "
+          "unavoidable first write")
+    if price is not None:
+        print("premium = estimated avoidable premium of those re-caches vs warm "
+              "reads (%.1fx $%g/MTok);" % (PREMIUM_X, price))
+        print("an estimate from recorded token counts, not billing data")
+    else:
+        print("pass --price <$/MTok base input> for an estimated avoidable "
+              "premium in dollars")
+
+
+def take_number(args, flag):
+    if flag not in args:
+        return None
+    i = args.index(flag)
+    if i + 1 >= len(args):
+        sys.exit("warmline-audit: %s needs a number" % flag)
+    try:
+        v = float(args[i + 1])
+    except ValueError:
+        sys.exit("warmline-audit: %s needs a number, got %r"
+                 % (flag, args[i + 1]))
+    del args[i:i + 2]
+    return v
+
+
+def main():
+    args = sys.argv[1:]
+    ttl = take_number(args, "--ttl")
+    price = take_number(args, "--price")
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    do_all = "--all" in args
+    args = [a for a in args if a != "--all"]
+    if ttl is not None:
+        global TTL_MIN
+        TTL_MIN = ttl
+
+    if do_all:
+        root = args[0] if args else os.path.expanduser("~/.claude/projects")
+        print_all(root, price, as_json)
+    else:
+        print_single(find_transcript(args[0] if args else None), price, as_json)
 
 
 if __name__ == "__main__":

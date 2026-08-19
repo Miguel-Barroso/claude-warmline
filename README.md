@@ -1,5 +1,7 @@
 # claude-warmline
 
+**English** | [日本語](README.ja.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
+
 [![tests](https://github.com/Miguel-Barroso/claude-warmline/actions/workflows/test.yml/badge.svg)](https://github.com/Miguel-Barroso/claude-warmline/actions/workflows/test.yml)
 [![version](https://img.shields.io/github/v/tag/Miguel-Barroso/claude-warmline?label=version)](https://github.com/Miguel-Barroso/claude-warmline/tags)
 [![license](https://img.shields.io/github/license/Miguel-Barroso/claude-warmline)](LICENSE)
@@ -13,7 +15,7 @@ is three small tools against that, no dependencies beyond `python3` and `bash`:
 
 - **a statusline** showing the cache state live (`HOT`/`COLD`), next to model, context usage, and idle time
 - **a keep-warm policy** that has the agent cheaply ping the session through long waits, so results land against a hot cache
-- **an auditor** that grades any past session turn-by-turn: what stayed warm, what went cold, what it cost
+- **an auditor** that grades any past session turn-by-turn — what stayed warm, what went cold, *why*, and what it cost — and with `--all` ranks every session on your machine by where the money leaked
 
 ![The warmline statusline in its three states: cache HOT in green, cache COLD(rebuilt) in yellow, cache COLD(ttl?) in red](docs/statusline.svg)
 
@@ -154,6 +156,11 @@ babysitting with background CI watchers):
   Its probe still found the shared system block warm, because the other arm had
   read that block 20 minutes earlier. A keep-warm ping is exactly that refresh,
   applied to your whole prefix.
+- Across this machine's full history (149 sessions over 8 weeks),
+  [`warmline-audit --all`](#where-does-the-money-leak---all) puts the total
+  estimated avoidable premium at **~$64** at Sonnet base pricing — and
+  attributes 43 cache rebuilds to compaction but **87 to unexplained prefix
+  drift**. The leak is rarely where you expect it.
 - An earlier, deliberately-dirty run of the same experiment surfaced a subtler
   failure mode: a headless `--resume` regenerates
   the whole system prompt, so git-status drift, MCP server availability, or an edited
@@ -196,24 +203,77 @@ the block is inert or the agent falls back to a scheduled recurring prompt —
 ./warmline-audit --ttl 5 --json       # short-TTL setups, machine-readable
 ./warmline-audit --price 3            # add a dollar estimate, given your
                                       # model's base input price per MTok
+./warmline-audit --all --price 3      # every session on this machine,
+                                      # ranked by estimated avoidable premium
 ```
 
 Prints one line per API turn — timestamp, idle gap, cache read/write tokens, verdict —
-plus a summary of how much was re-cached cold:
+plus a summary of how much was re-cached cold. Cold (and heavily-rewritten) turns
+carry a **cause** when the transcript can actually support one:
 
 ```
 time                gap   cache read   cache write  verdict
 08-18 10:02:45    6h12m            0        58,427  COLD(ttl)
+08-19 10:37:40    7h56m            0        31,841  COLD(ttl)  <- inactivity+compact
+08-19 10:40:13       2m            0        52,386  COLD(rebuilt)  <- unknown
 08-18 10:13:56      10m       62,567           710  HOT
 
 260 API turns; HOT 255  PARTIAL 3  COLD(rebuilt) 1  COLD(ttl) 1
+causes: inactivity 1  session start 1
 tokens re-cached while cold: 99,188   read from cache: 45,926,103
 ```
+
+Causes are attribution, not guesswork. `/compact` and `auto-compact` mean a
+structured compact-boundary marker sits in the transcript between this turn and
+the previous one (compaction often leaves the shared prefix head warm, so it
+shows up as an attributed `PARTIAL` rather than a full cold rebuild).
+`model change` means the recorded model differs from the previous turn's.
+`session start` is the first cache write every session must pay.
+`inactivity+compact` labels the ambiguous case where a long gap *and* a
+compaction could each explain the rebuild — neither is claimed. Everything else
+is honestly `unknown`: in practice mostly prefix drift (an edited CLAUDE.md,
+changed git state, MCP availability) that the transcript cannot prove.
 
 Unlike the statusline (which lags one turn by construction), the audit is
 authoritative: it reads the recorded usage of every request. Use it to verify the
 keep-warm policy actually kept you warm, or to find out what a `/compact` or an
 overnight gap really cost.
+
+### Where does the money leak? `--all`
+
+`--all` audits every session under `~/.claude/projects` (or a directory you pass)
+and prints one line per session, ranked by **avoidable cold tokens** — tokens
+re-cached cold, excluding each session's unavoidable first write. Real output
+from this machine's 8 weeks of history:
+
+```
+149 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl 60m)
+
+start        project            turns    hot  part  rebuilt   ttl  avoidable cold    premium
+08-07 14:30  MimirBlue            201    189     6        4     2       1,294,770      $7.38
+08-08 10:57  MimirBlue             66     58     1        4     3         814,630      $4.64
+08-18 17:41  claude-warmline      111    104     1        3     3         401,451      $2.29
+...
+TOTAL                          11,058 10,548   329      147    34      11,288,198     $64.34
+
+causes: inactivity 27  inactivity+compact 7  /compact 7  auto-compact 36  model change 3  unknown 87  session start 53
+```
+
+What the dollar figure is — and is not: with `--price <base $/MTok>` the premium
+column is the **estimated avoidable premium** — avoidable cold tokens × 1.9 ×
+your model's base input price (a cold re-cache bills ~2×; the warm read it
+replaced would have billed ~0.1×). It comes from token counts recorded in your
+transcripts, not from billing data, and it ignores per-model price differences
+within a session and subagent transcripts (separate files, separate prefixes,
+deliberately excluded). Treat it as a ranking signal, not an invoice.
+
+How to read it: sessions at the top with big `ttl` counts are keep-warm
+candidates — money lost to walking away. Big `rebuilt`/`unknown` counts mean
+prefix churn: something edited the conversation prefix between turns. Lots of
+`auto-compact` means sessions routinely slamming into the context ceiling, where
+compacting earlier and deliberately (see above) is cheaper. On this machine the
+honest headline is that silent prefix drift (`unknown 87`) rebuilt more caches
+than compaction (43) did — the leak is rarely where you expect it.
 
 ## Configuration
 
@@ -228,6 +288,34 @@ Set these in the environment Claude Code starts from, or in the `env` block of
 `~/.claude/settings.json`. `WARMLINE_TTL_MIN` is honored by both the statusline and
 `warmline-audit`.
 
+## Compatibility and updating
+
+Verified against Claude Code **2.1.233** (current at the time of writing). The
+statusline's JSON fields were checked against real harness payloads, and
+`warmline-audit` parses every transcript format present on this machine —
+Claude Code versions **2.1.181 through 2.1.233**, 149 sessions, zero malformed
+entries. One known format quirk is handled: some versions omit `requestId` on
+~28% of assistant entries, so the audit dedupes API requests by `message.id`.
+
+**Updating:** the installer is the updater. Re-run the same `curl | bash`
+one-liner (or `./install.sh` from a pulled checkout) — it recognizes its own
+statusline and replaces it in place without `--force`, and your `settings.json`
+is backed up on every run. [CHANGELOG.md](CHANGELOG.md) tracks what changed
+between tagged releases.
+
+**Windows:** the statusline and the auditor are pure standard-library Python and
+don't care about the OS; only the installer and the test suite are bash. Manual
+install:
+
+1. copy `statusline.py` to `%USERPROFILE%\.claude\warmline-statusline.py`
+2. in `%USERPROFILE%\.claude\settings.json`, set
+   `"statusLine": {"type": "command", "command": "python C:\\Users\\you\\.claude\\warmline-statusline.py"}`
+3. run the auditor as `python warmline-audit [args]`
+
+ANSI colors render fine in Windows Terminal. A tested `install.ps1` would be a
+welcome contribution — in keeping with this project's philosophy, we don't ship
+one we can't test.
+
 ## Tests
 
 ```sh
@@ -237,8 +325,10 @@ Set these in the environment Claude Code starts from, or in the `env` block of
 Replays representative statusline payloads (hot, cold-rebuild, TTL-expired, sparse,
 garbage, concurrent-session isolation, idle repaints not resetting the clock, a
 fresh turn overriding the TTL inference, the expiry countdown, ANSI colors)
-against the script, and a synthetic transcript against `warmline-audit`
-including the `--price` estimate. The same suite runs in CI on every push.
+against the script, a synthetic transcript against `warmline-audit` including
+the `--price` estimate and every cold-cause attribution (including the ambiguous
+one), and a synthetic multi-project corpus against `--all` (discovery, subagent
+exclusion, ranking, totals, JSON). The same suite runs in CI on every push.
 
 ## License
 

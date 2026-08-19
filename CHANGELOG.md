@@ -4,6 +4,34 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [1.3.0] — 2026-08-19
+
+### Added
+- `warmline-audit --all`: audits every session under `~/.claude/projects`
+  (or a directory you pass), one line per session plus a TOTAL — ranked by
+  **avoidable cold tokens** (cold re-caches minus each session's unavoidable
+  first write). `--price` adds the **estimated avoidable premium** in
+  dollars, explicitly an estimate from recorded token counts, not billing
+  data. `--json` gives the same machine-readable. Subagent transcripts and
+  turnless sessions are excluded.
+- Cold-cause attribution: cold turns (and compact-explained PARTIALs) are
+  labeled `session start`, `/compact`, `auto-compact`, `model change`,
+  `inactivity`, `inactivity+compact` (deliberately ambiguous), or `unknown`
+  — read from structured `compact_boundary` markers and recorded models in
+  the transcript, never guessed.
+- README: Compatibility (transcript formats from Claude Code 2.1.181–2.1.233
+  verified), Updating (re-running the installer is the update mechanism),
+  manual Windows install steps.
+- README translations: Japanese (`README.ja.md`), Traditional Chinese
+  (`README.zh-TW.md`), Simplified Chinese (`README.zh-CN.md`), with a
+  language switcher atop each.
+
+### Changed
+- Audit request dedup now prefers `message.id` over `requestId`, which some
+  Claude Code versions omit on ~28% of assistant entries.
+- Transcript parsing prefilters irrelevant lines: `--all` covers 149
+  sessions / 353 MB in under a second on the reference machine.
+
 ## [1.2.0] — 2026-08-19
 
 ### Added
