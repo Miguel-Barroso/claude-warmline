@@ -13,12 +13,20 @@ the statusline live:
 Usage:
     warmline-audit                    # latest session of the current project
     warmline-audit TRANSCRIPT.jsonl   # a specific session
-    warmline-audit --ttl 5 --json     # short-TTL setup, machine-readable
+    warmline-audit --ttl 5 --json     # force a TTL, machine-readable
     warmline-audit --price 3          # estimate cold-cache cost in dollars,
                                       # given the model's base input $/MTok
     warmline-audit --all              # one summary line per session across
                                       # all projects, ranked by avoidable
                                       # cold tokens; --all DIR audits DIR
+    warmline-audit --live             # which sessions are warm RIGHT NOW,
+                                      # and when each goes cold (this is
+                                      # what `warmline watch` re-renders)
+
+The TTL each session is graded against is auto-detected from its own
+usage entries (cache writes record their ephemeral_5m/1h bucket);
+--ttl / WARMLINE_TTL_MIN force one, and 60m is the fallback when a
+transcript predates bucket recording.
 
 Verdicts (authoritative here, unlike the statusline's one-turn lag):
   HOT            the turn read its prefix from the cache
@@ -58,6 +66,9 @@ import re
 import sys
 
 TTL_MIN = float(os.environ.get("WARMLINE_TTL_MIN", "60"))
+# --ttl / WARMLINE_TTL_MIN force the TTL; otherwise each session's own
+# cache-bucket records decide, with TTL_MIN as the fallback
+TTL_FORCED = "WARMLINE_TTL_MIN" in os.environ
 # every front end that runs the Claude Code engine locally -- terminal CLI,
 # desktop app, IDE extension -- records its transcripts here
 PROJECTS_DIR = os.path.join(
@@ -135,10 +146,13 @@ def parse_ts(ts):
 
 
 def parse_transcript(path):
-    """(turns, compacts, label): turns are (time, read, write, model) per
-    API request; compacts are sorted (time, trigger); label is the basename
-    of the first assistant entry's cwd."""
+    """(turns, compacts, label, ttl_hint): turns are (time, read, write,
+    model) per API request; compacts are sorted (time, trigger); label is
+    the basename of the first assistant entry's cwd; ttl_hint is the TTL
+    in minutes the session's cache writes imply (5 when the 5m bucket
+    dominates, 60 for the 1h bucket, None when unrecorded)."""
     turns, seen, compacts, label = [], set(), [], None
+    eph5 = eph1h = 0
     with open(path) as f:
         for line in f:
             # cheap prefilter: most transcript bytes are tool results in
@@ -176,17 +190,21 @@ def parse_transcript(path):
                 continue  # synthetic entry, no real request behind it
             if label is None:
                 label = os.path.basename(e.get("cwd") or "") or None
+            cc = usage.get("cache_creation") or {}
+            eph5 += cc.get("ephemeral_5m_input_tokens") or 0
+            eph1h += cc.get("ephemeral_1h_input_tokens") or 0
             turns.append((t, read, write, msg.get("model")))
     turns.sort(key=lambda x: x[0])
     compacts.sort(key=lambda x: x[0])
-    return turns, compacts, label
+    ttl_hint = 5 if eph5 > eph1h else 60 if eph1h else None
+    return turns, compacts, label, ttl_hint
 
 
-def verdict_of(read, write, gap_min):
+def verdict_of(read, write, gap_min, ttl_min):
     if read > 0:
         return "PARTIAL" if write > read else "HOT"
     if write > 0:
-        if gap_min is not None and gap_min > TTL_MIN:
+        if gap_min is not None and gap_min > ttl_min:
             return "COLD(ttl)"
         return "COLD(rebuilt)"
     return "?"
@@ -222,12 +240,12 @@ def cause_of(verdict, prev_t, t, prev_model, model, compacts):
     return "unknown"
 
 
-def grade(turns, compacts):
+def grade(turns, compacts, ttl_min):
     """Rows with gap, verdict and cause for one session's turns."""
     rows, prev = [], None
     for t, read, write, model in turns:
         gap = (t - prev[0]).total_seconds() / 60 if prev else None
-        v = verdict_of(read, write, gap)
+        v = verdict_of(read, write, gap, ttl_min)
         rows.append({"time": t, "gap_min": None if gap is None else round(gap, 1),
                      "read": read, "write": write, "verdict": v,
                      "cause": cause_of(v, prev[0] if prev else None, t,
@@ -253,14 +271,18 @@ def summarize(rows):
 
 
 def audit_session(path):
-    turns, compacts, label = parse_transcript(path)
+    turns, compacts, label, ttl_hint = parse_transcript(path)
     if not turns:
         return None
-    rows = grade(turns, compacts)
+    ttl = TTL_MIN if TTL_FORCED else (ttl_hint or TTL_MIN)
+    rows = grade(turns, compacts, ttl)
     s = summarize(rows)
     s["transcript"] = path
     s["project"] = label or os.path.basename(os.path.dirname(path))
     s["start"] = rows[0]["time"]
+    s["ttl_min"] = ttl
+    s["ttl_source"] = ("forced" if TTL_FORCED else
+                       "buckets" if ttl_hint else "default")
     return s, rows
 
 
@@ -313,7 +335,8 @@ def print_single(path, price, as_json):
     out_rows = [{"time": r["time"].astimezone().strftime("%m-%d %H:%M:%S"),
                  "gap_min": r["gap_min"], "read": r["read"], "write": r["write"],
                  "verdict": r["verdict"], "cause": r["cause"]} for r in rows]
-    summary = {"transcript": path, "ttl_min": TTL_MIN, "turns": s["turns"],
+    summary = {"transcript": path, "ttl_min": s["ttl_min"],
+               "ttl_source": s["ttl_source"], "turns": s["turns"],
                "verdicts": s["verdicts"], "causes": s["causes"],
                "tokens_recached_cold": s["tokens_recached_cold"],
                "avoidable_cold_tokens": s["avoidable_cold_tokens"],
@@ -327,7 +350,9 @@ def print_single(path, price, as_json):
         print(json.dumps({"summary": summary, "turns": out_rows}, indent=1))
         return
 
-    print("%s  (ttl %gm)" % (path, TTL_MIN))
+    ttl_note = {"forced": "forced", "buckets": "from its cache buckets",
+                "default": "default"}[s["ttl_source"]]
+    print("%s  (ttl %gm, %s)" % (path, s["ttl_min"], ttl_note))
     print("%-15s  %6s  %11s  %12s  %s" % ("time", "gap", "cache read", "cache write", "verdict"))
     for r in out_rows:
         v = paint(r["verdict"], VERDICT_COLOR.get(r["verdict"], DIM))
@@ -395,8 +420,10 @@ def print_all(root, price, as_json):
                           "sessions": out, "total": total}, indent=1))
         return
 
-    print("%d sessions under %s  (%d more without API turns; ttl %gm)"
-          % (len(sessions), root, skipped, TTL_MIN))
+    ttl_note = ("ttl %gm forced" % TTL_MIN) if TTL_FORCED else \
+        "ttl per session from its cache buckets, %gm fallback" % TTL_MIN
+    print("%d sessions under %s  (%d more without API turns; %s)"
+          % (len(sessions), root, skipped, ttl_note))
     print()
     print(health_line(total["verdicts"], total["turns"]))
     rebuilt = total["verdicts"].get("COLD(rebuilt)", 0)
@@ -466,6 +493,88 @@ def print_all(root, price, as_json):
               "premium in dollars")
 
 
+def fmt_when(t, now):
+    lt = t.astimezone()
+    if lt.date() == now.astimezone().date():
+        return lt.strftime("%H:%M")
+    return lt.strftime("%a %H:%M")
+
+
+def print_live(root, as_json):
+    """Which sessions are warm RIGHT NOW, from last-turn times and each
+    session's TTL. No one-turn lag, no repaint dependency -- this is the
+    view `warmline watch` re-renders, and it covers desktop-app sessions
+    that have no statusline surface at all."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(hours=24)
+    rows = []
+    for path in discover(root):
+        try:
+            # mtime is only a prefilter (housekeeping can touch old
+            # files); the last turn's own timestamp decides below
+            if os.path.getmtime(path) < (cutoff.timestamp() - 7200):
+                continue
+        except OSError:
+            continue
+        audited = audit_session(path)
+        if audited is None:
+            continue
+        s, graded = audited
+        last = graded[-1]
+        if last["time"] < cutoff:
+            continue
+        left = s["ttl_min"] - (now - last["time"]).total_seconds() / 60
+        rows.append({
+            "project": s["project"],
+            "session": os.path.basename(path).rsplit(".", 1)[0][:8],
+            "transcript": path,
+            "last_turn": last["time"],
+            "turns": s["turns"],
+            "ctx_tokens": last["read"] + last["write"],
+            "ttl_min": s["ttl_min"],
+            "warm": left > 0,
+            "cold_at": last["time"] + datetime.timedelta(minutes=s["ttl_min"]),
+            "minutes_left": left,
+        })
+    # warm sessions first, soonest-to-die on top; cold ones by recency
+    rows.sort(key=lambda r: (not r["warm"],
+                             r["minutes_left"] if r["warm"] else 0,
+                             -r["last_turn"].timestamp()))
+
+    if as_json:
+        out = [dict(r, last_turn=r["last_turn"].isoformat(),
+                    cold_at=r["cold_at"].isoformat(),
+                    minutes_left=round(r["minutes_left"], 1)) for r in rows]
+        print(json.dumps({"root": root, "now": now.isoformat(),
+                          "sessions": out}, indent=1))
+        return
+
+    print("live cache warmth  %s  (%d sessions with API turns in the last 24h)"
+          % (now.astimezone().strftime("%H:%M:%S"), len(rows)))
+    if not rows:
+        return
+    print()
+    print("%-24s %-22s %-9s %-10s %6s %6s" % (
+        "state", "project", "session", "last turn", "turns", "ctx"))
+    for r in rows:
+        if r["warm"]:
+            state = "WARM  cold ~%s (%dm)" % (
+                r["cold_at"].astimezone().strftime("%H:%M"),
+                max(1, round(r["minutes_left"])))
+            color = YELLOW if r["minutes_left"] <= 15 else GREEN
+        else:
+            state = "cold  since %s" % fmt_when(r["cold_at"], now)
+            color = DIM
+        # pad before painting: ANSI is zero-width on screen, not to %-24s
+        print("%s %-22s %-9s %-10s %6d %5dk" % (
+            paint("%-24s" % state, color), r["project"][:22], r["session"],
+            fmt_when(r["last_turn"], now), r["turns"],
+            round(r["ctx_tokens"] / 1000)))
+    print()
+    print("WARM = the cache still holds that session's prefix: resuming now")
+    print("reads it at ~0.1x; after it goes cold the next turn re-caches at ~2x.")
+
+
 def take_number(args, flag):
     if flag not in args:
         return None
@@ -488,12 +597,16 @@ def main():
     as_json = "--json" in args
     args = [a for a in args if a != "--json"]
     do_all = "--all" in args
-    args = [a for a in args if a != "--all"]
+    do_live = "--live" in args
+    args = [a for a in args if a not in ("--all", "--live")]
     if ttl is not None:
-        global TTL_MIN
+        global TTL_MIN, TTL_FORCED
         TTL_MIN = ttl
+        TTL_FORCED = True
 
-    if do_all:
+    if do_live:
+        print_live(args[0] if args else PROJECTS_DIR, as_json)
+    elif do_all:
         root = args[0] if args else PROJECTS_DIR
         print_all(root, price, as_json)
     else:

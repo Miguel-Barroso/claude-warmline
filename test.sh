@@ -4,6 +4,8 @@ cd "$(dirname "$0")"
 
 export WARMLINE_STATE_DIR="$(mktemp -d)"
 export WARMLINE_NO_COLOR=1
+# the host machine may configure these; the tests assume the defaults
+unset WARMLINE_TTL_MIN WARMLINE_REFRESH_SEC WARMLINE_FORCE_COLOR
 # an empty config dir, so the keep-warm field of the statusline tests below
 # reads a known-OFF state instead of whoever's real ~/.claude/CLAUDE.md
 export CLAUDE_CONFIG_DIR="$WARMLINE_STATE_DIR/cfg"
@@ -88,6 +90,48 @@ if [[ "$out" == *"cache HOT (cold in 10m)"* && "$out" == *"gap 50m"* ]]; then
   echo "ok   countdown: $out"; pass=$((pass + 1))
 else
   echo "FAIL countdown: expected 'cache HOT (cold in 10m)': $out"; fail=$((fail + 1))
+fi
+
+# Stale-proof HOT: more than 15m from the TTL, the verdict carries the
+# absolute wall-clock expiry (exactly stamp mtime + TTL), so a line frozen
+# on screen for hours still reads truthfully.
+printf '%s' "${HOT/t1/e1}" | ./statusline.py >/dev/null   # first sighting seeds the stamp
+python3 - "$WARMLINE_STATE_DIR/e1.stamp" <<'PY'
+import os, sys, time
+t = time.time() - 20 * 60
+os.utime(sys.argv[1], (t, t))
+PY
+exp=$(python3 -c 'import os, sys, time
+print(time.strftime("%H:%M", time.localtime(os.path.getmtime(sys.argv[1]) + 3600)))' \
+  "$WARMLINE_STATE_DIR/e1.stamp")
+out=$(printf '%s' "${HOT/t1/e1}" | ./statusline.py)
+if [[ "$out" == *"cache HOT (cold ~$exp)"* && "$out" == *"gap 20m"* ]]; then
+  echo "ok   absolute-expiry: $out"; pass=$((pass + 1))
+else
+  echo "FAIL absolute-expiry: expected 'cache HOT (cold ~$exp)' in: $out"; fail=$((fail + 1))
+fi
+
+# TTL auto-detect: a transcript whose last cache write went to the 5m
+# bucket sets the gauge's TTL, so a 7m gap is already COLD(ttl?);
+# WARMLINE_TTL_MIN still overrides the sniff.
+T5="$WARMLINE_STATE_DIR/t5-transcript.jsonl"
+printf '%s\n' '{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":9000,"input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":9000,"ephemeral_1h_input_tokens":0}}}}' > "$T5"
+HOT5=$(python3 -c 'import json, sys
+d = json.loads(sys.argv[1]); d["session_id"] = "t5"; d["transcript_path"] = sys.argv[2]
+print(json.dumps(d))' "$HOT" "$T5")
+printf '%s' "$HOT5" | ./statusline.py >/dev/null
+python3 - "$WARMLINE_STATE_DIR/t5.stamp" <<'PY'
+import os, sys, time
+t = time.time() - 7 * 60
+os.utime(sys.argv[1], (t, t))
+PY
+out=$(printf '%s' "$HOT5" | ./statusline.py)
+out2=$(printf '%s' "$HOT5" | WARMLINE_TTL_MIN=60 ./statusline.py)
+if [[ "$out" == *"cache COLD(ttl?)"* && "$out" == *"gap 7m"* \
+   && "$out2" == *"cache HOT"* ]]; then
+  echo "ok   ttl-sniff: 5m bucket -> COLD(ttl?) at a 7m gap; env override wins"; pass=$((pass + 1))
+else
+  echo "FAIL ttl-sniff: $out / $out2"; fail=$((fail + 1))
 fi
 
 # Colors on by default: a fresh session's HOT should carry the green code.
@@ -264,6 +308,71 @@ else
   echo "FAIL corrupt-ts:"; echo "$out"; fail=$((fail + 1))
 fi
 
+# TTL auto-detect: cache writes recorded in the 5m bucket grade the session
+# against a 5m TTL (a 7m gap becomes COLD(ttl)); --ttl still forces one.
+A5="$WARMLINE_STATE_DIR/audit-5m.jsonl"
+cat > "$A5" <<'EOF'
+{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"id":"q1","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":9000,"input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":9000,"ephemeral_1h_input_tokens":0}}}}
+{"type":"assistant","timestamp":"2026-01-01T00:07:00Z","message":{"id":"q2","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":9100,"input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":9100,"ephemeral_1h_input_tokens":0}}}}
+EOF
+out=$(./warmline-audit "$A5")
+out2=$(./warmline-audit --ttl 60 "$A5")
+if [[ "$out" == *"(ttl 5m, from its cache buckets)"* && "$out" == *"COLD(ttl) 1"* \
+   && "$out2" == *"(ttl 60m, forced)"* && "$out2" == *"COLD(rebuilt) 2"* ]]; then
+  echo "ok   audit-ttl-auto: 5m bucket detected, --ttl forces"; pass=$((pass + 1))
+else
+  echo "FAIL audit-ttl-auto:"; echo "$out"; echo "$out2"; fail=$((fail + 1))
+fi
+
+# --live: warmth is computed from last-turn timestamps against each
+# session's own TTL. A 10m-old 1h-bucket session is WARM; the same age on
+# the 5m bucket is already cold; a 3h-old session is cold; warm rows sort
+# first.
+LROOT="$WARMLINE_STATE_DIR/live-projects"
+mkdir -p "$LROOT/proj-warm" "$LROOT/proj-shortttl" "$LROOT/proj-stale"
+python3 - "$LROOT" <<'PY'
+import datetime, json, os, sys
+root = sys.argv[1]
+now = datetime.datetime.now(datetime.timezone.utc)
+def entry(name, mins_ago, mid, cc):
+    u = {"cache_read_input_tokens": 50000, "cache_creation_input_tokens": 500,
+         "input_tokens": 5}
+    if cc:
+        u["cache_creation"] = cc
+    return json.dumps({
+        "type": "assistant",
+        "timestamp": (now - datetime.timedelta(minutes=mins_ago)
+                      ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cwd": "/tmp/" + name, "message": {"id": mid, "usage": u}}) + "\n"
+w = open(os.path.join(root, "proj-warm", "s-warm.jsonl"), "w")
+w.write(entry("proj-warm", 40, "w1", None))
+w.write(entry("proj-warm", 10, "w2",
+              {"ephemeral_1h_input_tokens": 500, "ephemeral_5m_input_tokens": 0}))
+open(os.path.join(root, "proj-shortttl", "s-short.jsonl"), "w").write(
+    entry("proj-shortttl", 10, "s1",
+          {"ephemeral_5m_input_tokens": 500, "ephemeral_1h_input_tokens": 0}))
+open(os.path.join(root, "proj-stale", "s-stale.jsonl"), "w").write(
+    entry("proj-stale", 180, "x1", None))
+PY
+out=$(./warmline-audit --live --json "$LROOT" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+s = {r["project"]: r for r in d["sessions"]}
+assert len(s) == 3, s
+assert s["proj-warm"]["warm"] is True and s["proj-warm"]["ttl_min"] == 60
+assert 44 <= s["proj-warm"]["minutes_left"] <= 51, s["proj-warm"]
+assert s["proj-shortttl"]["warm"] is False and s["proj-shortttl"]["ttl_min"] == 5
+assert s["proj-stale"]["warm"] is False
+assert d["sessions"][0]["project"] == "proj-warm"
+print("live-ok")')
+out2=$(./warmline-audit --live "$LROOT")
+if [[ "$out" == "live-ok" && "$out2" == *"WARM  cold ~"* \
+   && "$out2" == *"cold  since"* && "$out2" == *"3 sessions"* ]]; then
+  echo "ok   live: per-session ttl, warm first, text and json agree"; pass=$((pass + 1))
+else
+  echo "FAIL live: $out"; echo "$out2"; fail=$((fail + 1))
+fi
+
 # ---- installer + warmline CLI (isolated via CLAUDE_CONFIG_DIR / WARMLINE_BIN_DIR) ----
 IROOT="$(mktemp -d)"
 IBIN="$(mktemp -d)"
@@ -279,7 +388,7 @@ out=$(CLAUDE_CONFIG_DIR="$IROOT" ./warmline status)
 rc=0; CLAUDE_CONFIG_DIR="$IROOT" ./warmline keep-warm status >/dev/null || rc=$?
 if [[ "$(echo "$out" | grep statusline)" == *" OFF "* \
    && "$(echo "$out" | grep keep-warm)" == *" OFF "* \
-   && "$out" == *"60m (default)"* && "$rc" == 1 \
+   && "$out" == *"60m fallback"* && "$rc" == 1 \
    && -z "$(ls -A "$IROOT")" ]]; then
   echo "ok   cli-pre-install: all OFF, exit 1, nothing created"; pass=$((pass + 1))
 else
@@ -298,12 +407,36 @@ else
   echo "FAIL ins-fresh:"; echo "$out"; fail=$((fail + 1))
 fi
 
+# The wired statusLine self-refreshes while idle: refreshInterval 60 by
+# default, a hand-tuned value survives reinstall, WARMLINE_REFRESH_SEC=0
+# removes it, and `warmline status` reports each state.
+ri() { python3 -c 'import json, sys
+print(json.load(open(sys.argv[1]))["statusLine"].get("refreshInterval"))' "$IROOT/settings.json"; }
+r60=$(ri); out=$(wl status)
+python3 - "$IROOT/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["statusLine"]["refreshInterval"] = 25
+json.dump(d, open(p, "w"), indent=2)
+PY
+inst >/dev/null; r25=$(ri)
+CLAUDE_CONFIG_DIR="$IROOT" WARMLINE_BIN_DIR="$IBIN" WARMLINE_REFRESH_SEC=0 ./install.sh >/dev/null
+r0=$(ri); out0=$(wl status)
+inst >/dev/null   # back to the default for the tests below
+if [[ "$r60" == 60 && "$out" == *"every 60s while idle"* && "$r25" == 25 \
+   && "$r0" == None && "$out0" == *"event-driven only"* ]]; then
+  echo "ok   ins-refresh: 60s default, tuned survives, 0 removes, status reports"; pass=$((pass + 1))
+else
+  echo "FAIL ins-refresh: r60=$r60 r25=$r25 r0=$r0"; echo "$out"; echo "$out0"; fail=$((fail + 1))
+fi
+
 # Help: top-level lists every subcommand; keep-warm help has the exit codes;
 # bare invocations print usage.
 out=$(wl --help); out2=$(wl keep-warm --help); out3=$(wl)
 if [[ "$out" == *"warmline status"* && "$out" == *"keep-warm on"* \
    && "$out" == *"keep-warm off"* && "$out" == *"keep-warm status"* \
-   && "$out" == *"warmline audit"* \
+   && "$out" == *"warmline audit"* && "$out" == *"warmline watch"* \
    && "$out2" == *"ON / OFF / INCONSISTENT"* && "$out2" == *"exit 0 / 1 / 2"* \
    && "$out3" == *"warmline status"* ]]; then
   echo "ok   cli-help: subcommands and exit codes documented"; pass=$((pass + 1))
@@ -427,6 +560,17 @@ if [[ "$rc" == 2 && "$rc2" == 2 ]]; then
   echo "ok   cli-unknown: unknown commands rejected with exit 2"; pass=$((pass + 1))
 else
   echo "FAIL cli-unknown: rc=$rc rc2=$rc2"; fail=$((fail + 1))
+fi
+
+# warmline watch: help documents the loop and the one-shot form; bad flags
+# and a non-numeric interval are rejected before any loop starts.
+out=$(wl watch --help)
+rc=0; wl watch --bogus >/dev/null 2>&1 || rc=$?
+rc2=0; wl watch -n abc >/dev/null 2>&1 || rc2=$?
+if [[ "$out" == *"-n SECS"* && "$out" == *"--live"* && "$rc" == 2 && "$rc2" == 2 ]]; then
+  echo "ok   cli-watch: help shown, bad flags and intervals exit 2"; pass=$((pass + 1))
+else
+  echo "FAIL cli-watch: rc=$rc rc2=$rc2"; echo "$out"; fail=$((fail + 1))
 fi
 
 # Installer help: install-side flags only, pointing control at warmline.

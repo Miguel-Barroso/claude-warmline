@@ -3,11 +3,13 @@
 
 Renders one line:
 
-    Fable 5 | my-project | ctx 43% (168k) | cache HOT | gap 12m | keep-warm on
+    Fable 5 | my-project | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m | keep-warm on
 
 Cache verdict (colored green/yellow/red unless NO_COLOR or
 WARMLINE_NO_COLOR is set):
-  HOT             the previous request read from the prompt cache
+  HOT (cold ~13:04)  the previous request read from the prompt cache; the
+                  absolute wall-clock expiry makes the line stale-proof --
+                  even a frozen repaint read hours later tells the truth
   HOT (cold in Nm)  still warm, but the idle gap is within 15 minutes of
                   the TTL -- ping or come back now, or pay the rebuild
   COLD(rebuilt)   the previous request wrote the cache without reading it
@@ -16,6 +18,14 @@ WARMLINE_NO_COLOR is set):
                   cache TTL, so the prefix has expired regardless of what
                   the stale usage fields say
   ?               usage fields unavailable
+
+The installer wires statusLine.refreshInterval (60s) into settings.json,
+so Claude Code re-runs this script while the session idles and COLD(ttl?)
+appears within a minute of the TTL passing -- no more stale HOT. That
+refresh runs this local script only: it never talks to the API, costs
+nothing, and does not keep the cache warm. On Claude Code versions without
+refreshInterval the line is event-driven and can freeze; the absolute
+expiry time in the HOT verdict keeps even a frozen line honest.
 
 The usage numbers Claude Code passes to the statusline describe the
 PREVIOUS request, so HOT/COLD(rebuilt) are authoritative but lag one
@@ -42,8 +52,10 @@ the clock, and COLD(ttl?) appears (and persists) on the next repaint after
 the TTL passes. Concurrent sessions don't reset each other's clock.
 
 Configuration (environment variables):
-  WARMLINE_TTL_MIN    prompt-cache TTL in minutes (default 60; set 5 if
-                      your setup uses the short TTL)
+  WARMLINE_TTL_MIN    prompt-cache TTL in minutes. Unset, the TTL is
+                      auto-detected from the transcript's last cache write
+                      (usage entries record the ephemeral_5m/1h bucket),
+                      falling back to 60
   WARMLINE_STATE_DIR  stamp-file directory (default ~/.claude/warmline-state)
   WARMLINE_NO_COLOR   if set (or NO_COLOR), plain output without ANSI colors
   WARMLINE_NO_KEEPWARM  if set, omit the keep-warm field
@@ -95,6 +107,39 @@ def keep_warm_state():
     if begin and end:
         return "on"
     return "?" if begin or end else "off"
+
+
+def sniff_ttl(transcript_path):
+    """TTL in minutes from the transcript's last cache write, or None.
+
+    Transcript usage entries record which bucket a cache write went to
+    (cache_creation.ephemeral_5m/1h_input_tokens); the statusline payload
+    doesn't carry that, so peek at the transcript tail.
+    """
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        if '"ephemeral_5m_input_tokens"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue  # the 64k window can start mid-line
+        if not isinstance(e, dict):
+            continue
+        cc = ((e.get("message") or {}).get("usage") or {}).get("cache_creation") or {}
+        e5 = cc.get("ephemeral_5m_input_tokens") or 0
+        e1 = cc.get("ephemeral_1h_input_tokens") or 0
+        if e5 or e1:
+            return 5 if e5 > e1 else 60
+    return None
 
 
 def session_state(session_id, snapshot, raw):
@@ -166,14 +211,28 @@ def main():
     ws = d.get("workspace") or {}
     cwd = os.path.basename(ws.get("current_dir") or d.get("cwd") or "") or "?"
 
-    remaining = None if gap_min is None else TTL_MIN - gap_min
+    ttl_min = TTL_MIN
+    if "WARMLINE_TTL_MIN" not in os.environ:
+        ttl_min = sniff_ttl(d.get("transcript_path")) or TTL_MIN
+
+    # a fresh turn just reset the clock, so the full TTL lies ahead; the
+    # stamp's mtime (which gap_min was read from) predates the reset
+    remaining = ttl_min if fresh else (
+        None if gap_min is None else ttl_min - gap_min)
+    warn_min = min(EXPIRY_WARN_MIN, ttl_min / 2)
     if not fresh and remaining is not None and remaining <= 0:
         cache = paint("cache COLD(ttl?)", RED)
     elif cache_read > 0:
-        if not fresh and remaining is not None and remaining <= EXPIRY_WARN_MIN:
+        if remaining is None:
+            cache = paint("cache HOT", GREEN)
+        elif not fresh and remaining <= warn_min:
             cache = paint("cache HOT (cold in %dm)" % max(1, round(remaining)), YELLOW)
         else:
-            cache = paint("cache HOT", GREEN)
+            # absolute wall-clock expiry: stale-proof on harnesses that
+            # never repaint an idle line
+            cold_at = time.strftime(
+                "%H:%M", time.localtime(time.time() + remaining * 60))
+            cache = paint("cache HOT (cold ~%s)" % cold_at, GREEN)
     elif cache_creation > 0:
         cache = paint("cache COLD(rebuilt)", YELLOW)
     else:

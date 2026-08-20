@@ -27,9 +27,11 @@ nothing phones home.
 | `keep-warm.md` | `~/.claude/warmline-keep-warm.md` (the policy source) |
 
 `settings.json` is backed up to `settings.json.warmline-bak` on every run, and
-an existing custom `statusLine` is never replaced without `--force`. Claude
-Code usually picks the statusline up within seconds — restart the session if it
-doesn't.
+an existing custom `statusLine` is never replaced without `--force`. The wiring
+includes `"refreshInterval": 60`, so the gauge re-renders every minute even
+while a session idles — [why that matters](STATUSLINE.md#staying-current-while-idle).
+Claude Code usually picks the statusline up within seconds — restart the
+session if it doesn't.
 
 Override the destinations with `CLAUDE_CONFIG_DIR` (config dir) and
 `WARMLINE_BIN_DIR` (commands). If `~/.local/bin` isn't on your `PATH`, the
@@ -58,7 +60,8 @@ claude-warmline status  (config: /Users/mb/.claude)
   statusline  ON   /Users/mb/.claude/warmline-statusline.py
   keep-warm   OFF  (enable: warmline keep-warm on)
   auditor     ON   /Users/mb/.local/bin/warmline-audit
-  ttl         60m (default)
+  ttl         auto -- from each transcript's cache buckets (60m fallback)
+  refresh     every 60s while idle -- the gauge can't go stale
 ```
 
 ## Updating
@@ -84,7 +87,8 @@ of that file untouched.
 
 | Environment variable | Default | Meaning |
 |---|---|---|
-| `WARMLINE_TTL_MIN` | `60` | prompt-cache TTL in minutes (set `5` for short-TTL setups) |
+| `WARMLINE_TTL_MIN` | auto | prompt-cache TTL in minutes; unset, both the statusline and the auditor detect it from each transcript's cache-bucket records (60m fallback) |
+| `WARMLINE_REFRESH_SEC` | `60` | install-time: the statusline `refreshInterval` the installer writes; `0` omits it (a value you hand-edit later survives reinstalls) |
 | `WARMLINE_STATE_DIR` | `~/.claude/warmline-state` | stamp/state directory |
 | `WARMLINE_BIN_DIR` | `~/.local/bin` | where the installer puts the `warmline` and `warmline-audit` commands |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, the statusline omits the keep-warm field |
@@ -104,7 +108,10 @@ checked against real harness payloads, and `warmline-audit` parses every
 transcript format present on the reference machine — Claude Code versions
 **2.1.181 through 2.1.233**, 145 sessions, zero malformed entries. One known
 format quirk is handled: some versions omit `requestId` on ~28% of assistant
-entries, so the audit dedupes API requests by `message.id`.
+entries, so the audit dedupes API requests by `message.id`. Claude Code
+versions without `statusLine.refreshInterval` support ignore the key
+harmlessly — the gauge is then event-driven only, which the absolute expiry
+time in the HOT verdict is designed to survive.
 
 Which front ends each piece reaches — terminal, desktop app, IDE, SSH, cloud —
 is [its own page](SURFACES.md).
@@ -136,10 +143,13 @@ philosophy, we don't ship one we can't test.
 Replays representative statusline payloads (hot, cold-rebuild, TTL-expired,
 sparse, garbage, concurrent-session isolation, idle repaints not resetting the
 clock, a fresh turn overriding the TTL inference, the expiry countdown, the
-keep-warm field in all three states plus its opt-out, ANSI colors) against the
-script; a synthetic transcript against `warmline-audit` including the `--price`
-estimate, every cold-cause attribution, config-dir discovery, and TTY vs piped
-formatting; a synthetic multi-project corpus against `--all`; and the `warmline`
+absolute expiry time, TTL auto-detection from cache buckets, the keep-warm
+field in all three states plus its opt-out, ANSI colors) against the script; a
+synthetic transcript against `warmline-audit` including the `--price` estimate,
+every cold-cause attribution, per-session TTL auto-detection, a now-relative
+corpus against `--live`, config-dir discovery, and TTY vs piped formatting; a
+synthetic multi-project corpus against `--all`; the installer's
+`refreshInterval` wiring (default, hand-tuned, disabled); and the `warmline`
 CLI's keep-warm state transitions (on→on, off→off, malformed blocks reported
 truthfully instead of a false ON), with unrelated CLAUDE.md content verified to
 survive every operation and a clean-install check that the `warmline` command

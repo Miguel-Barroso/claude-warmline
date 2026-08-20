@@ -22,6 +22,8 @@ claude-warmline: cache-aware statusline, session auditor, keep-warm policy.
 The installer (install.sh) installs and updates; this command controls.
 
   warmline status              what is installed and enabled right now
+  warmline watch [-n SECS]     live warmth view of every session, refreshed
+                               every 10s (or SECS) until ctrl-c
   warmline keep-warm on        turn the keep-warm policy ON (global)
   warmline keep-warm off       turn it OFF -- removes only warmline's block
   warmline keep-warm status    detailed state; exit 0=ON  1=OFF  2=INCONSISTENT
@@ -175,9 +177,11 @@ find_audit() {
 }
 
 cmd_status() {
-  local wired=none settings_ttl="" sl_line kw_line audit_line ttl_line audit_path
+  local wired=none settings_ttl="" refresh="" sl_line kw_line audit_line ttl_line refresh_line="" audit_path
   if [ -f "$SETTINGS" ]; then
-    IFS=$'\t' read -r wired settings_ttl < <(DEST="$DEST" python3 - "$SETTINGS" <<'PY'
+    # '|'-separated: a non-whitespace IFS keeps empty fields, where
+    # consecutive tabs would collapse and shift the columns
+    IFS='|' read -r wired settings_ttl refresh < <(DEST="$DEST" python3 - "$SETTINGS" <<'PY'
 import json, os, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -186,7 +190,8 @@ except Exception:
 sl = d.get("statusLine") or {}
 cmd = str(sl.get("command", ""))
 state = "warmline" if os.environ["DEST"] in cmd else ("foreign" if cmd else "none")
-print(state + "\t" + str((d.get("env") or {}).get("WARMLINE_TTL_MIN", "")))
+print(state + "|" + str((d.get("env") or {}).get("WARMLINE_TTL_MIN", ""))
+      + "|" + str(sl.get("refreshInterval") or ""))
 PY
 ) || true
   fi
@@ -215,11 +220,20 @@ PY
   elif [ -n "${settings_ttl:-}" ]; then
     ttl_line="${settings_ttl}m (settings.json env)"
   else
-    ttl_line="60m (default)"
+    ttl_line="auto -- from each transcript's cache buckets (60m fallback)"
+  fi
+  if [ "$wired" = warmline ]; then
+    if [ -n "$refresh" ]; then
+      refresh_line="every ${refresh}s while idle -- the gauge can't go stale"
+    else
+      refresh_line="OFF -- event-driven only; an idle line freezes (re-run install.sh)"
+    fi
   fi
   echo "claude-warmline status  (config: $CLAUDE_DIR)"
   printf '  %-10s  %s\n' statusline "$sl_line" keep-warm "$kw_line" \
     auditor "$audit_line" ttl "$ttl_line"
+  [ -n "$refresh_line" ] && printf '  %-10s  %s\n' refresh "$refresh_line"
+  return 0
 }
 
 cmd_audit() {
@@ -232,10 +246,53 @@ cmd_audit() {
   exec "$audit_path" "$@"
 }
 
+watch_usage() {
+  cat <<EOF
+warmline watch: a live warmth view of every session on this machine,
+computed from the transcripts now -- not the statusline's one-turn lag --
+and re-rendered until ctrl-c. Works for desktop-app sessions too (they
+write the same transcripts but have no statusline surface).
+
+  warmline watch               refresh every 10 seconds
+  warmline watch -n SECS       refresh every SECS seconds
+
+One-shot form (scriptable): warmline audit --live [--json]
+EOF
+}
+
+cmd_watch() {
+  local interval=10 audit_path
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n) interval="${2:-}"; shift 2 || { echo "warmline: -n needs seconds" >&2; exit 2; } ;;
+      --help|-h|help) watch_usage; exit 0 ;;
+      *) echo "warmline: unknown watch flag '$1' (see warmline watch --help)" >&2; exit 2 ;;
+    esac
+  done
+  case "$interval" in
+    ''|*[!0-9]*) echo "warmline: -n needs a whole number of seconds" >&2; exit 2 ;;
+  esac
+  audit_path="$(find_audit)"
+  if [ -z "$audit_path" ]; then
+    echo "warmline: warmline-audit not found (re-run install.sh)" >&2
+    exit 1
+  fi
+  # --live is captured, so its isatty is false; re-enable color when watch
+  # itself faces a terminal (the NO_COLOR opt-outs still win inside audit)
+  local force=""
+  [ -t 1 ] && force=1
+  while :; do
+    out="$(WARMLINE_FORCE_COLOR="${WARMLINE_FORCE_COLOR:-$force}" "$audit_path" --live)" || true
+    printf '\033[H\033[2J%s\n\n(every %ss; ctrl-c to stop)\n' "$out" "$interval"
+    sleep "$interval"
+  done
+}
+
 command -v python3 >/dev/null || { echo "warmline needs python3 on PATH" >&2; exit 1; }
 
 case "${1:-}" in
   status) cmd_status ;;
+  watch) shift; cmd_watch "$@" ;;
   keep-warm)
     case "${2:-}" in
       on) kw_on ;;

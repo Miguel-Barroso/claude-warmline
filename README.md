@@ -51,6 +51,7 @@ When you want to know what a session (or all of them) actually cost:
 ```sh
 warmline-audit               # this session, turn by turn
 warmline-audit --all         # every session, ranked by where the money leaked
+warmline watch               # every session's warmth, live, until ctrl-c
 ```
 
 [Install details, flags, updating, Windows →](docs/INSTALL.md)
@@ -58,24 +59,27 @@ warmline-audit --all         # every session, ranked by where the money leaked
 ## Reading the line
 
 ```
-Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT | gap 12m | keep-warm on
+Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m | keep-warm on
 ```
 
 | Field | Meaning |
 |---|---|
 | `ctx 43% (168k)` | context-window utilization and input tokens in the conversation |
-| `cache HOT` | the previous request read from the prompt cache (green) |
+| `cache HOT (cold ~13:04)` | the previous request read from the prompt cache; the cache expires at the time shown (green) |
 | `cache HOT (cold in 9m)` | still warm, but within 15 minutes of the TTL — act now or pay the rebuild (yellow) |
 | `cache COLD(rebuilt)` | the previous request found the prefix cold and re-cached it (yellow) |
 | `cache COLD(ttl?)` | *inferred*: quiet for longer than the TTL, so the cache has expired (red) |
 | `gap 12m` | minutes since this session's last API turn; idle repaints don't reset it |
 | `keep-warm on` | whether the [keep-warm policy](#keep-warm) is installed — `off` dim, `?` if the block is malformed |
 
-Two honest caveats: Claude Code hands the statusline the usage numbers of the
-*previous* request, so `HOT`/`COLD(rebuilt)` lag one turn, and `COLD(ttl?)` is a
-time-based inference — hence the `?`. What warmline guarantees is that the idle
-clock survives repaints, so the first repaint after you return already reads
-`COLD(ttl?)`, before you've spent anything.
+The line can't go stale: the installer wires `refreshInterval: 60`, so Claude
+Code re-runs the gauge every minute even while the session just sits there —
+the countdown ticks, and `COLD(ttl?)` takes over within a minute of expiry
+instead of a green `HOT` frozen on screen all evening. (That refresh is a
+local repaint; it never touches the API and doesn't keep the cache warm.) Two
+honest caveats remain: the usage numbers describe the *previous* request, so
+`HOT`/`COLD(rebuilt)` lag one turn, and `COLD(ttl?)` is a time-based
+inference — hence the `?`.
 
 [Every field, colors, the gap mechanics, troubleshooting →](docs/STATUSLINE.md)
 
@@ -141,7 +145,13 @@ compaction did. The leak is rarely where you expect it.
 The premium is an estimate computed from token counts in your own transcripts,
 never billing data.
 
-[Full walkthrough, verdicts, causes, `--all`, `--json` →](docs/AUDIT.md)
+And where the audit grades the past, **`warmline watch`** shows the present: a
+live view of every session's warmth — which prefixes the cache still holds,
+and when each goes cold — re-rendered every 10 seconds. Sessions from the
+desktop app appear too; they write the same transcripts even though they can't
+render a statusline.
+
+[Full walkthrough, verdicts, causes, `--all`, `--live`, `--json` →](docs/AUDIT.md)
 
 ## Keep Warm
 
@@ -166,7 +176,7 @@ after ~10 hours. A ping costs ~0.1× your context; the rebuild it prevents costs
 
 ## Where it works
 
-| Front end | statusline | `warmline-audit` | keep-warm |
+| Front end | statusline | `warmline-audit` / `watch` | keep-warm |
 |---|---|---|---|
 | Terminal CLI | ✅ | ✅ | ✅ |
 | Desktop app (local Code tab) | ❌ | ✅ | ✅ |
@@ -176,9 +186,9 @@ after ~10 hours. A ping costs ~0.1× your context; the rebuild it prevents costs
 Graphical front ends don't render custom statuslines
 ([open request](https://github.com/anthropics/claude-code/issues/41456)) — but
 they run the same engine, share the same `~/.claude`, and write the same
-transcripts, so the auditor and the keep-warm policy work there unchanged. In
-the desktop app, run `claude` in the integrated terminal when you want the
-gauge too.
+transcripts, so the auditor, the live `warmline watch` view, and the keep-warm
+policy work there unchanged. In the desktop app, run `claude` in the
+integrated terminal when you want the gauge too.
 
 [The full surface matrix, and how it was verified →](docs/SURFACES.md)
 
@@ -205,7 +215,7 @@ gauge too.
 | | |
 |---|---|
 | [Statusline](docs/STATUSLINE.md) | every field, colors, gap mechanics, troubleshooting |
-| [Audit](docs/AUDIT.md) | verdicts, cause attribution, `--all`, what "avoidable" means |
+| [Audit](docs/AUDIT.md) | verdicts, cause attribution, `--all`, the live `watch` view, what "avoidable" means |
 | [Keep Warm](docs/KEEP-WARM.md) | the policy, its limits, and the terms question |
 | [Where it works](docs/SURFACES.md) | terminal, desktop, IDE, SSH, cloud |
 | [Install](docs/INSTALL.md) | install, update, uninstall, configure, Windows, tests |

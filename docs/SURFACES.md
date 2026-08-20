@@ -5,7 +5,7 @@
 Claude Code is one engine behind several front ends. warmline is three
 independent pieces, and they don't all reach every front end:
 
-| Front end | statusline | `warmline-audit` | keep-warm policy |
+| Front end | statusline | `warmline-audit` / `watch` | keep-warm policy |
 |---|---|---|---|
 | Terminal CLI (`claude`) | ✅ | ✅ | ✅ |
 | Desktop app — Code tab, local session | ❌ not rendered | ✅ same transcripts | ✅ same CLAUDE.md |
@@ -15,7 +15,9 @@ independent pieces, and they don't all reach every front end:
 | Cloud / Cowork / Dispatch sessions | ❌ | ❌ nothing local to read | — |
 
 **Short version for the desktop app: two of three.** The gauge is terminal-only,
-but the auditor and keep-warm work exactly as they do in the CLI.
+but the auditor — including the live [`warmline watch`](AUDIT.md#which-sessions-are-warm-right-now---live--warmline-watch)
+view — and keep-warm work exactly as they do in the CLI. `watch` in a terminal
+window beside the app is the closest thing to a desktop statusline today.
 
 ## Why the statusline is terminal-only
 

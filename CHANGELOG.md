@@ -4,6 +4,47 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [1.6.0] — 2026-08-20
+
+### Fixed
+- **The stale `HOT` gauge.** Claude Code re-runs a statusline command on
+  conversation events only, so a session that finished work and went quiet
+  never repainted — the last-painted green `cache HOT` could sit on screen
+  all evening while the cache had been cold since lunch. The installer now
+  wires `statusLine.refreshInterval: 60` into `settings.json`, so the gauge
+  re-renders every minute even while the session idles: the countdown ticks,
+  and `COLD(ttl?)` takes over within a minute of the TTL passing. The
+  refresh is a local repaint only — it never touches the API and does not
+  keep the cache warm. `WARMLINE_REFRESH_SEC` tunes it at install time
+  (`0` omits the key); a hand-edited value survives reinstalls; Claude Code
+  versions without the setting ignore it harmlessly.
+
+### Added
+- **Absolute expiry time on the HOT verdict**: `cache HOT (cold ~13:04)`
+  (last turn + TTL). Defense in depth for the same bug: on harnesses that
+  never repaint an idle line (older Claude Code, a machine that slept
+  through its timer), even a frozen line now tells you exactly when warmth
+  ended.
+- **`warmline watch`** (and its scriptable one-shot form,
+  `warmline-audit --live [--json]`): a live table of every session with API
+  turns in the last 24h — which prefixes the cache still holds right now
+  and when each goes cold, warm sessions first, soonest-to-die on top.
+  Computed from last-turn timestamps, so it has no one-turn lag and no
+  repaint dependency, and it covers desktop-app sessions, which write the
+  same transcripts but have no statusline surface. `-n SECS` sets the
+  refresh cadence (default 10s).
+- **TTL auto-detection.** Cache writes in transcripts record their bucket
+  (`ephemeral_1h` vs `ephemeral_5m`), so the statusline and the auditor now
+  detect each session's TTL from its own usage entries instead of assuming
+  60 minutes — short-TTL setups work out of the box, and mixed-TTL history
+  audits correctly. `--ttl` / `WARMLINE_TTL_MIN` force a value; 60m remains
+  the fallback for transcripts that predate bucket recording. Audit output
+  and `--json` say which was used (`ttl_source`: buckets / default /
+  forced).
+- `warmline status` gained a `refresh` row (self-refresh cadence, or a
+  pointed note that the gauge is event-driven only), and its `ttl` row now
+  reports the auto-detection default.
+
 ## [1.5.0] — 2026-08-19
 
 ### Added

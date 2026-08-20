@@ -45,6 +45,7 @@ warmline keep-warm on        # 選用：預防可避免的冷啟動
 ```sh
 warmline-audit               # 這個工作階段，逐輪檢視
 warmline-audit --all         # 所有工作階段，依漏財多寡排序
+warmline watch               # 所有工作階段的溫度，即時顯示，直到 ctrl-c
 ```
 
 [安裝細節、旗標、更新、Windows →](docs/INSTALL.md)
@@ -52,23 +53,25 @@ warmline-audit --all         # 所有工作階段，依漏財多寡排序
 ## 如何讀這一行
 
 ```
-Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT | gap 12m | keep-warm on
+Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m | keep-warm on
 ```
 
 | 欄位 | 意義 |
 |---|---|
 | `ctx 43% (168k)` | 脈絡視窗使用率，以及對話中的輸入 token 數 |
-| `cache HOT` | 上一個請求從提示快取讀取（綠色） |
+| `cache HOT (cold ~13:04)` | 上一個請求從提示快取讀取；快取將在所示時間過期（綠色） |
 | `cache HOT (cold in 9m)` | 仍然溫的，但距 TTL 不到 15 分鐘——現在行動，否則付重建（黃色） |
 | `cache COLD(rebuilt)` | 上一個請求發現前綴已冷，並重新快取了它（黃色） |
 | `cache COLD(ttl?)` | *推論*：安靜的時間超過 TTL，因此快取已經過期（紅色） |
 | `gap 12m` | 距離這個工作階段上一次 API 輪次的分鐘數；閒置重繪不會重設它 |
 | `keep-warm on` | [保溫策略](#keep-warm)是否已安裝——`off` 為暗色，區塊損壞時顯示 `?` |
 
-兩點誠實的但書：Claude Code 交給狀態列的用量數字屬於*上一個*請求，所以
-`HOT`／`COLD(rebuilt)` 會落後一輪；而 `COLD(ttl?)` 是基於時間的推論——所以才有那個
-`?`。warmline 保證的是閒置計時能跨越重繪存活，因此你回來後的第一次重繪就已經顯示
-`COLD(ttl?)`——在你花掉任何東西之前。
+這一行不會過期失真：安裝器會設定 `refreshInterval: 60`，因此即使工作階段只是閒置
+在那裡，Claude Code 也會每分鐘重新執行一次量表——倒數計時持續走動，`COLD(ttl?)`
+會在過期後一分鐘內接手，而不是讓綠色的 `HOT` 整晚凍結在畫面上。（這個重新整理只是
+本機重繪；它從不觸及 API，也不會讓快取保溫。）仍有兩點誠實的但書：用量數字描述的
+是*上一個*請求，所以 `HOT`／`COLD(rebuilt)` 會落後一輪；而 `COLD(ttl?)` 是基於時間
+的推論——所以才有那個 `?`。
 
 [所有欄位、顏色、gap 機制、疑難排解 →](docs/STATUSLINE.md)（英文）
 
@@ -125,7 +128,11 @@ estimated avoidable premium ~$66.47  (top 5 sessions: $21.36, other 140: $45.12)
 
 這個金額是從你自己紀錄檔中的 token 數推估出來的，絕不是帳單資料。
 
-[完整導讀、判定、原因、`--all`、`--json` →](docs/AUDIT.md)（英文）
+稽核工具評判的是過去，**`warmline watch`** 呈現的則是現在：所有工作階段溫度的即時
+檢視——快取還持有哪些前綴、每個又在何時轉冷——每 10 秒重新繪製一次。桌面應用程式
+的工作階段也會出現在其中；它們雖然無法繪製狀態列，寫出的卻是同樣的紀錄檔。
+
+[完整導讀、判定、原因、`--all`、`--live`、`--json` →](docs/AUDIT.md)（英文）
 
 ## Keep Warm
 
@@ -148,7 +155,7 @@ warmline keep-warm off
 
 ## 在哪些地方有效
 
-| 前端 | 狀態列 | `warmline-audit` | keep-warm |
+| 前端 | 狀態列 | `warmline-audit`／`watch` | keep-warm |
 |---|---|---|---|
 | 終端機 CLI | ✅ | ✅ | ✅ |
 | 桌面應用程式（本機 Code 分頁） | ❌ | ✅ | ✅ |
@@ -156,8 +163,8 @@ warmline keep-warm off
 | 雲端／Cowork 工作階段 | ❌ | ❌ | — |
 
 圖形前端不會繪製自訂狀態列（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)），
-但它們跑的是同一個引擎、共用同一個 `~/.claude`、寫出同樣的紀錄檔，因此稽核工具與
-保溫策略在那裡照常運作。若你在桌面應用程式裡也想要這條量表，就在整合終端機中執行
+但它們跑的是同一個引擎、共用同一個 `~/.claude`、寫出同樣的紀錄檔，因此稽核工具、
+即時的 `warmline watch` 檢視與保溫策略在那裡照常運作。若你在桌面應用程式裡也想要這條量表，就在整合終端機中執行
 `claude`。
 
 [完整對照表與驗證方式 →](docs/SURFACES.md)（英文）
@@ -184,7 +191,7 @@ warmline keep-warm off
 | | |
 |---|---|
 | [Statusline](docs/STATUSLINE.md) | 所有欄位、顏色、gap 機制、疑難排解 |
-| [Audit](docs/AUDIT.md) | 判定、原因歸因、`--all`、"avoidable" 的定義 |
+| [Audit](docs/AUDIT.md) | 判定、原因歸因、`--all`、即時的 `watch` 檢視、"avoidable" 的定義 |
 | [Keep Warm](docs/KEEP-WARM.md) | 策略、其限制與條款討論 |
 | [Where it works](docs/SURFACES.md) | 終端機、桌面、IDE、SSH、雲端 |
 | [Install](docs/INSTALL.md) | 安裝、更新、解除安裝、設定、Windows、測試 |

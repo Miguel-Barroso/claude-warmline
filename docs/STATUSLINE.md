@@ -2,10 +2,11 @@
 
 [← back to the README](../README.md)
 
-One line, rendered by Claude Code every time it repaints:
+One line, rendered by Claude Code every time it repaints — and, since v1.6.0,
+re-rendered every 60 seconds while the session just sits there:
 
 ```
-Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT | gap 12m | keep-warm on
+Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m | keep-warm on
 ```
 
 ## Fields
@@ -13,8 +14,8 @@ Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT | gap 12m | keep-warm on
 | Field | Meaning |
 |---|---|
 | `ctx 43% (168k)` | context-window utilization and input tokens in the conversation |
-| `cache HOT` | the previous request read from the prompt cache (green) |
-| `cache HOT (cold in 9m)` | still warm, but the idle gap is within 15 minutes of the TTL — act now or pay the rebuild (yellow) |
+| `cache HOT (cold ~13:04)` | the previous request read from the prompt cache; the cache expires at the wall-clock time shown (green) |
+| `cache HOT (cold in 9m)` | still warm, but within 15 minutes of the TTL — act now or pay the rebuild (yellow) |
 | `cache COLD(rebuilt)` | the previous request found the prefix cold and re-cached it (yellow) |
 | `cache COLD(ttl?)` | *inferred*: the session has been quiet longer than the TTL, so the cache has expired regardless of the (stale) usage fields (red) |
 | `cache ?` | usage fields unavailable (dim) |
@@ -22,6 +23,36 @@ Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT | gap 12m | keep-warm on
 | `keep-warm on` | the keep-warm policy is installed (green); `off` is dim, `?` yellow |
 
 The model name and directory come straight from Claude Code's own payload.
+The TTL behind the countdown is auto-detected from the transcript's own
+cache-write records (each write is tagged `ephemeral_5m` or `ephemeral_1h`),
+so short-TTL setups need no configuration; `WARMLINE_TTL_MIN` still forces it.
+
+## Staying current while idle
+
+Claude Code re-runs a statusline command on conversation events only — a
+session that finishes its work and goes quiet would never repaint, and the
+last-painted line would freeze on screen. That is how a session that went
+cold at noon can still show a green `cache HOT` at 8 pm.
+
+warmline closes that hole twice over:
+
+1. **The installer sets `statusLine.refreshInterval: 60`** in
+   `settings.json`, which tells Claude Code to re-run the statusline every
+   60 seconds *in addition to* the event-driven repaints. The countdown
+   ticks while you idle, and `COLD(ttl?)` takes over within a minute of the
+   TTL actually passing. This refresh runs the local script only — it never
+   talks to the API, costs nothing, and (to be explicit) does **not** keep
+   the cache warm; it keeps the *gauge* honest. Tune it with
+   `WARMLINE_REFRESH_SEC=<seconds>` at install time, or disable with
+   `WARMLINE_REFRESH_SEC=0`; a hand-edited value in `settings.json`
+   survives reinstalls.
+2. **The HOT verdict carries its absolute expiry time** (`cold ~13:04`,
+   computed as last-turn time + TTL). On Claude Code versions that predate
+   `refreshInterval` (which ignore the key and stay event-driven), and for
+   a line frozen while the machine slept, even a stale repaint tells you
+   exactly when warmth ended.
+
+`warmline status` reports which mode you're in on its `refresh` row.
 
 ## The keep-warm field
 
@@ -75,11 +106,11 @@ Stamps older than 7 days are pruned on render.
 - **`COLD(ttl?)` is an inference**, not a measurement — hence the `?`. It says
   "quiet for longer than the TTL", and the TTL is a documented product
   behavior, not something the statusline can observe.
-- **The line is pull-based.** The script runs only when Claude Code repaints,
-  so while your machine sleeps the last rendered line — often a by-then-false
-  `HOT` — stays frozen on screen. What warmline guarantees is that the idle
-  clock survives repaints: the first repaint after you return already reads
-  `COLD(ttl?)`, before you've spent anything.
+- **The line is pull-based, with a timer.** The script runs when Claude Code
+  repaints — on conversation events and, with `refreshInterval` wired, every
+  60 seconds. No timer fires while the machine sleeps, so a lid-closed laptop
+  wakes to one stale line; the next tick (within a minute) corrects it, and
+  the absolute `cold ~13:04` in the HOT verdict is truthful even before that.
 - **Prefix drift is invisible until it bills.** An edited CLAUDE.md, changed
   git state or a different set of MCP servers can invalidate the prefix with
   no idle time at all; you see it on the next turn as `COLD(rebuilt)`.
@@ -88,7 +119,8 @@ Stamps older than 7 days are pruned on render.
 
 | Environment variable | Default | Effect on the line |
 |---|---|---|
-| `WARMLINE_TTL_MIN` | `60` | cache TTL in minutes — drives `COLD(ttl?)` and the countdown |
+| `WARMLINE_TTL_MIN` | auto | cache TTL in minutes — drives `COLD(ttl?)` and the countdown. Unset, it is auto-detected from the transcript's cache-bucket records (60m fallback) |
+| `WARMLINE_REFRESH_SEC` | `60` | install-time: the `refreshInterval` written to `settings.json`; `0` writes none |
 | `WARMLINE_STATE_DIR` | `~/.claude/warmline-state` | stamp files |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, omit the keep-warm field |
 | `WARMLINE_NO_COLOR` / `NO_COLOR` | unset | plain output, no ANSI |

@@ -5,11 +5,13 @@
 ```sh
 warmline-audit                      # latest session of the current project
 warmline-audit path/to/session.jsonl
-warmline-audit --ttl 5 --json       # short-TTL setups, machine-readable
+warmline-audit --ttl 5 --json       # force a TTL, machine-readable
 warmline-audit --price 3            # add dollar estimates, given your
                                     # model's base input price per MTok
 warmline-audit --all --price 3      # every session on this machine,
                                     # ranked by estimated avoidable premium
+warmline-audit --live               # which sessions are warm right now
+warmline watch                      # ...re-rendered live until ctrl-c
 ```
 
 (Installed into `~/.local/bin/`; from a checkout, `./warmline-audit`.
@@ -149,6 +151,49 @@ only a third of the premium, which fits the honest headline that silent prefix
 drift (`unknown 89`) rebuilt more caches than compaction (43) did. The leak is
 rarely where you expect it.
 
+## Which sessions are warm right now? `--live` / `warmline watch`
+
+Everything above grades the past. `--live` answers the present: every session
+with API turns in the last 24 hours, whether the prompt cache still holds its
+prefix, and when that ends — computed from last-turn timestamps and each
+session's TTL, so unlike the statusline it has no one-turn lag and no repaint
+dependency. It covers desktop-app sessions too, which write the same
+transcripts but have no statusline surface at all.
+
+```
+$ warmline-audit --live
+live cache warmth  20:46:24  (5 sessions with API turns in the last 24h)
+
+state                    project                session   last turn   turns    ctx
+WARM  cold ~21:38 (52m)  MimirBlue              ae43c47c  20:38          10    90k
+WARM  cold ~21:46 (60m)  claude-warmline        cd808a8d  20:46          63   193k
+cold  since 11:56        MimirBlue              324c6642  10:56          64   151k
+cold  since 00:05        claude-warmline        5059cbd6  Wed 23:05      86    48k
+cold  since Wed 23:01    claude-warmline        d149945f  Wed 22:01      75   260k
+
+WARM = the cache still holds that session's prefix: resuming now
+reads it at ~0.1x; after it goes cold the next turn re-caches at ~2x.
+```
+
+(That `cold  since 11:56` row is the exact failure the statusline used to
+hide: a session whose terminal still showed a frozen green `HOT` at 8 pm —
+see [staying current while idle](STATUSLINE.md#staying-current-while-idle).)
+
+Warm sessions sort first, soonest-to-die on top (yellow inside 15 minutes) —
+if you mean to resume one, that's the order to do it in. `warmline watch
+[-n SECS]` re-renders this every 10 seconds until ctrl-c; `--live --json`
+is the scriptable form.
+
+## The TTL is auto-detected
+
+Every cache write in a transcript records which bucket it went to
+(`ephemeral_1h` or `ephemeral_5m`), so the auditor grades each session
+against the TTL its own writes prove — no flag needed, sessions with
+different TTLs audit correctly side by side, and the header says which was
+used (`from its cache buckets`, `default`, or `forced`). `--ttl N` /
+`WARMLINE_TTL_MIN` force one for every session; 60m is the fallback for
+transcripts that predate bucket recording.
+
 ## What "avoidable" means — precisely
 
 Every session must pay for its first cache write: a conversation has to be
@@ -170,6 +215,7 @@ and cannot see, what Anthropic actually billed your account.
   `WARMLINE_NO_COLOR` force plain; `WARMLINE_FORCE_COLOR` forces color without
   a TTY (the opt-outs still win).
 - `--json` is byte-stable and never decorated — per-session records plus a
-  `total` object, including `avoidable_cold_tokens` and, with `--price`,
-  `avoidable_premium_usd`.
-- `--ttl N` overrides the assumed cache TTL (also `WARMLINE_TTL_MIN`).
+  `total` object, including `avoidable_cold_tokens`, each session's
+  `ttl_min`/`ttl_source`, and, with `--price`, `avoidable_premium_usd`.
+- `--ttl N` forces the cache TTL for every session (also `WARMLINE_TTL_MIN`);
+  unset, it is [auto-detected per session](#the-ttl-is-auto-detected).

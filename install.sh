@@ -130,11 +130,33 @@ if sl and dest not in str(sl.get("command", "")) and not force:
     print(f"settings.json already has a statusLine: {sl.get('command')!r}")
     print("re-run with --force to replace it (backup: settings.json.warmline-bak)")
     sys.exit(1)
-d["statusLine"] = {"type": "command", "command": dest}
+# keep whatever the user tuned on warmline's own statusLine block (padding,
+# a custom refreshInterval) across reinstalls
+new = dict(sl) if isinstance(sl, dict) and dest in str(sl.get("command", "")) else {}
+new.update({"type": "command", "command": dest})
+# refreshInterval re-runs the statusline every N seconds while the session
+# idles (a local repaint, no API traffic), so the gauge can't freeze on a
+# stale HOT. WARMLINE_REFRESH_SEC overrides; 0 removes it. Claude Code
+# versions without the setting ignore the key and stay event-driven.
+refresh = os.environ.get("WARMLINE_REFRESH_SEC")
+if refresh is not None:
+    try:
+        refresh = int(float(refresh))
+    except ValueError:
+        sys.exit(f"WARMLINE_REFRESH_SEC must be a number, got {refresh!r}")
+    if refresh > 0:
+        new["refreshInterval"] = refresh
+    else:
+        new.pop("refreshInterval", None)
+else:
+    new.setdefault("refreshInterval", 60)
+d["statusLine"] = new
 with open(path, "w") as f:
     json.dump(d, f, indent=2)
     f.write("\n")
-print(f"statusLine wired in {path}")
+r = new.get("refreshInterval")
+how = f"self-refreshes every {r}s while idle" if r else "event-driven only"
+print(f"statusLine wired in {path}  ({how})")
 PY
 
 if [ "$KEEP_WARM" = 1 ]; then

@@ -8,8 +8,8 @@
   <line x1="1" y1="37" x2="819" y2="37" stroke="#21262d"/>
 
   <!-- hot -->
-  <text x="24" y="74" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 27% (53k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950" font-weight="bold">cache HOT</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950">keep-warm on</tspan></text>
-  <text x="24" y="93" font-size="11" font-style="italic" fill="#8b949e">warm — the previous request read its whole prefix from the cache</text>
+  <text x="24" y="74" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 27% (53k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950" font-weight="bold">cache HOT (cold ~13:04)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950">keep-warm on</tspan></text>
+  <text x="24" y="93" font-size="11" font-style="italic" fill="#8b949e">warm — the previous request read its whole prefix from the cache; it expires at the time shown</text>
 
   <!-- cold, rebuilt -->
   <text x="24" y="128" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#d29922" font-weight="bold">cache COLD(rebuilt)</tspan><tspan fill="#6e7681"> | </tspan>gap 9m<tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950">keep-warm on</tspan></text>
