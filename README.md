@@ -117,33 +117,40 @@ avoid. Real output from one machine's 8 weeks of history:
 
 ```
 $ warmline-audit --all --price 3
-145 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl 60m)
+147 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  95% hot  (10,242 of 10,756 turns)
-cold events   187  (152 rebuilt, 35 ttl)
+cache health  █████████████████████████░  95% hot  (10,394 of 10,921 turns)
+cold events   198  (159 rebuilt, 39 ttl) -- 1.8% of all turns
 
-start        project                 turns    hot  part  rebuilt   ttl  avoidable cold    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770      $7.38
+start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
+08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770    11%      $7.38
    ⋮
-TOTAL                                10756  10242   327      152    35      11,661,736     $66.47
+TOTAL                                10921  10394   329      159    39      12,134,109   100%     $69.16
 
 where the cold came from
-  unknown             ██████████████████████████  89
-  session start       ████████████████  56
-  auto-compact        ███████████  36
-  inactivity          ████████  28
+  unknown             ██████████████████████████  92 (39%)
+  session start       █████████████████  59 (25%)
+  auto-compact        ██████████  37 (16%)
+  inactivity          █████████  31 (13%)
 
-estimated avoidable premium ~$66.47  (top 5 sessions: $21.36, other 140: $45.12)
+estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 ```
 
 Each cold turn carries a cause where the transcript proves one — `/compact`,
 `auto-compact`, `model change`, `inactivity` — and an honest `unknown` where it
 doesn't (in practice, prefix drift: an edited CLAUDE.md, changed git state, MCP
-availability). Note what that means here: silent drift rebuilt more caches than
-compaction did. The leak is rarely where you expect it.
+availability). The percentages make the ranking immediate: on this machine,
+silent drift caused 39% of the cold — more than all compaction combined — and
+the worst single session holds 11% of the entire leak. The leak is rarely
+where you expect it.
 
 The premium is an estimate computed from token counts in your own transcripts,
-never billing data.
+never billing data — and it prices input and output tokens separately, because
+Claude does: `--price` is your model's base **input** $/MTok (all cache
+economics live on that side), `--price-out` your **output** $/MTok, defaulting
+to 5× input as on the current price sheet. Output tokens are never cached, so
+the audit reports them on their own line rather than pretending warmth could
+save them.
 
 And where the audit grades the past, **`warmline watch`** shows the present: a
 live view of every session's warmth — which prefixes the cache still holds,
@@ -164,6 +171,8 @@ results land.
 warmline keep-warm on        # global, persists across sessions and updates
 warmline keep-warm status    # ON / OFF / INCONSISTENT (exit 0 / 1 / 2)
 warmline keep-warm off
+warmline awake               # no-sleep mode: one claude session with system
+                             # sleep held off; normal sleep returns on /exit
 ```
 
 It is **not a daemon** — no cron, no process, nothing outside a running Claude
@@ -171,6 +180,12 @@ Code session. It skips when background tasks are already keeping the cache warm
 for free, skips small contexts, stops the moment work resumes, and gives up
 after ~10 hours. A ping costs ~0.1× your context; the rebuild it prevents costs
 ~2×.
+
+The one thing no ping survives is a sleeping machine. For a wait you intend to
+sit out, `warmline awake` starts your `claude` session with system sleep
+inhibited — and because the inhibition lives exactly as long as the session,
+the OS restores normal sleep the instant you `/exit` (or crash out). Nothing
+to remember to turn off.
 
 [What it is and isn't, when it can't operate, terms →](docs/KEEP-WARM.md)
 
@@ -181,13 +196,16 @@ after ~10 hours. A ping costs ~0.1× your context; the rebuild it prevents costs
 | Terminal CLI | ✅ | ✅ | ✅ |
 | Desktop app (local Code tab) | ❌ | ✅ | ✅ |
 | VS Code / JetBrains panel | ❌ | ✅ | ✅ |
-| Cloud / Cowork sessions | ❌ | ❌ | — |
+| Cloud / Cowork sessions | ❌ | ❌ | ❌ |
 
-Graphical front ends don't render custom statuslines
+The desktop app and the IDE panels don't render custom statuslines
 ([open request](https://github.com/anthropics/claude-code/issues/41456)) — but
-they run the same engine, share the same `~/.claude`, and write the same
-transcripts, so the auditor, the live `warmline watch` view, and the keep-warm
-policy work there unchanged. In the desktop app, run `claude` in the
+they run the same engine *locally*, share the same `~/.claude`, and write the
+same transcripts, so the auditor, the live `warmline watch` view, and the
+keep-warm policy work there unchanged. **Cloud and Cowork sessions are the
+exception: no part of warmline reaches them.** They run on Anthropic's
+infrastructure, leave no transcripts on your machine, and never read your
+local `~/.claude/CLAUDE.md`. In the desktop app, run `claude` in the
 integrated terminal when you want the gauge too.
 
 [The full surface matrix, and how it was verified →](docs/SURFACES.md)
@@ -203,7 +221,7 @@ integrated terminal when you want the gauge too.
   cache-write per wake. That's why keep-warm skips that case.
 - **No wakeup survives a closed lid.** The one TTL expiry in a 260-turn,
   13-hour session came after a 6-hour overnight silence with the machine
-  asleep.
+  asleep. (`warmline awake` exists for exactly this.)
 - **Prefix stability matters as much as TTL.** A drifting system prompt
   (edited CLAUDE.md, changed git state, MCP availability) re-caches everything
   past the divergence, and no ping can help.
@@ -216,7 +234,7 @@ integrated terminal when you want the gauge too.
 |---|---|
 | [Statusline](docs/STATUSLINE.md) | every field, colors, gap mechanics, troubleshooting |
 | [Audit](docs/AUDIT.md) | verdicts, cause attribution, `--all`, the live `watch` view, what "avoidable" means |
-| [Keep Warm](docs/KEEP-WARM.md) | the policy, its limits, and the terms question |
+| [Keep Warm](docs/KEEP-WARM.md) | the policy, no-sleep mode (`warmline awake`), limits, the terms question |
 | [Where it works](docs/SURFACES.md) | terminal, desktop, IDE, SSH, cloud |
 | [Install](docs/INSTALL.md) | install, update, uninstall, configure, Windows, tests |
 | [Measurements](docs/MEASUREMENTS.md) | the evidence behind every claim |

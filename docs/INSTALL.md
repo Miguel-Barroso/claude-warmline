@@ -145,12 +145,17 @@ sparse, garbage, concurrent-session isolation, idle repaints not resetting the
 clock, a fresh turn overriding the TTL inference, the expiry countdown, the
 absolute expiry time, TTL auto-detection from cache buckets, the keep-warm
 field in all three states plus its opt-out, ANSI colors) against the script; a
-synthetic transcript against `warmline-audit` including the `--price` estimate,
-every cold-cause attribution, per-session TTL auto-detection, a now-relative
-corpus against `--live`, config-dir discovery, and TTY vs piped formatting; a
-synthetic multi-project corpus against `--all`; the installer's
-`refreshInterval` wiring (default, hand-tuned, disabled); and the `warmline`
-CLI's keep-warm state transitions (on→on, off→off, malformed blocks reported
+synthetic transcript against `warmline-audit` including the `--price` estimate
+(split input/output pricing, the bare-flag defaults, output tokens counted and
+priced separately), every cold-cause attribution, the percentage shares on
+verdicts, causes and the `--all` table, per-session TTL auto-detection, a
+now-relative corpus against `--live`, config-dir discovery, and TTY vs piped
+formatting; a synthetic multi-project corpus against `--all`; the installer's
+`refreshInterval` wiring (default, hand-tuned, disabled); the `warmline` CLI's
+keep-warm state transitions (on→on, off→off, malformed blocks reported
 truthfully instead of a false ON), with unrelated CLAUDE.md content verified to
 survive every operation and a clean-install check that the `warmline` command
-actually lands. The same suite runs in CI on every push.
+actually lands; and `warmline awake` against a stub inhibitor — the exact
+`caffeinate -is` invocation, the default `claude` command, and the wrapped
+command's exit propagating straight through (the no-sleep cleanup-on-`/exit`
+guarantee, held by construction). The same suite runs in CI on every push.

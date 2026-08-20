@@ -12,7 +12,7 @@ independent pieces, and they don't all reach every front end:
 | VS Code / JetBrains extension panel | ❌ not rendered | ✅ | ✅ |
 | CLI inside an IDE's integrated terminal | ✅ | ✅ | ✅ |
 | Desktop app — SSH session | ❌ | ✅ *on the remote host* | ✅ *on the remote host* |
-| Cloud / Cowork / Dispatch sessions | ❌ | ❌ nothing local to read | — |
+| Cloud / Cowork / Dispatch sessions | ❌ | ❌ nothing local to read | ❌ local CLAUDE.md never reaches them |
 
 **Short version for the desktop app: two of three.** The gauge is terminal-only,
 but the auditor — including the live [`warmline watch`](AUDIT.md#which-sessions-are-warm-right-now---live--warmline-watch)
@@ -57,9 +57,7 @@ extensions, which bundle the same engine and share `~/.claude`; the desktop
 case is the one we confirmed end to end.)
 
 **SSH sessions** run the engine on the remote host, which reads *its* home
-directory: install warmline there and audit there. **Cloud, Cowork and Dispatch
-sessions** run on Anthropic's infrastructure and leave no local transcript, so
-there is nothing for the auditor to read.
+directory: install warmline there and audit there.
 
 ## Why keep-warm reaches them
 
@@ -76,6 +74,20 @@ tasks. Neither is guaranteed on every build, which is why the policy is written
 to degrade to "simply inert" rather than to fail loudly — and why
 [`warmline-audit`](AUDIT.md) is the way to check whether a long wait actually
 stayed warm.
+
+## Cloud sessions: entirely out of reach
+
+This page is the authoritative word on the subject, because it is easy to
+misread the docs here: **no part of warmline works for Cloud, Cowork or
+Dispatch sessions.** Those sessions run on Anthropic's infrastructure, not on
+the engine on your machine, and everything warmline is built on stays local —
+the statusline isn't rendered there, the transcripts they produce never land
+in your `~/.claude/projects` (so the auditor and `warmline watch` have nothing
+to read), and your local `~/.claude/CLAUDE.md` — where the keep-warm block
+lives — is never part of a cloud session's context. Statements elsewhere about
+warmline working beyond the terminal refer to the *local* graphical front ends
+(the desktop app's Code tab, the IDE panels), which run the same engine on
+your machine; cloud sessions do not.
 
 ## Windows
 

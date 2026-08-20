@@ -115,34 +115,39 @@ Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m |
 
 ```
 $ warmline-audit --all --price 3
-145 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl 60m)
+147 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  95% hot  (10,242 of 10,756 turns)
-cold events   187  (152 rebuilt, 35 ttl)
+cache health  █████████████████████████░  95% hot  (10,394 of 10,921 turns)
+cold events   198  (159 rebuilt, 39 ttl) -- 1.8% of all turns
 
-start        project                 turns    hot  part  rebuilt   ttl  avoidable cold    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770      $7.38
+start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
+08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770    11%      $7.38
    ⋮
-TOTAL                                10756  10242   327      152    35      11,661,736     $66.47
+TOTAL                                10921  10394   329      159    39      12,134,109   100%     $69.16
 
 where the cold came from
-  unknown             ██████████████████████████  89
-  session start       ████████████████  56
-  auto-compact        ███████████  36
-  inactivity          ████████  28
+  unknown             ██████████████████████████  92 (39%)
+  session start       █████████████████  59 (25%)
+  auto-compact        ██████████  37 (16%)
+  inactivity          █████████  31 (13%)
 
-estimated avoidable premium ~$66.47  (top 5 sessions: $21.36, other 140: $45.12)
+estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 ```
 
 冷えたターンには、トランスクリプトが証明できる範囲で原因が付きます —
 `/compact`、`auto-compact`、`model change`、`inactivity` — 証明できないものは
 正直に `unknown`(実際にはプレフィックスのドリフト: 編集された CLAUDE.md、変化した
-git の状態、MCP の可否)。ここで起きていることに注目してください。静かなドリフトの
-方がコンパクションよりも多くのキャッシュを再構築させています。漏れはたいてい
-予想外の場所にあります。
+git の状態、MCP の可否)。パーセンテージが順位付けを即座に教えてくれます:
+このマシンでは、静かなドリフトがコールドの 39% を占め — コンパクション全種の
+合計より多く — 最悪の 1 セッションだけで漏れ全体の 11% を抱えています。漏れは
+たいてい予想外の場所にあります。
 
 金額はあなた自身のトランスクリプトに記録されたトークン数からの推定であり、
-請求データではありません。
+請求データではありません — そして Claude の課金と同じく、入力と出力のトークンを
+別々の単価で扱います。`--price` はモデルの基本**入力**単価($/MTok。キャッシュの
+経済はすべてこちら側)、`--price-out` は**出力**単価で、現在の料金表どおり既定で
+入力の 5 倍です。出力トークンは決してキャッシュされないため、温かさで節約できる
+かのように混ぜず、専用の行として報告されます。
 
 監査が過去を採点するのに対し、**`warmline watch`** は現在を映します。全セッションの
 温度のライブビュー — キャッシュがまだどのプレフィックスを保持しているか、それぞれが
@@ -163,6 +168,8 @@ git の状態、MCP の可否)。ここで起きていることに注目して�
 warmline keep-warm on        # グローバル。セッションや更新をまたいで持続
 warmline keep-warm status    # ON / OFF / INCONSISTENT (終了コード 0 / 1 / 2)
 warmline keep-warm off
+warmline awake               # ノースリープモード: システムスリープを抑止した
+                             # claude セッションを 1 回実行。/exit で通常に戻る
 ```
 
 これは**デーモンではありません** — cron もプロセスも、動作中の Claude Code
@@ -170,6 +177,11 @@ warmline keep-warm off
 温めているときはスキップし、小さなコンテキストもスキップし、作業が再開した瞬間に
 停止し、約 10 時間で諦めます。ping のコストはコンテキストの約 0.1 倍、それが防ぐ
 再構築は約 2 倍です。
+
+どんな ping もスリープ中のマシンでは生き残れません。待機に付き合うつもりなら、
+`warmline awake` がシステムスリープを抑止した状態で `claude` セッションを開始
+します — 抑止の寿命はセッションの寿命そのものなので、`/exit`(あるいはクラッシュ)
+した瞬間に OS が通常のスリープ動作を取り戻します。切り忘れは構造的に起こりません。
 
 [何であり何でないか・動作できない条件・利用規約の検討 →](docs/KEEP-WARM.md)(英語)
 
@@ -180,14 +192,17 @@ warmline keep-warm off
 | ターミナル CLI | ✅ | ✅ | ✅ |
 | デスクトップアプリ(ローカルの Code タブ) | ❌ | ✅ | ✅ |
 | VS Code / JetBrains のパネル | ❌ | ✅ | ✅ |
-| クラウド / Cowork セッション | ❌ | ❌ | — |
+| クラウド / Cowork セッション | ❌ | ❌ | ❌ |
 
-グラフィカルなフロントエンドはカスタムステータスラインを描画しません
+デスクトップアプリと IDE パネルはカスタムステータスラインを描画しません
 ([要望チケット](https://github.com/anthropics/claude-code/issues/41456))。
-ただし同じエンジンを動かし、同じ `~/.claude` を共有し、同じトランスクリプトを
-書き出すので、監査ツール、ライブの `warmline watch` ビュー、キープウォームポリシーは
-そのまま機能します。デスクトップ
-アプリでゲージも見たいときは、統合ターミナルで `claude` を起動してください。
+ただし同じエンジンを*ローカルで*動かし、同じ `~/.claude` を共有し、同じ
+トランスクリプトを書き出すので、監査ツール、ライブの `warmline watch` ビュー、
+キープウォームポリシーはそのまま機能します。**例外はクラウド / Cowork
+セッションで、warmline はどの部分も届きません。** これらは Anthropic の
+インフラ上で動き、あなたのマシンにトランスクリプトを残さず、ローカルの
+`~/.claude/CLAUDE.md` を読むこともありません。デスクトップアプリでゲージも
+見たいときは、統合ターミナルで `claude` を起動してください。
 
 [完全な対応表と検証方法 →](docs/SURFACES.md)(英語)
 
@@ -203,6 +218,7 @@ warmline keep-warm off
   します。
 - **蓋を閉じたマシンではどんなウェイクアップも生き残らない。** 13 時間・260 ターンの
   セッションで唯一の TTL 失効は、マシンが眠っていた 6 時間の夜間沈黙のあとでした。
+  (`warmline awake` はまさにこのためにあります。)
 - **プレフィックスの安定性は TTL と同じくらい重要。** ドリフトするシステム
   プロンプト(編集された CLAUDE.md、変化した git の状態、MCP の可否)は分岐点より
   後をすべて再キャッシュさせ、どんな ping も救えません。
@@ -217,7 +233,7 @@ warmline keep-warm off
 |---|---|
 | [Statusline](docs/STATUSLINE.md) | 全フィールド、色、gap の仕組み、トラブルシューティング |
 | [Audit](docs/AUDIT.md) | 判定、原因の帰属、`--all`、ライブの `watch` ビュー、"avoidable" の定義 |
-| [Keep Warm](docs/KEEP-WARM.md) | ポリシー、その限界、規約の検討 |
+| [Keep Warm](docs/KEEP-WARM.md) | ポリシー、ノースリープモード(`warmline awake`)、限界、規約の検討 |
 | [Where it works](docs/SURFACES.md) | ターミナル、デスクトップ、IDE、SSH、クラウド |
 | [Install](docs/INSTALL.md) | インストール、更新、アンインストール、設定、Windows、テスト |
 | [Measurements](docs/MEASUREMENTS.md) | すべての主張の裏付けとなる実測 |

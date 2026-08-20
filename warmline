@@ -24,6 +24,8 @@ The installer (install.sh) installs and updates; this command controls.
   warmline status              what is installed and enabled right now
   warmline watch [-n SECS]     live warmth view of every session, refreshed
                                every 10s (or SECS) until ctrl-c
+  warmline awake [CMD...]      no-sleep mode: run 'claude' (or CMD) with
+                               system sleep held off until it exits
   warmline keep-warm on        turn the keep-warm policy ON (global)
   warmline keep-warm off       turn it OFF -- removes only warmline's block
   warmline keep-warm status    detailed state; exit 0=ON  1=OFF  2=INCONSISTENT
@@ -288,11 +290,57 @@ cmd_watch() {
   done
 }
 
+awake_usage() {
+  cat <<EOF
+warmline awake: no-sleep mode for the duration of one Claude session.
+Runs COMMAND (default: claude) with the machine's system/idle sleep
+inhibited, so keep-warm pings can actually fire through a long wait --
+a sleeping host is the one thing they never survive.
+
+  warmline awake                    keep the machine awake for one
+                                    'claude' session
+  warmline awake claude --resume    ...or wrap any command you pass
+  warmline awake --help             this text
+
+The inhibition lives exactly as long as the wrapped command: when the
+session ends -- /exit, ctrl-c, a crash -- the operating system releases
+it and normal sleep behavior returns. There is no state to clean up and
+no way to be left permanently sleepless. The display may still sleep;
+only system sleep is held off.
+
+Mechanism: 'caffeinate -is COMMAND' on macOS, 'systemd-inhibit COMMAND'
+on Linux.
+EOF
+}
+
+cmd_awake() {
+  case "${1:-}" in
+    --help|-h|help) awake_usage; exit 0 ;;
+    -*) echo "warmline: unknown awake flag '${1}' -- flags for the wrapped" >&2
+        echo "command go after its name, e.g.: warmline awake claude --resume" >&2
+        exit 2 ;;
+  esac
+  [ $# -gt 0 ] || set -- claude
+  # exec ties the inhibitor's lifetime to this very process: the wrapped
+  # command's exit (however it exits) is what releases the assertion
+  if command -v caffeinate >/dev/null; then
+    exec caffeinate -is "$@"
+  elif command -v systemd-inhibit >/dev/null; then
+    exec systemd-inhibit --what=sleep:idle \
+      --why="claude session (warmline awake)" "$@"
+  else
+    echo "warmline: no sleep inhibitor found (needs caffeinate on macOS" >&2
+    echo "or systemd-inhibit on Linux)" >&2
+    exit 1
+  fi
+}
+
 command -v python3 >/dev/null || { echo "warmline needs python3 on PATH" >&2; exit 1; }
 
 case "${1:-}" in
   status) cmd_status ;;
   watch) shift; cmd_watch "$@" ;;
+  awake) shift; cmd_awake "$@" ;;
   keep-warm)
     case "${2:-}" in
       on) kw_on ;;

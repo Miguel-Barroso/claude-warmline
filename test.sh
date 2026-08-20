@@ -188,21 +188,58 @@ else
   echo "FAIL audit: unexpected output:"; echo "$out"; fail=$((fail + 1))
 fi
 
+# Verdict census carries percentages of turns, so the relative share of
+# cold events is readable without division: 1 of 4 turns each -> (25%).
+if [[ "$out" == *"HOT 1 (25%)"* && "$out" == *"COLD(ttl) 1 (25%)"* ]]; then
+  echo "ok   audit-pct: verdict census shows shares of turns"; pass=$((pass + 1))
+else
+  echo "FAIL audit-pct:"; echo "$out"; fail=$((fail + 1))
+fi
+
 # --price: 61,000 cold tokens at $10/MTok base input -> 61000*1.9*10/1e6;
 # the avoidable premium counts only the non-session-start cold write (31,000).
+# Output tokens bill at their own rate, defaulting to 5x input ($50 here).
 out=$(./warmline-audit --price 10 "$AUDIT_T")
 if [[ "$out" == *'cost ~$1.16 more'* \
-   && "$out" == *'estimated avoidable premium ~$0.59'* ]]; then
-  echo "ok   audit-price: cold cost \$1.16, avoidable premium \$0.59"; pass=$((pass + 1))
+   && "$out" == *'estimated avoidable premium ~$0.59'* \
+   && "$out" == *'output tokens at $50/MTok'* ]]; then
+  echo "ok   audit-price: cold cost \$1.16, premium \$0.59, output at 5x input"; pass=$((pass + 1))
 else
-  echo "FAIL audit-price: expected '~\$1.16' and '~\$0.59' in:"; echo "$out"; fail=$((fail + 1))
+  echo "FAIL audit-price: expected '~\$1.16', '~\$0.59', '\$50/MTok' in:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Bare --price prices at the current sheet ($3/MTok input, 5x = $15 output);
+# --price-out overrides the output rate independently of the input rate.
+out=$(./warmline-audit --price "$AUDIT_T")
+out2=$(./warmline-audit --price-in 10 --price-out 25 "$AUDIT_T")
+if [[ "$out" == *'at $3/MTok base input'* && "$out" == *'output tokens at $15/MTok'* \
+   && "$out" == *'estimated avoidable premium ~$0.18'* \
+   && "$out2" == *'at $10/MTok base input'* \
+   && "$out2" == *'output tokens at $25/MTok'* ]]; then
+  echo "ok   audit-price-defaults: bare --price = \$3/\$15, --price-out overrides"; pass=$((pass + 1))
+else
+  echo "FAIL audit-price-defaults:"; echo "$out"; echo "$out2"; fail=$((fail + 1))
+fi
+
+# Output tokens are summed from the transcript and priced at the output
+# rate: 1,000 + 500 output tokens at the default $15/MTok -> ~$0.02.
+AOUT="$WARMLINE_STATE_DIR/audit-out.jsonl"
+cat > "$AOUT" <<'EOF'
+{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"o1","message":{"usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":30000,"input_tokens":5,"output_tokens":1000}}}
+{"type":"assistant","timestamp":"2026-01-01T00:02:00Z","requestId":"o2","message":{"usage":{"cache_read_input_tokens":30000,"cache_creation_input_tokens":500,"input_tokens":5,"output_tokens":500}}}
+EOF
+out=$(./warmline-audit --price "$AOUT")
+if [[ "$out" == *"output: 1,500"* && "$out" == *'output tokens at $15/MTok: ~$0.02'* ]]; then
+  echo "ok   audit-output-tokens: counted and priced separately from input"; pass=$((pass + 1))
+else
+  echo "FAIL audit-output-tokens:"; echo "$out"; fail=$((fail + 1))
 fi
 
 # Synthetic multi-project corpus for --all and cold-cause attribution.
 ROOT="$WARMLINE_STATE_DIR/projects"
 mkdir -p "$ROOT/proj-a" "$ROOT/proj-b" "$ROOT/proj-c" "$ROOT/proj-a/sess1/subagents"
 cat > "$ROOT/proj-a/sess1.jsonl" <<'EOF'
-{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/proj-alpha","message":{"id":"m1","model":"claude-opus-5","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":40000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/proj-alpha","message":{"id":"m1","model":"claude-opus-5","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":40000,"input_tokens":5,"output_tokens":700}}}
 {"type":"assistant","timestamp":"2026-01-01T00:05:00Z","requestId":"r-m2a","cwd":"/tmp/proj-alpha","message":{"id":"m2","model":"claude-opus-5","usage":{"cache_read_input_tokens":40000,"cache_creation_input_tokens":300,"input_tokens":5}}}
 {"type":"assistant","timestamp":"2026-01-01T00:05:01Z","requestId":"r-m2b","cwd":"/tmp/proj-alpha","message":{"id":"m2","model":"claude-opus-5","usage":{"cache_read_input_tokens":40000,"cache_creation_input_tokens":300,"input_tokens":5}}}
 {"type":"system","subtype":"compact_boundary","timestamp":"2026-01-01T00:06:00Z","compactMetadata":{"trigger":"manual"}}
@@ -215,7 +252,7 @@ cat > "$ROOT/proj-a/sess1.jsonl" <<'EOF'
 {"type":"assistant","timestamp":"2026-01-01T03:50:00Z","cwd":"/tmp/proj-alpha","message":{"id":"m7","model":"claude-sonnet-5","usage":{"cache_read_input_tokens":3000,"cache_creation_input_tokens":9000,"input_tokens":5}}}
 EOF
 cat > "$ROOT/proj-b/sess2.jsonl" <<'EOF'
-{"type":"assistant","timestamp":"2026-01-02T00:00:00Z","cwd":"/tmp/proj-beta","message":{"id":"n1","model":"claude-opus-5","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":5000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-02T00:00:00Z","cwd":"/tmp/proj-beta","message":{"id":"n1","model":"claude-opus-5","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":5000,"input_tokens":5,"output_tokens":300}}}
 {"type":"assistant","timestamp":"2026-01-02T00:10:00Z","cwd":"/tmp/proj-beta","message":{"id":"n2","model":"claude-opus-5","usage":{"cache_read_input_tokens":5000,"cache_creation_input_tokens":100,"input_tokens":5}}}
 {"type":"system","subtype":"compact_boundary","timestamp":"2026-01-02T00:15:00Z"}
 {"type":"assistant","timestamp":"2026-01-02T00:20:00Z","cwd":"/tmp/proj-beta","message":{"id":"n3","model":"claude-opus-5","usage":{"cache_read_input_tokens":5100,"cache_creation_input_tokens":6000,"input_tokens":5}}}
@@ -258,6 +295,19 @@ else
   echo "FAIL all:"; echo "$out"; fail=$((fail + 1))
 fi
 
+# --all percentages: every cause carries its share of cold-cause events
+# (8 total: /compact 2 -> 25%), the cold-events line its share of turns,
+# and each session row its share of all avoidable cold tokens (alpha holds
+# all 30,200 -> 100%; beta none -> 0%).
+if [[ "$out" == *"/compact 2 (25%)"* && "$out" == *"-- 60% of all turns"* \
+   && "$out" == *"share"* \
+   && "$(echo "$out" | grep proj-alpha)" == *"100%"* \
+   && "$(echo "$out" | grep proj-beta)" == *"0%"* ]]; then
+  echo "ok   all-pct: cause, cold-event and avoidable shares shown"; pass=$((pass + 1))
+else
+  echo "FAIL all-pct:"; echo "$out"; fail=$((fail + 1))
+fi
+
 # A boundary without compactMetadata is still certainly a compaction, but
 # manual-vs-auto would be a guess: generic "compact", never "/compact".
 out=$(./warmline-audit "$ROOT/proj-b/sess2.jsonl")
@@ -268,10 +318,13 @@ else
 fi
 
 # --all --price: the TOTAL row itself carries the premium (30200 avoidable
-# * 1.9 * $10/MTok = $0.57), and the estimate disclaimer prints.
+# * 1.9 * $10/MTok = $0.57), the estimate disclaimer prints, and the notes
+# say which side of the input/output split the premium lives on.
 out=$(./warmline-audit --all --price 10 "$ROOT")
-if [[ "$(echo "$out" | grep '^TOTAL')" == *'$0.57'* && "$out" == *"not billing data"* ]]; then
-  echo "ok   all-price: TOTAL premium \$0.57, labeled as estimate"; pass=$((pass + 1))
+if [[ "$(echo "$out" | grep '^TOTAL')" == *'$0.57'* && "$out" == *"not billing data"* \
+   && "$out" == *'base input $10/MTok'* && "$out" == *"input-side only"* \
+   && "$out" == *'$50/MTok warm or cold'* ]]; then
+  echo "ok   all-price: TOTAL premium \$0.57, input/output split labeled"; pass=$((pass + 1))
 else
   echo "FAIL all-price:"; echo "$out"; fail=$((fail + 1))
 fi
@@ -290,6 +343,10 @@ assert d["total"]["avoidable_cold_tokens"] == 30200
 assert d["total"]["tokens_recached_cold"] == 75200
 assert d["total"]["avoidable_premium_usd"] == 0.57
 assert d["total"]["skipped"] == 1
+assert d["sessions"][0]["tokens_output"] == 700
+assert d["total"]["tokens_output"] == 1000
+assert d["total"]["price_in_per_mtok"] == 10
+assert d["total"]["price_out_per_mtok"] == 50
 print("json-ok")')
 if [[ "$out" == "json-ok" ]]; then
   echo "ok   all-json: sessions ranked, totals and premiums correct"; pass=$((pass + 1))
@@ -437,6 +494,7 @@ out=$(wl --help); out2=$(wl keep-warm --help); out3=$(wl)
 if [[ "$out" == *"warmline status"* && "$out" == *"keep-warm on"* \
    && "$out" == *"keep-warm off"* && "$out" == *"keep-warm status"* \
    && "$out" == *"warmline audit"* && "$out" == *"warmline watch"* \
+   && "$out" == *"warmline awake"* \
    && "$out2" == *"ON / OFF / INCONSISTENT"* && "$out2" == *"exit 0 / 1 / 2"* \
    && "$out3" == *"warmline status"* ]]; then
   echo "ok   cli-help: subcommands and exit codes documented"; pass=$((pass + 1))
@@ -571,6 +629,59 @@ if [[ "$out" == *"-n SECS"* && "$out" == *"--live"* && "$rc" == 2 && "$rc2" == 2
   echo "ok   cli-watch: help shown, bad flags and intervals exit 2"; pass=$((pass + 1))
 else
   echo "FAIL cli-watch: rc=$rc rc2=$rc2"; echo "$out"; fail=$((fail + 1))
+fi
+
+# warmline awake (no-sleep mode): a stub caffeinate proves the wrapper
+# passes -is plus the exact command, and that the inhibition's lifetime IS
+# the session's -- the wrapped command's exit code comes straight back
+# (that exit is what releases the OS assertion; this is the /exit-cleanup
+# guarantee, held by construction rather than by a cleanup handler).
+STUB="$WARMLINE_STATE_DIR/awake-stub"
+mkdir -p "$STUB"
+cat > "$STUB/caffeinate" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" > "${AWAKE_LOG:?}"
+shift            # drop -is, then become the wrapped command
+exec "$@"
+EOF
+cat > "$STUB/claude" <<'EOF'
+#!/usr/bin/env bash
+echo claude-default-ran
+EOF
+chmod +x "$STUB/caffeinate" "$STUB/claude"
+AWAKE_LOG="$WARMLINE_STATE_DIR/awake.log"
+rc=0; out=$(AWAKE_LOG="$AWAKE_LOG" PATH="$STUB:$PATH" "$IBIN/warmline" awake \
+  sh -c 'echo session-running; exit 7') || rc=$?
+if [[ "$rc" == 7 && "$out" == "session-running" \
+   && "$(cat "$AWAKE_LOG")" == "-is sh -c echo session-running; exit 7" ]]; then
+  echo "ok   cli-awake: caffeinate -is wraps the command, exit propagates"; pass=$((pass + 1))
+else
+  echo "FAIL cli-awake: rc=$rc out=$out log=$(cat "$AWAKE_LOG" 2>/dev/null)"; fail=$((fail + 1))
+fi
+
+# Bare `warmline awake` wraps a claude session by default.
+out=$(AWAKE_LOG="$AWAKE_LOG" PATH="$STUB:$PATH" "$IBIN/warmline" awake)
+if [[ "$out" == "claude-default-ran" && "$(cat "$AWAKE_LOG")" == "-is claude" ]]; then
+  echo "ok   cli-awake-default: bare awake runs claude"; pass=$((pass + 1))
+else
+  echo "FAIL cli-awake-default: out=$out log=$(cat "$AWAKE_LOG")"; fail=$((fail + 1))
+fi
+
+# Help documents the no-sleep contract; unknown flags are rejected before
+# anything runs; with no inhibitor on PATH the failure is loud, not silent.
+out=$(wl awake --help)
+rc=0; wl awake --bogus >/dev/null 2>&1 || rc=$?
+NOPATH="$WARMLINE_STATE_DIR/awake-nopath"
+mkdir -p "$NOPATH"
+ln -sf "$(command -v bash)" "$NOPATH/bash"
+ln -sf "$(command -v python3)" "$NOPATH/python3"
+rc2=0; err=$(PATH="$NOPATH" "$IBIN/warmline" awake true 2>&1) || rc2=$?
+if [[ "$out" == *"no-sleep"* && "$out" == *"caffeinate"* \
+   && "$out" == *"normal sleep behavior returns"* && "$rc" == 2 \
+   && "$rc2" == 1 && "$err" == *"no sleep inhibitor"* ]]; then
+  echo "ok   cli-awake-edges: help, bad flag exit 2, missing inhibitor loud"; pass=$((pass + 1))
+else
+  echo "FAIL cli-awake-edges: rc=$rc rc2=$rc2 err=$err"; echo "$out"; fail=$((fail + 1))
 fi
 
 # Installer help: install-side flags only, pointing control at warmline.

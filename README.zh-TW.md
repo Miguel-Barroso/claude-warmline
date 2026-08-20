@@ -102,31 +102,36 @@ Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m |
 
 ```
 $ warmline-audit --all --price 3
-145 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl 60m)
+147 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  95% hot  (10,242 of 10,756 turns)
-cold events   187  (152 rebuilt, 35 ttl)
+cache health  █████████████████████████░  95% hot  (10,394 of 10,921 turns)
+cold events   198  (159 rebuilt, 39 ttl) -- 1.8% of all turns
 
-start        project                 turns    hot  part  rebuilt   ttl  avoidable cold    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770      $7.38
+start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
+08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770    11%      $7.38
    ⋮
-TOTAL                                10756  10242   327      152    35      11,661,736     $66.47
+TOTAL                                10921  10394   329      159    39      12,134,109   100%     $69.16
 
 where the cold came from
-  unknown             ██████████████████████████  89
-  session start       ████████████████  56
-  auto-compact        ███████████  36
-  inactivity          ████████  28
+  unknown             ██████████████████████████  92 (39%)
+  session start       █████████████████  59 (25%)
+  auto-compact        ██████████  37 (16%)
+  inactivity          █████████  31 (13%)
 
-estimated avoidable premium ~$66.47  (top 5 sessions: $21.36, other 140: $45.12)
+estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 ```
 
 每個冷輪次都會在紀錄檔能證明的範圍內附上原因——`/compact`、`auto-compact`、
 `model change`、`inactivity`——證明不了的就誠實標為 `unknown`（實務上多半是前綴
-漂移：被編輯的 CLAUDE.md、變動的 git 狀態、MCP 是否可用）。請注意這裡的意義：
-無聲的漂移重建的快取比壓縮還多。漏財之處，往往不在你以為的地方。
+漂移：被編輯的 CLAUDE.md、變動的 git 狀態、MCP 是否可用）。百分比讓排序一目了然：
+在這台機器上，無聲的漂移佔了 39% 的冷事件——比所有壓縮加總還多——而最糟的單一
+工作階段獨占整個漏財的 11%。漏財之處，往往不在你以為的地方。
 
-這個金額是從你自己紀錄檔中的 token 數推估出來的，絕不是帳單資料。
+這個金額是從你自己紀錄檔中的 token 數推估出來的，絕不是帳單資料——而且和 Claude
+的計費一樣，輸入與輸出 token 以不同單價分開計算：`--price` 是模型的基礎**輸入**價
+（$/MTok，所有快取經濟都在這一側），`--price-out` 是**輸出**價，依目前價目表預設為
+輸入價的 5 倍。輸出 token 從不進快取，溫度救不了它，所以稽核把它單獨列為一行，
+絕不與快取數字混為一談。
 
 稽核工具評判的是過去，**`warmline watch`** 呈現的則是現在：所有工作階段溫度的即時
 檢視——快取還持有哪些前綴、每個又在何時轉冷——每 10 秒重新繪製一次。桌面應用程式
@@ -144,12 +149,19 @@ estimated avoidable premium ~$66.47  (top 5 sessions: $21.36, other 140: $45.12)
 warmline keep-warm on        # 全域；跨工作階段與更新持續有效
 warmline keep-warm status    # ON / OFF / INCONSISTENT（結束碼 0 / 1 / 2）
 warmline keep-warm off
+warmline awake               # 免睡眠模式：抑制系統睡眠地執行一次 claude 工作
+                             # 階段；/exit 後恢復正常睡眠
 ```
 
 它**不是常駐程式**——沒有 cron、沒有行程，也不會在運行中的 Claude Code 工作階段
 之外送出任何請求。當背景任務已經免費把快取維持溫熱時它會跳過，脈絡很小時也跳過，
 工作一恢復就停止，並在大約 10 小時後放棄。一次 ping 的成本約為脈絡的 0.1 倍；
 它所預防的重建則是約 2 倍。
+
+任何 ping 都熬不過一台睡著的機器。打算陪跑一段等待時，用 `warmline awake` 啟動
+你的 `claude` 工作階段——系統睡眠會被抑制，而且抑制的壽命就是工作階段本身的
+壽命：一旦 `/exit`（或當機退出），作業系統立刻恢復正常睡眠行為。沒有需要記得
+關掉的開關。
 
 [它是什麼、不是什麼、何時無法運作、條款討論 →](docs/KEEP-WARM.md)（英文）
 
@@ -160,11 +172,14 @@ warmline keep-warm off
 | 終端機 CLI | ✅ | ✅ | ✅ |
 | 桌面應用程式（本機 Code 分頁） | ❌ | ✅ | ✅ |
 | VS Code／JetBrains 面板 | ❌ | ✅ | ✅ |
-| 雲端／Cowork 工作階段 | ❌ | ❌ | — |
+| 雲端／Cowork 工作階段 | ❌ | ❌ | ❌ |
 
-圖形前端不會繪製自訂狀態列（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)），
-但它們跑的是同一個引擎、共用同一個 `~/.claude`、寫出同樣的紀錄檔，因此稽核工具、
-即時的 `warmline watch` 檢視與保溫策略在那裡照常運作。若你在桌面應用程式裡也想要這條量表，就在整合終端機中執行
+桌面應用程式與 IDE 面板不會繪製自訂狀態列（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)），
+但它們在*本機*跑同一個引擎、共用同一個 `~/.claude`、寫出同樣的紀錄檔，因此稽核
+工具、即時的 `warmline watch` 檢視與保溫策略在那裡照常運作。**唯一的例外是雲端／
+Cowork 工作階段：warmline 的任何部分都觸及不到它們。** 這些工作階段在 Anthropic
+的基礎設施上執行，不會在你的機器上留下紀錄檔，也永遠不會讀取你本機的
+`~/.claude/CLAUDE.md`。若你在桌面應用程式裡也想要這條量表，就在整合終端機中執行
 `claude`。
 
 [完整對照表與驗證方式 →](docs/SURFACES.md)（英文）
@@ -178,7 +193,7 @@ warmline keep-warm off
   脈絡連續四小時保持 HOT，每次喚醒只寫入約 400 個 token。所以 keep-warm 會跳過這種
   情況。
 - **闔上筆電時沒有任何喚醒能存活。** 在一段 13 小時、260 輪的工作階段中，唯一一次
-  TTL 過期發生在機器沉睡的 6 小時夜間靜默之後。
+  TTL 過期發生在機器沉睡的 6 小時夜間靜默之後。（`warmline awake` 正是為此而生。）
 - **前綴穩定性與 TTL 同樣重要。** 漂移的系統提示（被編輯的 CLAUDE.md、變動的 git
   狀態、MCP 是否可用）會讓分歧點之後的一切重新快取，任何 ping 都救不了。
 
@@ -192,7 +207,7 @@ warmline keep-warm off
 |---|---|
 | [Statusline](docs/STATUSLINE.md) | 所有欄位、顏色、gap 機制、疑難排解 |
 | [Audit](docs/AUDIT.md) | 判定、原因歸因、`--all`、即時的 `watch` 檢視、"avoidable" 的定義 |
-| [Keep Warm](docs/KEEP-WARM.md) | 策略、其限制與條款討論 |
+| [Keep Warm](docs/KEEP-WARM.md) | 策略、免睡眠模式（`warmline awake`）、限制與條款討論 |
 | [Where it works](docs/SURFACES.md) | 終端機、桌面、IDE、SSH、雲端 |
 | [Install](docs/INSTALL.md) | 安裝、更新、解除安裝、設定、Windows、測試 |
 | [Measurements](docs/MEASUREMENTS.md) | 支撐每一項主張的實測資料 |

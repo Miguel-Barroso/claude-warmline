@@ -63,8 +63,8 @@ re-write, so it pays for itself for idle stretches up to roughly 10–12 hours
 
 ## When it cannot operate
 
-- **A sleeping host.** Wakeups can't fire while the machine is asleep; on
-  macOS, `caffeinate -is` keeps a planned wait awake.
+- **A sleeping host.** Wakeups can't fire while the machine is asleep —
+  [no-sleep mode](#no-sleep-mode-warmline-awake) exists for exactly this.
 - **No scheduling mechanism.** `ScheduleWakeup` may be absent, or present but
   gated, on some Claude Code builds — the agent then falls back to a recurring
   scheduled prompt (`/loop 50m <ping>`), or the block is simply inert.
@@ -74,6 +74,30 @@ re-write, so it pays for itself for idle stretches up to roughly 10–12 hours
 - **It's an instruction, not code.** The agent can fail to follow it.
   [`warmline-audit`](AUDIT.md) is how you verify it actually worked: look for
   ~400-token cache writes at ~50-minute intervals instead of a full re-cache.
+
+## No-sleep mode: `warmline awake`
+
+The one limit keep-warm cannot prompt its way around is a sleeping host — no
+wakeup fires with the lid closed. For a wait you plan to sit out, start the
+session in no-sleep mode:
+
+```sh
+warmline awake                    # run 'claude' with system sleep held off
+warmline awake claude --resume    # ...or wrap any command
+```
+
+It wraps the session in the OS's own sleep inhibitor (`caffeinate -is` on
+macOS, `systemd-inhibit` on Linux), so system and idle sleep are prevented for
+as long as the session runs — and *only* that long. The inhibition's lifetime
+is the wrapped process's lifetime: when you `/exit`, when the session crashes,
+when you ctrl-c it, the operating system releases the assertion and normal
+sleep behavior returns. There is no state file, no daemon and no cleanup step,
+so your machine cannot be left permanently sleepless. The display may still
+sleep; only the machine stays up.
+
+Deliberately session-scoped, not a setting: an always-on no-sleep flag would
+outlive the wait it was meant for, which is exactly the failure mode keep-warm
+itself is designed to avoid.
 
 ## Editing the policy
 

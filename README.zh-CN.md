@@ -102,31 +102,36 @@ Code 也会每分钟重新运行一次这条仪表——倒计时持续走动，
 
 ```
 $ warmline-audit --all --price 3
-145 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl 60m)
+147 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  95% hot  (10,242 of 10,756 turns)
-cold events   187  (152 rebuilt, 35 ttl)
+cache health  █████████████████████████░  95% hot  (10,394 of 10,921 turns)
+cold events   198  (159 rebuilt, 39 ttl) -- 1.8% of all turns
 
-start        project                 turns    hot  part  rebuilt   ttl  avoidable cold    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770      $7.38
+start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
+08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770    11%      $7.38
    ⋮
-TOTAL                                10756  10242   327      152    35      11,661,736     $66.47
+TOTAL                                10921  10394   329      159    39      12,134,109   100%     $69.16
 
 where the cold came from
-  unknown             ██████████████████████████  89
-  session start       ████████████████  56
-  auto-compact        ███████████  36
-  inactivity          ████████  28
+  unknown             ██████████████████████████  92 (39%)
+  session start       █████████████████  59 (25%)
+  auto-compact        ██████████  37 (16%)
+  inactivity          █████████  31 (13%)
 
-estimated avoidable premium ~$66.47  (top 5 sessions: $21.36, other 140: $45.12)
+estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 ```
 
 每个冷轮次都会在记录能证明的范围内附上原因——`/compact`、`auto-compact`、
 `model change`、`inactivity`——证明不了的就诚实标为 `unknown`（实际多半是前缀漂移：
-被编辑的 CLAUDE.md、变化的 git 状态、MCP 可用性）。注意这里的含义：无声的漂移重建的
-缓存比压缩还多。漏钱之处，往往不在你以为的地方。
+被编辑的 CLAUDE.md、变化的 git 状态、MCP 可用性）。百分比让排序一目了然：在这台
+机器上，无声的漂移占了 39% 的冷事件——比所有压缩加起来还多——而最糟的单个会话
+独占整个泄漏的 11%。漏钱之处，往往不在你以为的地方。
 
-这个金额是从你自己记录中的 token 数推算出来的，绝不是账单数据。
+这个金额是从你自己记录中的 token 数推算出来的，绝不是账单数据——而且和 Claude
+的计费一样，输入与输出 token 按不同单价分开计算：`--price` 是模型的基础**输入**价
+（$/MTok，所有缓存经济都在这一侧），`--price-out` 是**输出**价，按当前价目表默认为
+输入价的 5 倍。输出 token 从不进缓存，热度救不了它，所以审计把它单列一行，绝不与
+缓存数字混为一谈。
 
 审计评判的是过去，而 **`warmline watch`** 展示的是现在：所有会话热度的实时视图
 ——缓存仍持有哪些前缀、每个前缀何时变冷——每 10 秒重新渲染一次。桌面应用的会话
@@ -144,12 +149,18 @@ estimated avoidable premium ~$66.47  (top 5 sessions: $21.36, other 140: $45.12)
 warmline keep-warm on        # 全局；跨会话与更新持续有效
 warmline keep-warm status    # ON / OFF / INCONSISTENT（退出码 0 / 1 / 2）
 warmline keep-warm off
+warmline awake               # 免睡眠模式：抑制系统休眠地运行一次 claude 会话；
+                             # /exit 后恢复正常休眠
 ```
 
 它**不是守护进程**——没有 cron、没有常驻进程，也不会在运行中的 Claude Code 会话
 之外发出任何请求。当后台任务已经免费让缓存保持热度时它会跳过，上下文很小时也跳过，
 工作一恢复就停止，并在大约 10 小时后放弃。一次 ping 的成本约为上下文的 0.1 倍；
 它所预防的重建约为 2 倍。
+
+任何 ping 都熬不过一台休眠的机器。打算陪跑一段等待时，用 `warmline awake` 启动
+你的 `claude` 会话——系统休眠会被抑制，而且抑制的寿命就是会话本身的寿命：一旦
+`/exit`（或崩溃退出），操作系统立刻恢复正常休眠行为。没有需要记得关掉的开关。
 
 [它是什么、不是什么、何时无法运作、条款讨论 →](docs/KEEP-WARM.md)（英文）
 
@@ -160,11 +171,14 @@ warmline keep-warm off
 | 终端 CLI | ✅ | ✅ | ✅ |
 | 桌面应用（本地 Code 标签页） | ❌ | ✅ | ✅ |
 | VS Code / JetBrains 面板 | ❌ | ✅ | ✅ |
-| 云端 / Cowork 会话 | ❌ | ❌ | — |
+| 云端 / Cowork 会话 | ❌ | ❌ | ❌ |
 
-图形前端不会渲染自定义状态栏（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)），
-但它们运行的是同一个引擎、共享同一个 `~/.claude`、写出同样的记录文件，因此审计工具、
-实时的 `warmline watch` 视图和保温策略在那里照常工作。如果你在桌面应用里也想要这条仪表，就在集成终端中运行
+桌面应用与 IDE 面板不会渲染自定义状态栏（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)），
+但它们在*本地*运行同一个引擎、共享同一个 `~/.claude`、写出同样的记录文件，因此审计
+工具、实时的 `warmline watch` 视图和保温策略在那里照常工作。**唯一的例外是云端 /
+Cowork 会话：warmline 的任何部分都触及不到它们。** 这些会话运行在 Anthropic 的
+基础设施上，不会在你的机器上留下记录文件，也永远不会读取你本地的
+`~/.claude/CLAUDE.md`。如果你在桌面应用里也想要这条仪表，就在集成终端中运行
 `claude`。
 
 [完整对照表与验证方式 →](docs/SURFACES.md)（英文）
@@ -178,7 +192,7 @@ warmline keep-warm off
   上下文连续四小时保持 HOT，每次唤醒只写入约 400 个 token。所以 keep-warm 会跳过
   这种情况。
 - **合上盖子后没有任何唤醒能存活。** 在一段 13 小时、260 轮的会话中，唯一一次 TTL
-  过期发生在机器休眠的 6 小时夜间静默之后。
+  过期发生在机器休眠的 6 小时夜间静默之后。（`warmline awake` 正是为此而生。）
 - **前缀稳定性与 TTL 同样重要。** 漂移的系统提示（被编辑的 CLAUDE.md、变化的 git
   状态、MCP 可用性）会让分歧点之后的一切重新缓存，任何 ping 都救不了。
 
@@ -192,7 +206,7 @@ warmline keep-warm off
 |---|---|
 | [Statusline](docs/STATUSLINE.md) | 全部字段、颜色、gap 机制、故障排查 |
 | [Audit](docs/AUDIT.md) | 判定、原因归因、`--all`、实时的 `watch` 视图、"avoidable" 的定义 |
-| [Keep Warm](docs/KEEP-WARM.md) | 策略、其限制与条款讨论 |
+| [Keep Warm](docs/KEEP-WARM.md) | 策略、免睡眠模式（`warmline awake`）、限制与条款讨论 |
 | [Where it works](docs/SURFACES.md) | 终端、桌面、IDE、SSH、云端 |
 | [Install](docs/INSTALL.md) | 安装、更新、卸载、配置、Windows、测试 |
 | [Measurements](docs/MEASUREMENTS.md) | 支撑每一项主张的实测数据 |

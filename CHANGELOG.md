@@ -4,6 +4,47 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [Unreleased]
+
+### Added
+- **Input and output tokens are priced separately.** Claude bills them at
+  different rates, so `warmline-audit` now does too: `--price` (alias
+  `--price-in`) is the base *input* $/MTok that all cache economics are
+  multiples of, and the new `--price-out` is the *output* $/MTok, reported on
+  its own clearly-labeled line — output is never cached, so warmth can't save
+  it, and the cache numbers can no longer be mistaken for the whole bill.
+  Defaults come from the current Claude API price sheet rather than
+  placeholders: bare `--price` means $3/MTok (Sonnet base input), and an
+  omitted `--price-out` means 5× the input price, the ratio every current
+  Claude model bills at ($3/$15, $5/$25, $1/$5, $10/$50). `--json` gains
+  `tokens_output`, `output_usd` and the `price_*_per_mtok` used.
+- **Percentages throughout the audit.** The verdict census shows each
+  verdict's share of turns, every cause carries its share of cold-cause
+  events (line and histogram), `--all`'s cold-events line shows the share of
+  all turns, and the `--all` table gains a `share` column — each session's
+  slice of all avoidable cold tokens — so the events and sessions most likely
+  to be paying the cold-cache premium are obvious at a glance. Raw counts
+  stay; percentages are display-only (`--json` is unchanged in kind).
+- **`warmline awake [CMD...]` — no-sleep mode for one session.** Runs
+  `claude` (or any command) wrapped in the OS's own sleep inhibitor
+  (`caffeinate -is` on macOS, `systemd-inhibit` on Linux), so keep-warm
+  wakeups survive a wait the machine would otherwise sleep through. The
+  inhibition's lifetime *is* the session's: `/exit`, ctrl-c or a crash ends
+  the wrapped process, and the OS releases the assertion — normal sleep
+  behavior returns with no state to clean up and no way to be left
+  permanently sleepless.
+
+### Fixed
+- **Cloud support documentation was contradictory.** The README's surface
+  paragraph said "graphical front ends … work there unchanged", which — read
+  against the table row above it — implied Cloud/Cowork sessions were covered;
+  they are not. The claim is now scoped to the *local* graphical front ends
+  (desktop Code tab, IDE panels), the keep-warm cell for cloud sessions is an
+  explicit ❌ instead of an ambiguous —, and `docs/SURFACES.md` carries the
+  one authoritative statement: no part of warmline reaches cloud sessions —
+  no statusline surface, no local transcripts to audit, and the local
+  CLAUDE.md (where the keep-warm block lives) is never part of their context.
+
 ## [1.6.0] — 2026-08-20
 
 ### Fixed

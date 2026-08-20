@@ -53,16 +53,18 @@ turns.
 
 ## Eight weeks of one machine's history
 
-`warmline-audit --all` over 145 sessions puts the total estimated avoidable
-premium at **~$66** at Sonnet base pricing — and attributes 43 cache rebuilds
-to compaction but **89 to unexplained prefix drift**. The leak is rarely where
-you expect it.
+`warmline-audit --all` over 147 sessions puts the total estimated avoidable
+premium at **~$69** at Sonnet base input pricing — and attributes 19% of the
+cold-cause events to compaction but **39% to unexplained prefix drift**. The
+leak is rarely where you expect it.
 
 ## Measure your own
 
 ```sh
-warmline-audit --all --price 3     # your machine, your models' base price
+warmline-audit --all --price 3     # your machine, your model's base input price
 warmline-audit --price 3           # this session, turn by turn
+warmline-audit --price 3 --price-out 15   # output priced explicitly
+                                          # (omitted, it defaults to 5x input)
 ```
 
 The numbers above are estimates computed from token counts recorded in
