@@ -4,7 +4,7 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
-## [Unreleased]
+## [1.7.0] — 2026-08-20
 
 ### Added
 - **Input and output tokens are priced separately.** Claude bills them at
