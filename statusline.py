@@ -5,8 +5,8 @@ Renders one line:
 
     Fable 5 | my-project | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m | keep-warm on
 
-Cache verdict (colored green/yellow/red unless NO_COLOR or
-WARMLINE_NO_COLOR is set):
+Every colored field is green/yellow/red unless NO_COLOR or
+WARMLINE_NO_COLOR is set. Cache verdict:
   HOT (cold ~13:04)  the previous request read from the prompt cache; the
                   absolute wall-clock expiry makes the line stale-proof --
                   even a frozen repaint read hours later tells the truth
@@ -35,15 +35,25 @@ The keep-warm field reports whether the optional keep-warm policy is
 installed, read from the real CLAUDE.md on every render (never a state
 file), matching `warmline keep-warm status`:
 
-  keep-warm on    the marker-delimited policy block is in CLAUDE.md (green)
-  keep-warm off   it is not (dim)
-  keep-warm ?     one marker without its pair -- a malformed block that the
-                  agent may read as truncated policy (yellow); fix with
+  keep-warm on    the marker-delimited policy block is in CLAUDE.md and
+                  matches the installed policy (green)
+  keep-warm on*   installed, but the block differs from
+                  warmline-keep-warm.md -- an older release's wording, or a
+                  hand edit, so the agent is following superseded
+                  instructions (yellow); refresh with
                   `warmline keep-warm off && warmline keep-warm on`
+  keep-warm off   no block (dim)
+  keep-warm ?     one marker without its pair -- a malformed block that the
+                  agent may read as truncated policy (yellow); same fix
 
 "on" means the policy is installed, not that a ping is scheduled: it is an
 instruction the agent follows during long waits, and `warmline-audit` is
 how you check whether it actually worked.
+
+The ctx field turns yellow past WARMLINE_CTX_WARN_PCT (default 80) because
+auto-compaction -- measured firing around 84% of the window -- rewrites the
+prefix and voids the cache without being asked. Near the line, a wait isn't
+worth keeping warm: the prefix is about to be replaced anyway.
 
 The gap is measured per session via a stamp file that stores the last-seen
 usage snapshot; its mtime moves only when the snapshot changes -- i.e. when
@@ -59,6 +69,8 @@ Configuration (environment variables):
   WARMLINE_STATE_DIR  stamp-file directory (default ~/.claude/warmline-state)
   WARMLINE_NO_COLOR   if set (or NO_COLOR), plain output without ANSI colors
   WARMLINE_NO_KEEPWARM  if set, omit the keep-warm field
+  WARMLINE_CTX_WARN_PCT  context-window percentage at which the ctx field
+                      turns yellow (default 80; 0 or less disables it)
   WARMLINE_DEBUG      if set, keep the last raw statusline payload in
                       $WARMLINE_STATE_DIR/last-payload.json for inspection
   CLAUDE_CONFIG_DIR   Claude Code's config directory (default ~/.claude);
@@ -66,6 +78,7 @@ Configuration (environment variables):
 """
 import json
 import os
+import re
 import sys
 import time
 
@@ -80,6 +93,10 @@ CLAUDE_DIR = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claud
 KW_BEGIN = "<!-- >>> claude-warmline keep-warm >>> -->"
 KW_END = "<!-- <<< claude-warmline keep-warm <<< -->"
 SHOW_KEEPWARM = not os.environ.get("WARMLINE_NO_KEEPWARM")
+try:
+    CTX_WARN_PCT = float(os.environ.get("WARMLINE_CTX_WARN_PCT", "80"))
+except ValueError:
+    CTX_WARN_PCT = 80.0
 
 GREEN, YELLOW, RED, DIM, RESET = (
     "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
@@ -92,11 +109,19 @@ def paint(text, color):
 
 
 def keep_warm_state():
-    """'on' | 'off' | '?', from the same markers `warmline keep-warm` writes.
+    """'on' | 'stale' | 'off' | '?', from the markers `warmline keep-warm` writes.
 
     Read from CLAUDE.md itself on every render, so hand-editing the file is
     reflected immediately; one marker without its pair is a malformed block
     and reported as unknown rather than as a confident on/off.
+
+    'stale' is the case a plain on/off hides: the block is installed but no
+    longer matches warmline-keep-warm.md, so an upgrade left the agent
+    reading a previous release's policy. Same normalized comparison
+    `warmline keep-warm status` reports as `policy modified`. It adds one
+    small read and two regex passes to a render that already read CLAUDE.md
+    -- measured at 0.15 ms, against a refreshInterval of 60 s -- and the
+    comparison is skipped entirely unless both markers are present.
     """
     try:
         with open(os.path.join(CLAUDE_DIR, "CLAUDE.md")) as f:
@@ -104,9 +129,16 @@ def keep_warm_state():
     except OSError:
         return "off"
     begin, end = KW_BEGIN in text, KW_END in text
-    if begin and end:
-        return "on"
-    return "?" if begin or end else "off"
+    if not (begin and end):
+        return "?" if begin or end else "off"
+    try:
+        with open(os.path.join(CLAUDE_DIR, "warmline-keep-warm.md")) as f:
+            policy = f.read()
+    except OSError:
+        return "on"  # no installed policy to compare against; don't cry wolf
+    body = text.split(KW_BEGIN, 1)[1].split(KW_END, 1)[0]
+    norm = lambda s: re.sub(r"\s+", " ", s).strip()  # noqa: E731
+    return "on" if norm(body) == norm(policy) else "stale"
 
 
 def sniff_ttl(transcript_path):
@@ -243,10 +275,13 @@ def main():
     pct = cw.get("used_percentage")
     tokens = cw.get("total_input_tokens")
     try:
-        ctx = f"ctx {round(float(pct))}%"
+        pct = float(pct)
+        ctx = f"ctx {round(pct)}%"
         if tokens:
             ctx += f" ({round(tokens / 1000)}k)"
-        parts.append(ctx)
+        # auto-compaction is the one prefix rewrite nobody chooses; it fires
+        # near the top of the window, so a high ctx is the only warning of it
+        parts.append(paint(ctx, YELLOW) if 0 < CTX_WARN_PCT <= pct else ctx)
     except (TypeError, ValueError):
         pass
 
@@ -257,7 +292,9 @@ def main():
 
     if SHOW_KEEPWARM:
         kw = keep_warm_state()
-        parts.append(paint("keep-warm " + kw,
+        # the star is the whole point of 'stale': still on, no longer current
+        label = "on*" if kw == "stale" else kw
+        parts.append(paint("keep-warm " + label,
                            {"on": GREEN, "off": DIM}.get(kw, YELLOW)))
 
     print(" | ".join(parts))

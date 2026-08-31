@@ -4,6 +4,83 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [1.8.0] — 2026-08-31
+
+Everything in this release comes from one 4.5-hour supervised wait with the
+policy on: 187 turns, 96% HOT, **zero** tokens re-cached cold. Nothing was
+broken; four things were less useful than they looked. See
+[docs/MEASUREMENTS.md](docs/MEASUREMENTS.md#a-45-hour-session-with-the-policy-on).
+
+### Added
+- **`warmline wait-for TARGET` — a poller instead of a ping.** Blocks until a
+  detached job finishes (`--pid N`, `--pidfile F`, `--file F`, or
+  `--log F --until PATTERN`), so run as a harness background task it wakes the
+  session *when the work ends* — on failure as well as success — with no
+  schedule to arm, re-arm or forget to remove. The policy now prefers this to a
+  timed wakeup whenever the wait is locally observable, and reserves scheduled
+  pings for waits nothing local can watch. Bad targets fail loudly rather than
+  blocking forever: an unparseable pidfile, a log that never appears, or a pid
+  that was never a process exits 2 within five minutes saying the worker
+  probably never started, and a zombie counts as finished (it answers `kill -0`,
+  which is exactly the case a failed detach produces).
+- **`keep-warm on*` — the statusline now says when your policy block is
+  stale.** `warmline keep-warm status` has always reported "policy modified",
+  but the gauge painted any present block plain green `on`, so an upgraded
+  policy that never reached your CLAUDE.md looked identical to a current one.
+  The field now compares the installed block against `warmline-keep-warm.md`
+  and paints a yellow `keep-warm on*` when they differ — measured at 0.15 ms
+  per render, against a 60-second refresh. Absent policy file, no star: the
+  gauge doesn't cry wolf about a comparison it can't make.
+- **A yellow `ctx` past 80%.** Auto-compaction is the one prefix rewrite nobody
+  chooses, and it was the *only* cause of lost warmth in the field session — it
+  fired three times at 167–169k of a 200k window (~84%). A high `ctx` is the
+  only warning you get, so it turns yellow before the threshold, tunable with
+  `WARMLINE_CTX_WARN_PCT` (`0` disables). The policy gained a matching skip
+  clause: don't start a long wait just under the threshold; compact first.
+
+### Changed
+- **The policy no longer names mechanisms that may not exist.** It called for
+  `ScheduleWakeup` "otherwise `/loop 50m`"; the field session's build offered
+  neither (it had cron), and an agent reading a closed list of unavailable tools
+  concludes the policy doesn't apply. It now states the *requirement* — anything
+  that re-enters the session well inside one TTL and can be removed again — with
+  schedulers, cron and recurring prompts as examples of it.
+- **"Local background tasks are already in flight" is no longer only luck.**
+  That skip clause read as a happy accident to notice; the agent can create the
+  condition, and now the policy says so.
+- **The `/compact` warning names auto-compact too.** Every warmth break in the
+  field session came from the automatic one. `docs/KEEP-WARM.md` gains a section
+  on what can actually be done about it (see it coming, don't wait near the
+  threshold, `autoCompactEnabled: false` / `DISABLE_AUTO_COMPACT=1` and the
+  hard-wall trade-off that comes with turning it off) rather than more words in
+  the block.
+- **Updating refreshes the keep-warm block inside your CLAUDE.md.** Previously
+  an upgrade replaced `warmline-keep-warm.md` but left the copy in CLAUDE.md
+  from whenever you first installed — the file your agent actually reads. The
+  installer now rewrites a block that still matches the policy it replaced, and
+  leaves a block you edited yourself alone with a console note and the two
+  commands to adopt the new wording. The rest of your CLAUDE.md is untouched
+  either way.
+
+The block is 440 words (was 409) — about 50 more tokens on every request, spent
+on the three findings above.
+
+### Fixed
+- **`warmline-audit --help` was broken.** It read `--help` as a transcript path
+  and died with `no transcript found at '--help'`, which is why `--json` — the
+  form to reach for when an agent, CI or a column-reflowing terminal proxy is
+  reading — could only be found by grepping the source. Both are now documented
+  in `--help` and in [docs/AUDIT.md](docs/AUDIT.md).
+
+### Documentation
+- The `&` trap: `nohup … &` inside a harness background task makes the *wrapper*
+  exit immediately, so the harness reports "completed, exit 0" while the real
+  work runs on detached with nothing left to notify you.
+- The paired pattern: in-harness tasks notify on exit but can be killed by the
+  harness (two died mid-session with a bare `[killed]`); detached `nohup`
+  workers survive but notify nothing. Run both — detached worker, short-lived
+  `warmline wait-for` poller — and you get survival *and* the wake.
+
 ## [1.7.0] — 2026-08-20
 
 ### Added

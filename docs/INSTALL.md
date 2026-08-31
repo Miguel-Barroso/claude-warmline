@@ -73,6 +73,14 @@ replaces it, the `warmline` command, and the auditor in place without
 on/off choice is left as it was. [CHANGELOG.md](../CHANGELOG.md) tracks tagged
 releases.
 
+Since v1.8.0 an update also refreshes the keep-warm block **inside your
+CLAUDE.md**, not just the policy file beside it — otherwise your agent keeps
+following the release you first installed. It only rewrites a block that still
+matches the policy it replaced; a block you edited yourself is left alone, with
+a note on the console telling you the wording moved on. Either way the rest of
+your CLAUDE.md is untouched. See
+[editing the policy](KEEP-WARM.md#editing-the-policy).
+
 ## Uninstalling
 
 ```sh
@@ -92,6 +100,7 @@ of that file untouched.
 | `WARMLINE_STATE_DIR` | `~/.claude/warmline-state` | stamp/state directory |
 | `WARMLINE_BIN_DIR` | `~/.local/bin` | where the installer puts the `warmline` and `warmline-audit` commands |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, the statusline omits the keep-warm field |
+| `WARMLINE_CTX_WARN_PCT` | `80` | percentage at which the statusline's `ctx` field turns yellow (auto-compact warning); `0` disables |
 | `WARMLINE_NO_COLOR` | unset | if set (or `NO_COLOR`), plain output without ANSI colors |
 | `WARMLINE_FORCE_COLOR` | unset | if set, colored audit output even when piped |
 | `WARMLINE_DEBUG` | unset | if set, keeps the last raw statusline payload for inspection |

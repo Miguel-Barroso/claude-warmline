@@ -11,9 +11,15 @@ the statusline live:
     08-18 10:13:56    10m       62,567           710   HOT
 
 Usage:
+    warmline-audit --help             # this text
     warmline-audit                    # latest session of the current project
     warmline-audit TRANSCRIPT.jsonl   # a specific session
-    warmline-audit --ttl 5 --json     # force a TTL, machine-readable
+    warmline-audit --json             # the same report as JSON on stdout --
+                                      # never colored, never bar-charted, and
+                                      # the form to read when an agent (or a
+                                      # filtering proxy) is doing the reading;
+                                      # combines with --all and --live
+    warmline-audit --ttl 5            # force a TTL instead of detecting it
     warmline-audit --price [3]        # dollar estimates; the number is your
                                       # model's base INPUT $/MTok (bare
                                       # --price uses $3, the current Sonnet
@@ -673,6 +679,11 @@ def take_price(args, *flags):
 
 def main():
     args = sys.argv[1:]
+    # without this, --help is read as a transcript path and dies with
+    # "no transcript found at '--help'" -- and --json stays undiscoverable
+    if {"--help", "-h", "help"} & set(args):
+        print(__doc__.strip())
+        return
     ttl = take_number(args, "--ttl")
     p_in, in_given = take_price(args, "--price", "--price-in")
     p_out, out_given = take_price(args, "--price-out")

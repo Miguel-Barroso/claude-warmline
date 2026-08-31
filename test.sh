@@ -167,7 +167,52 @@ if [[ "$out" != *"keep-warm"* && "$out" == *"cache HOT"* ]]; then
 else
   echo "FAIL kw-optout: $out"; fail=$((fail + 1))
 fi
+
+# Stale policy: the block is installed but no longer matches the installed
+# warmline-keep-warm.md, so an upgrade left the agent following the previous
+# release's wording. A plain green "on" hides exactly that; "on*" reports it.
+printf '%s\npolicy body\n%s\n' \
+  '<!-- >>> claude-warmline keep-warm >>> -->' \
+  '<!-- <<< claude-warmline keep-warm <<< -->' > "$KWMD"
+KWPOL="$CLAUDE_CONFIG_DIR/warmline-keep-warm.md"
+printf 'policy   body\n' > "$KWPOL"   # whitespace-insensitive, like the CLI
+out=$(printf '%s' "${HOT/t1/k7}" | ./statusline.py)
+if [[ "$out" == *"keep-warm on" && "$out" != *"on*" ]]; then
+  echo "ok   kw-current: block matches the installed policy: $out"; pass=$((pass + 1))
+else
+  echo "FAIL kw-current: expected a plain 'keep-warm on' ending: $out"; fail=$((fail + 1))
+fi
+printf 'policy body, revised in a later release\n' > "$KWPOL"
+check kw-stale "keep-warm on*" "${HOT/t1/k8}"
+out=$(printf '%s' "${HOT/t1/k9}" | env -u WARMLINE_NO_COLOR ./statusline.py)
+if [[ "$out" == *$'\033[33mkeep-warm on*\033[0m'* ]]; then
+  echo "ok   kw-stale-color: yellow keep-warm on* emitted"; pass=$((pass + 1))
+else
+  echo "FAIL kw-stale-color: no yellow 'keep-warm on*' in: ${out@Q}"; fail=$((fail + 1))
+fi
+rm -f "$KWPOL"
+out=$(printf '%s' "${HOT/t1/ka}" | ./statusline.py)
+if [[ "$out" == *"keep-warm on" && "$out" != *"on*" ]]; then
+  echo "ok   kw-nopolicy: nothing to compare against, so no false stale"; pass=$((pass + 1))
+else
+  echo "FAIL kw-nopolicy: $out"; fail=$((fail + 1))
+fi
 rm -f "$KWMD"
+
+# Auto-compact proximity: the compaction nobody chooses fires near the top of
+# the window and rewrites the prefix, so ctx goes yellow past the threshold.
+CTXHI=${HOT/42.7/86.0}
+out=$(printf '%s' "${CTXHI/t1/c1}" | env -u WARMLINE_NO_COLOR ./statusline.py)
+out2=$(printf '%s' "${CTXHI/t1/c2}" | WARMLINE_CTX_WARN_PCT=0 env -u WARMLINE_NO_COLOR ./statusline.py)
+out3=$(printf '%s' "${HOT/t1/c3}" | env -u WARMLINE_NO_COLOR ./statusline.py)
+out4=$(printf '%s' "${CTXHI/t1/c4}" | WARMLINE_CTX_WARN_PCT=nonsense env -u WARMLINE_NO_COLOR ./statusline.py)
+if [[ "$out" == *$'\033[33mctx 86% (168k)\033[0m'* && "$out2" == *"ctx 86% (168k) |"* \
+   && "$out2" != *$'\033[33mctx'* && "$out3" != *$'\033[33mctx'* \
+   && "$out4" == *$'\033[33mctx 86%'* ]]; then
+  echo "ok   ctx-warn: yellow past 80%, plain below, 0 disables, junk falls back"; pass=$((pass + 1))
+else
+  echo "FAIL ctx-warn: ${out@Q} / ${out2@Q} / ${out3@Q} / ${out4@Q}"; fail=$((fail + 1))
+fi
 
 # warmline-audit: synthetic transcript with one of each verdict, a duplicate
 # requestId (one API request, two entries) and a sidechain turn to exclude.
@@ -352,6 +397,18 @@ if [[ "$out" == "json-ok" ]]; then
   echo "ok   all-json: sessions ranked, totals and premiums correct"; pass=$((pass + 1))
 else
   echo "FAIL all-json: $out"; fail=$((fail + 1))
+fi
+
+# --help used to be read as a transcript path and die, which is how --json
+# stayed undiscoverable: an agent auditing itself wants the machine-readable
+# form, and the only place to learn it exists is the help text.
+out=$(./warmline-audit --help); rc=$?
+rc2=0; ./warmline-audit -h >/dev/null 2>&1 || rc2=$?
+if [[ "$rc" == 0 && "$rc2" == 0 && "$out" == *"--json"* && "$out" == *"--all"* \
+   && "$out" == *"--live"* && "$out" == *"--price"* && "$out" != *"no transcript found"* ]]; then
+  echo "ok   audit-help: --help documents --json and friends, exit 0"; pass=$((pass + 1))
+else
+  echo "FAIL audit-help: rc=$rc rc2=$rc2"; echo "$out" | head -3; fail=$((fail + 1))
 fi
 
 # One corrupt timestamp must not kill a cross-session audit.
@@ -684,6 +741,88 @@ else
   echo "FAIL cli-awake-edges: rc=$rc rc2=$rc2 err=$err"; echo "$out"; fail=$((fail + 1))
 fi
 
+# warmline wait-for: the poller half of keep-warm. Each target ends the wait
+# on its own, and the loop's minute is scaled down so the heartbeat, the
+# timeout and the settle window run for real in about a second each.
+WF="$WARMLINE_STATE_DIR/waitfor"
+mkdir -p "$WF"
+wf() { WARMLINE_WAITFOR_MIN_SEC=1 wl wait-for -n 1 "$@"; }
+
+sleep 2 & WFPID=$!
+out=$(wf --pid "$WFPID" --every 0); rc=$?
+if [[ "$rc" == 0 && "$out" == *"pid $WFPID finished after"* ]]; then
+  echo "ok   wait-pid: returns when the watched process ends"; pass=$((pass + 1))
+else
+  echo "FAIL wait-pid: rc=$rc out=$out"; fail=$((fail + 1))
+fi
+
+( sleep 1; : > "$WF/done" ) &
+out=$(wf --file "$WF/done" --every 0); rc=$?
+( sleep 1; printf 'transfer complete\n' >> "$WF/job.log" ) &
+: > "$WF/job.log"
+out2=$(wf --log "$WF/job.log" --until 'transfer comp' --every 0); rc2=$?
+if [[ "$rc" == 0 && "$out" == *"$WF/done finished after"* \
+   && "$rc2" == 0 && "$out2" == *"finished after"* ]]; then
+  echo "ok   wait-file-log: sentinel file and log pattern both end the wait"; pass=$((pass + 1))
+else
+  echo "FAIL wait-file-log: rc=$rc/$rc2 out=$out / $out2"; fail=$((fail + 1))
+fi
+
+# A detached worker's pidfile, and the zombie case: a child the harness has
+# not reaped still answers kill -0, so liveness comes from ps, not kill.
+( printf '%s\n' "$BASHPID" > "$WF/w.pid"; sleep 2 ) &
+out=$(wf --pidfile "$WF/w.pid" --every 0); rc=$?
+if [[ "$rc" == 0 && "$out" == *"pidfile $WF/w.pid finished after"* ]]; then
+  echo "ok   wait-pidfile: follows the pid a detached worker wrote"; pass=$((pass + 1))
+else
+  echo "FAIL wait-pidfile: rc=$rc out=$out"; fail=$((fail + 1))
+fi
+
+# A target that never materializes is a launch bug, not a long wait: say so
+# in seconds rather than blocking until the timeout hours later.
+rc=0;  err=$(wf --pidfile "$WF/never.pid" --every 0 2>&1 >/dev/null) || rc=$?
+printf 'not a pid\n' > "$WF/junk.pid"
+rc2=0; err2=$(wf --pidfile "$WF/junk.pid" --every 0 2>&1 >/dev/null) || rc2=$?
+rc3=0; err3=$(wf --log "$WF/never.log" --until x --every 0 2>&1 >/dev/null) || rc3=$?
+if [[ "$rc" == 2 && "$rc2" == 2 && "$rc3" == 2 \
+   && "$err" == *"never started"* && "$err2" == *"holds no pid"* \
+   && "$err3" == *"never appeared"* ]]; then
+  echo "ok   wait-guard: absent or unreadable targets exit 2, not hang"; pass=$((pass + 1))
+else
+  echo "FAIL wait-guard: rc=$rc/$rc2/$rc3 :: $err | $err2 | $err3"; fail=$((fail + 1))
+fi
+
+# Heartbeat inside the TTL while waiting, then giving up: --every prints,
+# --every 0 stays silent, and --timeout ends the wait with exit 1.
+rc=0;  err=$(wf --file "$WF/nothing" --every 1 --timeout 4 2>&1 >"$WF/beats") || rc=$?
+out=$(cat "$WF/beats")
+rc2=0; out2=$(wf --file "$WF/nothing" --every 0 --timeout 2 2>/dev/null) || rc2=$?
+beats=$(printf '%s\n' "$out" | grep -c "still waiting on")
+if [[ "$rc" == 1 && "$beats" -ge 2 && "$err" == *"gave up on"* \
+   && "$rc2" == 1 && -z "$out2" ]]; then
+  echo "ok   wait-heartbeat: $beats beats then a timeout; --every 0 silent"; pass=$((pass + 1))
+else
+  echo "FAIL wait-heartbeat: rc=$rc beats=$beats rc2=$rc2 out2=${out2@Q}"; fail=$((fail + 1))
+fi
+
+# Help documents the '&' trap that makes this command necessary; every bad
+# invocation is rejected before the loop starts.
+out=$(wl wait-for --help)
+rc=0;  wl wait-for >/dev/null 2>&1 || rc=$?
+rc2=0; wl wait-for --pid 1 --file /tmp/x >/dev/null 2>&1 || rc2=$?
+rc3=0; wl wait-for --log /tmp/x >/dev/null 2>&1 || rc3=$?
+rc4=0; wl wait-for --pid abc >/dev/null 2>&1 || rc4=$?
+rc5=0; wl wait-for --pid 1 -n x >/dev/null 2>&1 || rc5=$?
+rc6=0; wl wait-for --bogus >/dev/null 2>&1 || rc6=$?
+rc7=0; wl wait-for --pid >/dev/null 2>&1 || rc7=$?
+if [[ "$out" == *"--pidfile"* && "$out" == *"--until"* \
+   && "$out" == *"nohup"* && "$out" == *"exit 0 while the real work runs"* \
+   && "$rc$rc2$rc3$rc4$rc5$rc6$rc7" == 2222222 ]]; then
+  echo "ok   wait-usage: help covers the '&' trap; bad usage exits 2"; pass=$((pass + 1))
+else
+  echo "FAIL wait-usage: rcs=$rc$rc2$rc3$rc4$rc5$rc6$rc7"; echo "$out"; fail=$((fail + 1))
+fi
+
 # Installer help: install-side flags only, pointing control at warmline.
 out=$(inst --help)
 if [[ "$out" == *"--keep-warm"* && "$out" == *"--uninstall"* \
@@ -713,6 +852,49 @@ if grep -qF "$MB" "$IROOT/CLAUDE.md" && grep -qF "$ME" "$IROOT/CLAUDE.md"; then
 else
   echo "FAIL ins-keep-warm-delegates"; fail=$((fail + 1))
 fi
+
+# Upgrading refreshes the block the agent actually reads. Refreshing only
+# $POLICY would leave every session following the previous release's policy
+# while the statusline still painted a confident green "on".
+python3 - "$IROOT/CLAUDE.md" "$MB" "$ME" <<'PY'
+import sys
+md, mb, me = sys.argv[1:4]
+text = open(md).read()
+head, rest = text.split(mb, 1)
+_, tail = rest.split(me, 1)
+open(md, "w").write(head + mb + "\npolicy as shipped in an older release\n" + me + tail)
+PY
+printf 'policy as shipped in an older release\n' > "$IROOT/warmline-keep-warm.md"
+out=$(inst)
+if [[ "$out" == *"refreshed the keep-warm block"* ]] \
+   && ! grep -q "older release" "$IROOT/CLAUDE.md" \
+   && grep -q "Keep the prompt cache warm" "$IROOT/CLAUDE.md" \
+   && grep -q 'my own rules' "$IROOT/CLAUDE.md"; then
+  echo "ok   ins-policy-refresh: an untouched block is brought up to date"; pass=$((pass + 1))
+else
+  echo "FAIL ins-policy-refresh:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# ...but a block the user edited is theirs. Never rewrite it; say so instead.
+python3 - "$IROOT/CLAUDE.md" "$MB" "$ME" <<'PY'
+import sys
+md, mb, me = sys.argv[1:4]
+text = open(md).read()
+head, rest = text.split(mb, 1)
+_, tail = rest.split(me, 1)
+open(md, "w").write(head + mb + "\nMY OWN POLICY, HAND EDITED\n" + me + tail)
+PY
+printf 'policy as shipped in an older release\n' > "$IROOT/warmline-keep-warm.md"
+out=$(inst)
+if [[ "$out" == *"looks"* && "$out" == *"hand-edited"* \
+   && "$out" == *"warmline keep-warm off && warmline keep-warm on"* ]] \
+   && grep -q "MY OWN POLICY, HAND EDITED" "$IROOT/CLAUDE.md" \
+   && grep -q 'my own rules' "$IROOT/CLAUDE.md"; then
+  echo "ok   ins-policy-respects-edits: hand-edited block kept, refresh advised"; pass=$((pass + 1))
+else
+  echo "FAIL ins-policy-respects-edits:"; echo "$out"; fail=$((fail + 1))
+fi
+wl keep-warm off >/dev/null && wl keep-warm on >/dev/null   # back to a clean block
 
 # --uninstall removes everything warmline added, keeps the user's own text.
 inst --uninstall >/dev/null

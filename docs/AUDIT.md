@@ -3,9 +3,11 @@
 [← back to the README](../README.md)
 
 ```sh
+warmline-audit --help               # every flag, including the ones below
 warmline-audit                      # latest session of the current project
 warmline-audit path/to/session.jsonl
-warmline-audit --ttl 5 --json       # force a TTL, machine-readable
+warmline-audit --json               # the same report, machine-readable
+warmline-audit --ttl 5              # force a TTL instead of detecting it
 warmline-audit --price 3            # add dollar estimates, given your
                                     # model's base INPUT price per MTok
                                     # (bare --price = $3; --price-in works too)
@@ -263,6 +265,11 @@ and cannot see, what Anthropic actually billed your account.
   session's `ttl_min`/`ttl_source`, and, with `--price`,
   `avoidable_premium_usd` plus the `price_in_per_mtok`/`price_out_per_mtok`
   the run used. Percentages are a display convenience only — the JSON carries
-  the raw counts.
+  the raw counts. It combines with `--all` and `--live`, and it is the form to
+  reach for when something other than a human is reading: an agent auditing its
+  own session, CI, or a terminal proxy that reflows the table's columns.
 - `--ttl N` forces the cache TTL for every session (also `WARMLINE_TTL_MIN`);
   unset, it is [auto-detected per session](#the-ttl-is-auto-detected).
+- `--help` prints all of the above. (Before v1.8.0 it didn't — `--help` was
+  parsed as a transcript path and died, which is how `--json` stayed a
+  grep-only discovery.)

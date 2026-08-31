@@ -24,6 +24,27 @@ API turn, and [`warmline-audit`](AUDIT.md) grades them.
   minutes of activity. Prefix invalidation and TTL expiry are different failure
   modes, which is exactly why the statusline distinguishes them.
 
+## A 4.5-hour session with the policy on
+
+2026-08-31, supervising a 104 GB phone-to-server backup — mostly waiting:
+
+- **187 API turns: 179 HOT (96%), 8 PARTIAL, 0 COLD.** 16.1M tokens read from
+  cache; **0 tokens re-cached while cold.** The policy did what it claims.
+- **Every one of the 8 warmth breaks was an auto-compaction**, not a TTL
+  expiry and not a `/compact` anyone typed. Three fired at 167–169k input
+  tokens — about **84% of a 200k window** — which is where the statusline's
+  yellow `ctx` threshold comes from. See
+  [auto-compact](KEEP-WARM.md#auto-compact-the-one-you-dont-choose).
+- **The available wakeup mechanism was none of the ones the policy named.**
+  No `ScheduleWakeup`, no `/loop`; one-shot cron entries with manual cleanup.
+  The policy now states the requirement rather than a list of tools.
+- **Two in-harness background tasks died mid-wait** (~25 and ~78 minutes) with
+  a bare `[killed]` and no error text. Host sleep, device disconnection and
+  transfer errors were each ruled out; harness lifecycle is an inference, not
+  a proven cause. What worked was a detached worker paired with a short-lived
+  in-harness poller — now shipped as
+  [`warmline wait-for`](KEEP-WARM.md#waiting-on-work-you-launched-yourself-warmline-wait-for).
+
 ## The TTL, measured in a clean room
 
 Two isolated headless sessions, no MCP servers, frozen environment:

@@ -64,13 +64,13 @@ Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m |
 
 | Field | Meaning |
 |---|---|
-| `ctx 43% (168k)` | context-window utilization and input tokens in the conversation |
+| `ctx 43% (168k)` | context-window utilization and input tokens in the conversation — yellow past 80%, where auto-compaction starts rewriting the prefix |
 | `cache HOT (cold ~13:04)` | the previous request read from the prompt cache; the cache expires at the time shown (green) |
 | `cache HOT (cold in 9m)` | still warm, but within 15 minutes of the TTL — act now or pay the rebuild (yellow) |
 | `cache COLD(rebuilt)` | the previous request found the prefix cold and re-cached it (yellow) |
 | `cache COLD(ttl?)` | *inferred*: quiet for longer than the TTL, so the cache has expired (red) |
 | `gap 12m` | minutes since this session's last API turn; idle repaints don't reset it |
-| `keep-warm on` | whether the [keep-warm policy](#keep-warm) is installed — `off` dim, `?` if the block is malformed |
+| `keep-warm on` | the [keep-warm policy](#keep-warm) is installed and current — `on*` if an upgrade left your CLAUDE.md block behind, `off` dim, `?` if the block is malformed |
 
 The line can't go stale: the installer wires `refreshInterval: 60`, so Claude
 Code re-runs the gauge every minute even while the session just sits there —
@@ -173,13 +173,21 @@ warmline keep-warm status    # ON / OFF / INCONSISTENT (exit 0 / 1 / 2)
 warmline keep-warm off
 warmline awake               # no-sleep mode: one claude session with system
                              # sleep held off; normal sleep returns on /exit
+warmline wait-for --pid N    # wake the session when a detached job ends
 ```
 
 It is **not a daemon** — no cron, no process, nothing outside a running Claude
 Code session. It skips when background tasks are already keeping the cache warm
 for free, skips small contexts, stops the moment work resumes, and gives up
 after ~10 hours. A ping costs ~0.1× your context; the rebuild it prevents costs
-~2×.
+~2×. The policy names no particular scheduler, only the requirement — something
+must re-enter the session inside one TTL, and must be removable — because
+builds differ in what they offer.
+
+When the wait is on *this* machine, a timed ping is the wrong tool.
+`warmline wait-for` is a poller you run as a background task: it wakes the
+session when the job ends **or fails**, needs no schedule, and terminates
+itself. Pings are for waits nothing local can watch.
 
 The one thing no ping survives is a sleeping machine. For a wait you intend to
 sit out, `warmline awake` starts your `claude` session with system sleep
@@ -212,6 +220,12 @@ integrated terminal when you want the gauge too.
 
 ## Measured, not modeled
 
+- **96% hot across a 4.5-hour supervised wait, 0 tokens re-cached cold** — the
+  policy on, 187 turns, 16.1M tokens read from cache. Every warmth break was an
+  *auto*-compaction, none a TTL expiry.
+- **Auto-compact fires around 84% of the window** (three times, at 167–169k of
+  200k). That is the one cache killer keep-warm cannot prevent — only warn
+  about, which is why `ctx` goes yellow at 80%.
 - **50 minutes idle: warm. 70 minutes: cold.** A clean-room two-arm probe read
   a full 71,312-token prefix back after 50 minutes and re-wrote 45,033 tokens
   after 70. The 1-hour TTL is real, and reads refresh it — which is exactly why

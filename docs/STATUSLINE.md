@@ -20,7 +20,14 @@ Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m |
 | `cache COLD(ttl?)` | *inferred*: the session has been quiet longer than the TTL, so the cache has expired regardless of the (stale) usage fields (red) |
 | `cache ?` | usage fields unavailable (dim) |
 | `gap 12m` | minutes since this session's last API turn — shown from 5m; idle repaints don't reset it |
-| `keep-warm on` | the keep-warm policy is installed (green); `off` is dim, `?` yellow |
+| `keep-warm on` | the keep-warm policy is installed and current (green); `on*` yellow, `off` dim, `?` yellow |
+
+`ctx` turns yellow past 80% (`WARMLINE_CTX_WARN_PCT`), because
+[auto-compaction](KEEP-WARM.md#auto-compact-the-one-you-dont-choose) — measured
+firing around 84% of the window — rewrites the prefix without being asked and
+takes the cache with it. It is the only warning you get, and the only thing
+worth doing about it (compact deliberately, or don't start a wait you can't
+keep) has to happen before the threshold, not after.
 
 The model name and directory come straight from Claude Code's own payload.
 The TTL behind the countdown is auto-detected from the transcript's own
@@ -64,13 +71,22 @@ the line follows on the next repaint.
 
 | Shown | State |
 |---|---|
-| `keep-warm on` | both markers present — the policy is in your CLAUDE.md |
+| `keep-warm on` | both markers present, and the block matches the installed policy |
+| `keep-warm on*` | installed, but the block differs from `~/.claude/warmline-keep-warm.md` — an older release's wording, or a hand edit. Refresh with `warmline keep-warm off && warmline keep-warm on` |
 | `keep-warm off` | no block (or no CLAUDE.md) |
-| `keep-warm ?` | one marker without its pair: a malformed block, which the agent may read as truncated policy. Fix with `warmline keep-warm off && warmline keep-warm on` |
+| `keep-warm ?` | one marker without its pair: a malformed block, which the agent may read as truncated policy. Same fix |
 
 `on` means *installed*, not *pinging*. Keep-warm is an instruction the agent
 follows during long waits, not a daemon — the field tells you the instruction
 is in place; [`warmline-audit`](AUDIT.md) tells you whether it worked.
+
+The star matters because the block in CLAUDE.md is what the agent reads, and
+upgrading warmline used to refresh only the policy *source* beside it. A
+session could follow a superseded policy indefinitely while the line painted
+a confident green `on`. `on*` is the same comparison
+[`warmline keep-warm status`](KEEP-WARM.md#status-is-read-never-remembered)
+reports as `policy modified` — one extra small read and a whitespace-insensitive
+compare, measured at 0.15 ms, skipped entirely when the block isn't there.
 
 Set `WARMLINE_NO_KEEPWARM=1` to drop the field if you never use keep-warm.
 
@@ -123,6 +139,7 @@ Stamps older than 7 days are pruned on render.
 | `WARMLINE_REFRESH_SEC` | `60` | install-time: the `refreshInterval` written to `settings.json`; `0` writes none |
 | `WARMLINE_STATE_DIR` | `~/.claude/warmline-state` | stamp files |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, omit the keep-warm field |
+| `WARMLINE_CTX_WARN_PCT` | `80` | context-window percentage at which `ctx` turns yellow (auto-compact warning); `0` or less disables |
 | `WARMLINE_NO_COLOR` / `NO_COLOR` | unset | plain output, no ANSI |
 | `WARMLINE_DEBUG` | unset | keep the last raw payload at `$WARMLINE_STATE_DIR/last-payload.json` |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | config dir; its `CLAUDE.md` holds the keep-warm block |

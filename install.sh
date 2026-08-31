@@ -114,7 +114,46 @@ fetch() { # repo-file dest
 fetch statusline.py "$DEST";    chmod +x "$DEST"
 fetch warmline "$CLI";          chmod +x "$CLI"
 fetch warmline-audit "$AUDIT";  chmod +x "$AUDIT"
+
+# the block already in CLAUDE.md is what the agent actually reads, so an
+# upgrade that only refreshes $POLICY leaves every session following the
+# previous release's policy. Keep the old text to tell "never touched" (safe
+# to rewrite) from "hand-edited" (never rewrite without being asked).
+PREV_POLICY=""
+if [ -f "$POLICY" ]; then
+  PREV_POLICY="$(mktemp)"
+  cp "$POLICY" "$PREV_POLICY"
+fi
 fetch keep-warm.md "$POLICY"
+
+if [ -f "$CLAUDE_MD" ]; then
+  MB="$MARK_BEGIN" ME="$MARK_END" PREV="$PREV_POLICY" \
+    python3 - "$CLAUDE_MD" "$POLICY" <<'PY'
+import os, re, sys
+md, policy = sys.argv[1], sys.argv[2]
+mb, me = os.environ["MB"], os.environ["ME"]
+text = open(md).read()
+if mb not in text or me not in text:
+    sys.exit(0)  # off, or malformed -- `warmline keep-warm status` says which
+head, rest = text.split(mb, 1)
+body, tail = rest.split(me, 1)
+new = open(policy).read()
+norm = lambda s: re.sub(r"\s+", " ", s).strip()
+if norm(body) == norm(new):
+    sys.exit(0)
+prev = os.environ.get("PREV") or ""
+prev = open(prev).read() if prev and os.path.exists(prev) else None
+if prev is not None and norm(body) == norm(prev):
+    open(md, "w").write(head + mb + "\n" + new.rstrip() + "\n" + me + tail)
+    print(f"refreshed the keep-warm block in {md} (policy updated)")
+else:
+    print(f"note: the keep-warm block in {md} differs from the policy just")
+    print("installed and does not match the one it replaced, so it looks")
+    print("hand-edited -- left untouched. To adopt the new wording, run:")
+    print("  warmline keep-warm off && warmline keep-warm on")
+PY
+fi
+if [ -n "$PREV_POLICY" ]; then rm -f "$PREV_POLICY"; fi
 
 DEST="$DEST" FORCE="$FORCE" python3 - "$SETTINGS" <<'PY'
 import json, os, shutil, sys

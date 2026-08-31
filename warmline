@@ -26,6 +26,8 @@ The installer (install.sh) installs and updates; this command controls.
                                every 10s (or SECS) until ctrl-c
   warmline awake [CMD...]      no-sleep mode: run 'claude' (or CMD) with
                                system sleep held off until it exits
+  warmline wait-for TARGET     block until a detached job finishes, so its
+                               end wakes the session (run as a background task)
   warmline keep-warm on        turn the keep-warm policy ON (global)
   warmline keep-warm off       turn it OFF -- removes only warmline's block
   warmline keep-warm status    detailed state; exit 0=ON  1=OFF  2=INCONSISTENT
@@ -335,12 +337,164 @@ cmd_awake() {
   fi
 }
 
+wait_for_usage() {
+  cat <<EOF
+warmline wait-for: block until a job running outside the harness finishes,
+so its end -- success or failure -- is what wakes the session. Run it AS a
+harness background task, watching a worker you detached beforehand.
+
+  warmline wait-for --pid 4242
+  warmline wait-for --pidfile /tmp/backup.pid
+  warmline wait-for --file /tmp/backup.done       # done when it appears
+  warmline wait-for --log /tmp/backup.log --until 'transfer complete'
+
+  -n SECS         poll every SECS (default 30)
+  --every MIN     heartbeat line every MIN minutes (default 50 -- inside the
+                  cache TTL); 0 waits silently until the end
+  --timeout MIN   give up after MIN minutes (default 600); 0 waits forever
+
+Exit 0 the watched job ended, 1 timed out, 2 bad usage or a target that
+never appeared.
+
+Why not just background the worker: a background task that runs
+'nohup ... &' returns immediately -- the harness reports it completed with
+exit 0 while the real work runs on, detached, with nothing left to notify
+you. Detach the worker deliberately, then watch it with this.
+EOF
+}
+
+wf_elapsed() { # seconds -> 7m / 1h23m
+  local m=$(( $1 / 60 ))
+  if [ "$m" -lt 60 ]; then echo "${m}m"; else echo "$((m / 60))h$((m % 60))m"; fi
+}
+
+cmd_wait_for() {
+  local interval=30 every=50 timeout=600
+  # seconds per --every/--timeout minute; only the tests move it, so the
+  # heartbeat, the timeout and the settle window are exercised for real
+  local min="${WARMLINE_WAITFOR_MIN_SEC:-60}"
+  local settle=$((5 * min))   # how long a target has to prove it exists
+  local pid="" pidfile="" file="" log="" until_pat="" desc=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --help|-h|help) wait_for_usage; exit 0 ;;
+      --pid|--pidfile|--file|--log|--until|-n|--every|--timeout)
+        [ $# -ge 2 ] || { echo "warmline: $1 needs a value" >&2; exit 2; }
+        case "$1" in
+          --pid) pid="$2" ;;
+          --pidfile) pidfile="$2" ;;
+          --file) file="$2" ;;
+          --log) log="$2" ;;
+          --until) until_pat="$2" ;;
+          -n) interval="$2" ;;
+          --every) every="$2" ;;
+          --timeout) timeout="$2" ;;
+        esac
+        shift 2 ;;
+      *) echo "warmline: unknown wait-for argument '$1' (see warmline wait-for --help)" >&2; exit 2 ;;
+    esac
+  done
+
+  local pair
+  for pair in "-n:$interval" "--every:$every" "--timeout:$timeout"; do
+    case "${pair#*:}" in
+      ''|*[!0-9]*) echo "warmline: ${pair%%:*} needs a whole number" >&2; exit 2 ;;
+    esac
+  done
+  [ "$interval" -gt 0 ] || { echo "warmline: -n must be at least 1 second" >&2; exit 2; }
+  case "$pid" in
+    '') ;;
+    *[!0-9]*) echo "warmline: --pid needs a process id" >&2; exit 2 ;;
+  esac
+  if [ -n "$log" ] && [ -z "$until_pat" ]; then
+    echo "warmline: --log needs --until PATTERN (what to wait for in it)" >&2; exit 2
+  fi
+  if [ -n "$until_pat" ] && [ -z "$log" ]; then
+    echo "warmline: --until needs --log FILE (where to look for it)" >&2; exit 2
+  fi
+  local targets=0
+  [ -n "$pid" ] && targets=$((targets + 1))
+  [ -n "$pidfile" ] && targets=$((targets + 1))
+  [ -n "$file" ] && targets=$((targets + 1))
+  [ -n "$log" ] && targets=$((targets + 1))
+  if [ "$targets" -ne 1 ]; then
+    echo "warmline: wait-for needs exactly one of --pid / --pidfile / --file / --log" >&2
+    echo "(see warmline wait-for --help)" >&2
+    exit 2
+  fi
+
+  # a target that never materializes is a launch bug, not a long wait: say so
+  # in minutes rather than letting the agent block until the timeout
+  local guard_what="" ready=0
+  if [ -n "$pidfile" ]; then desc="pidfile $pidfile"; guard_what="pidfile $pidfile holds no pid"
+  elif [ -n "$log" ]; then desc="'$until_pat' in $log"; guard_what="log file $log never appeared"
+  elif [ -n "$file" ]; then desc="$file"; ready=1
+  else desc="pid $pid"; ready=1; fi
+
+  # a zombie still answers kill -0, and a worker left un-detached by its
+  # launcher is exactly the case that zombies -- so ask ps for the state
+  wf_alive() {
+    local st
+    st="$(ps -o state= -p "$1" 2>/dev/null | tr -d ' \t')"
+    if [ -z "$st" ]; then
+      # no ps (or no such process): fall back, but a reaped pid is gone
+      kill -0 "$1" 2>/dev/null || return 1
+      ps -p "$1" >/dev/null 2>&1 && return 0 || return 1
+    fi
+    case "$st" in Z*) return 1 ;; esac
+    return 0
+  }
+
+  wf_done() {
+    if [ -n "$pid" ]; then
+      wf_alive "$pid" && return 1 || return 0
+    elif [ -n "$pidfile" ]; then
+      local p=""
+      [ -s "$pidfile" ] && p="$(tr -dc '0-9' < "$pidfile" 2>/dev/null)"
+      [ -n "$p" ] || return 1
+      ready=1
+      wf_alive "$p" && return 1 || return 0
+    elif [ -n "$file" ]; then
+      [ -e "$file" ] && return 0 || return 1
+    else
+      [ -e "$log" ] && ready=1
+      grep -Eq -- "$until_pat" "$log" 2>/dev/null && return 0 || return 1
+    fi
+  }
+
+  local start now elapsed next_beat=$((every * min))
+  start=$(date +%s)
+  while :; do
+    if wf_done; then
+      now=$(date +%s)
+      echo "warmline wait-for: $desc finished after $(wf_elapsed $((now - start)))"
+      return 0
+    fi
+    now=$(date +%s); elapsed=$((now - start))
+    if [ -n "$guard_what" ] && [ "$ready" = 0 ] && [ "$elapsed" -ge "$settle" ]; then
+      echo "warmline wait-for: $guard_what after $(wf_elapsed "$elapsed")." >&2
+      echo "the worker probably never started -- check how it was launched." >&2
+      return 2
+    fi
+    if [ "$timeout" -gt 0 ] && [ "$elapsed" -ge $((timeout * min)) ]; then
+      echo "warmline wait-for: gave up on $desc after $(wf_elapsed "$elapsed")" >&2
+      return 1
+    fi
+    if [ "$every" -gt 0 ] && [ "$elapsed" -ge "$next_beat" ]; then
+      echo "warmline wait-for: still waiting on $desc ($(wf_elapsed "$elapsed"))"
+      next_beat=$((next_beat + every * min))
+    fi
+    sleep "$interval"
+  done
+}
+
 command -v python3 >/dev/null || { echo "warmline needs python3 on PATH" >&2; exit 1; }
 
 case "${1:-}" in
   status) cmd_status ;;
   watch) shift; cmd_watch "$@" ;;
   awake) shift; cmd_awake "$@" ;;
+  wait-for) shift; cmd_wait_for "$@" ;;
   keep-warm)
     case "${2:-}" in
       on) kw_on ;;
