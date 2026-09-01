@@ -601,6 +601,29 @@ else
   echo "FAIL ins-refresh: r60=$r60 r25=$r25 r0=$r0"; echo "$out"; echo "$out0"; fail=$((fail + 1))
 fi
 
+# --ref pins the install to one tag: it is refused unless it names something
+# fetchable, it never quietly falls back to the checkout it was run from (a
+# release page that installs main's tip is the bug this flag exists to fix),
+# and a failed fetch leaves nothing behind.
+rc=0; out=$(inst --ref 'v1.0.0; rm -rf /' 2>&1) || rc=$?
+rc2=0; out2=$(inst --ref 2>&1) || rc2=$?
+rc3=0; out3=$(inst --ref v1.0.0 --uninstall 2>&1) || rc3=$?
+rc4=0
+out4=$(CLAUDE_CONFIG_DIR="$IROOT" WARMLINE_BIN_DIR="$IBIN" \
+       WARMLINE_REF=warmline-no-such-ref ./install.sh 2>&1) || rc4=$?
+if [[ "$rc" == 2 && "$out" == *"takes a tag or branch name"* \
+   && "$rc2" == 2 && "$out2" == *"--ref needs a tag or branch"* \
+   && "$rc3" == 2 && "$out3" == *"work alone"* \
+   && "$rc4" == 1 && "$out4" == *"from warmline-no-such-ref"* \
+   && "$out4" == *"could not fetch statusline.py"* \
+   && -s "$IROOT/warmline-statusline.py" ]] \
+   && [[ "$(inst --help)" == *"--ref TAG"* ]]; then
+  echo "ok   ins-ref: bad refs refused, a pinned ref fetches instead of copying"; pass=$((pass + 1))
+else
+  echo "FAIL ins-ref: rc=$rc rc2=$rc2 rc3=$rc3 rc4=$rc4"
+  echo "$out"; echo "$out2"; echo "$out3"; echo "$out4"; fail=$((fail + 1))
+fi
+
 # Help: top-level lists every subcommand; keep-warm help has the exit codes;
 # bare invocations print usage.
 out=$(wl --help); out2=$(wl keep-warm --help); out3=$(wl)

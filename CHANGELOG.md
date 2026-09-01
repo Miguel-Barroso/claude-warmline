@@ -4,6 +4,38 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.1.0] — 2026-09-01
+
+The first release whose own install command names it. Everything here is the
+installer and the front page; the statusline, the auditor and keep-warm are
+unchanged.
+
+### Added
+- **`install.sh --ref TAG` (and `WARMLINE_REF`)** installs one tag or branch
+  instead of main's tip. Until now `REPO_RAW` was hard-wired to `main`, so
+  "install v1.8.0" and "install main" were the same command and a release page
+  claiming otherwise was overselling — the tag in the URL only ever pinned the
+  installer, while the four files it downloads came from the tip. **Release
+  pages now link their own tag**, which is what a version number is for. A
+  pinned install always fetches, even from a checkout: the tree you are standing
+  in is not the tag you asked for. Bad refs are refused before anything is
+  touched, and a fetch that fails leaves the copy already installed intact —
+  downloads land beside the target, not on it.
+
+### Changed
+- **The README's install block holds the install line and nothing else.** The
+  four `warmline` commands under it shared one code fence, so the copy button
+  handed you a one-liner with three commands and a `watch` stapled to it. They
+  are a table now, one command per row.
+- **README and repository description repositioned around the cache, not the
+  statusline.** "Another customizable statusline" is a crowded category and the
+  wrong one: what warmline shows is whether your context is still being reused.
+  The page now opens on that, puts install above the architecture, adds "Why
+  warmline" and "Local by design", and states the data boundary plainly —
+  warmline observes what Claude Code exposes locally, with no privileged access
+  to anything. Documentation only; no behavior, commands or claims changed.
+  Mirrored into the Japanese, 繁體中文 and 简体中文 READMEs.
+
 ## [2.0.0] — 2026-09-01
 
 Claude Code v2.1.251 began handing the statusline a `prompt_cache` object — the

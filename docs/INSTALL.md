@@ -17,6 +17,28 @@ cd claude-warmline
 Requires `python3` (standard library only) and `bash`. Nothing else, and
 nothing phones home.
 
+## Installing a specific release
+
+The one-liner above installs main's tip. To install a tagged release, name the
+tag twice — once for the script, once for the files it fetches:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/v2.1.0/install.sh | bash -s -- --ref v2.1.0
+```
+
+Both halves matter, and this is why: the installer downloads `statusline.py`,
+`warmline`, `warmline-audit` and `keep-warm.md` itself, so the tag in the URL
+only pins the installer. `--ref` (or `WARMLINE_REF=v2.1.0`) pins everything it
+goes on to fetch. Without it a tagged URL installs the tagged installer and
+main's tip of everything else — which is fine on the day the tag *is* the tip,
+and quietly wrong every day after. **Every release page links its own tag**, so
+the version you clicked is the version you get.
+
+A pinned install always goes to the network, even from a checkout: the tree you
+happen to be standing in is not the tag you asked for. From a checkout, the
+equivalent is `git checkout v2.1.0 && ./install.sh` — which needs no network at
+all. Releases before v2.1.0 predate the flag; pin those with the checkout form.
+
 ## What lands where
 
 | File | Destination |
@@ -55,6 +77,7 @@ files itself.
 |---|---|
 | `--keep-warm` | install-time shorthand for [`warmline keep-warm on`](KEEP-WARM.md) |
 | `--force` | replace an existing non-warmline statusline |
+| `--ref TAG` | install that tag or branch instead of main's tip ([above](#installing-a-specific-release)) |
 | `--uninstall` | remove everything the installer added, including the policy block |
 | `--help` | usage |
 
@@ -81,7 +104,8 @@ The installer is the updater. Re-run the same `curl | bash` one-liner (or
 replaces it, the `warmline` command, and the auditor in place without
 `--force`; your `settings.json` is backed up on every run, and your keep-warm
 on/off choice is left as it was. [CHANGELOG.md](../CHANGELOG.md) tracks tagged
-releases.
+releases, and a `--ref` install moves you to exactly the one you name — forward
+or back.
 
 Since v1.8.0 an update also refreshes the keep-warm block **inside your
 CLAUDE.md**, not just the policy file beside it — otherwise your agent keeps
@@ -108,6 +132,7 @@ of that file untouched.
 | `WARMLINE_TTL_MIN` | auto | prompt-cache TTL in minutes, for **`warmline-audit`** only; unset, it detects the TTL from each transcript's cache-bucket records (60m fallback) |
 | `WARMLINE_REFRESH_SEC` | `60` | install-time: the statusline `refreshInterval` the installer writes; `0` omits it (a value you hand-edit later survives reinstalls) |
 | `WARMLINE_BIN_DIR` | `~/.local/bin` | where the installer puts the `warmline` and `warmline-audit` commands |
+| `WARMLINE_REF` | `main` | the tag or branch the installer fetches files from — same as `--ref`; also pins the `warmline` command's last-resort download of the policy text |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, the statusline never shows the keep-warm field |
 | `WARMLINE_CTX_WARN_PCT` | `80` | percentage at which the statusline's `ctx` field turns yellow (auto-compact warning); `0` disables |
 | `WARMLINE_NO_COLOR` | unset | if set (or `NO_COLOR`), plain output without ANSI colors |
@@ -174,7 +199,10 @@ priced separately), every cold-cause attribution, the percentage shares on
 verdicts, causes and the `--all` table, per-session TTL auto-detection, a
 now-relative corpus against `--live`, config-dir discovery, and TTY vs piped
 formatting; a synthetic multi-project corpus against `--all`; the installer's
-`refreshInterval` wiring (default, hand-tuned, disabled); the `warmline` CLI's
+`refreshInterval` wiring (default, hand-tuned, disabled) and its `--ref` pinning
+(a malformed ref refused before anything is touched, a pinned ref fetching
+rather than copying the checkout it was run from, a failed fetch leaving the
+installed copy intact); the `warmline` CLI's
 keep-warm state transitions (on→on, off→off, malformed blocks reported
 truthfully instead of a false ON), with unrelated CLAUDE.md content verified to
 survive every operation and a clean-install check that the `warmline` command

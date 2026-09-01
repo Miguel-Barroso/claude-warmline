@@ -6,76 +6,116 @@
 [![version](https://img.shields.io/github/v/tag/Miguel-Barroso/claude-warmline?label=version)](https://github.com/Miguel-Barroso/claude-warmline/tags)
 [![license](https://img.shields.io/github/license/Miguel-Barroso/claude-warmline)](LICENSE)
 
-**為 Claude Code 提供提示快取的可觀測性與稽核。**
+**warmline 讓 Claude Code 的提示快取狀態變得看得見。**
 
-Claude Code 每一輪都會重新送出你的整段對話。讓這件事仍然負擔得起的，是伺服器端的
-提示快取：只要它還在，每一輪就以大約正常輸入價格的 **0.1 倍**把對話*讀*回來；一旦
-它消失，下一輪就得以約 **2 倍**的價格重建。這些 Claude Code 自己全都知道，你問它也會
-說——`/usage` 會印出當前的快取狀態，從 v2.1.251 起狀態列收到的資料裡也帶著它。它沒
-做的，是把這件事一直擺在你眼前，以及告訴你上個月所有工作階段因為冷掉一共付了多少。
-warmline 兩件都做：把 Claude Code 自己的快取事實放到狀態列上，並在本機稽核歷史。它
-只讀取 Claude Code 早已記錄在你機器上的資料，除 `python3` 與 `bash` 之外沒有任何
-依賴，也不向外傳送任何資料。
+## Claude Code 會悄悄冷掉
+
+一個正在工作的工作階段帶著幾萬到幾十萬 token——系統提示、工具、它讀過的每個檔案、
+每一則回覆——而 Claude Code 每一輪都把這些全部重新送出。只要提示快取還在，那段脈絡
+就以大約正常輸入價格的 **0.1 倍**被*讀*回來；一旦冷掉，同樣的脈絡就得以約 **2 倍**
+的價格重新處理一次。它會在大約一小時無操作後冷掉，也會在對話開頭被改寫的瞬間立刻
+冷掉（`/compact` 與自動壓縮都會這樣做）。午餐後回到一個大工作階段，你的下一則訊息
+就要重付全部的重建成本——偏偏在你最想要結果的時刻，而工作階段本身不會告訴你。
+
+**warmline 把快取狀態直接放到你的狀態列上，並給你工具去查看它在歷史上的表現。**
+
+```text
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+```
+
+不靠猜測，也不靠計時推論。從 v2.1.251 起，Claude Code 會把它自己的 `prompt_cache`
+物件交給狀態列——前綴是否是熱的、走的是哪個 TTL、在哪一秒過期——warmline 只是把這個
+物件裡寫著的內容顯示出來。
+
+至於這一輪之前的一切：
+
+```text
+warmline audit
+```
+
+會依據 Claude Code 記錄的用量，為一個工作階段的每個 API 輪次評分；`--all` 則把本機
+所有工作階段排序呈現。
 
 ![狀態列的五種狀態：帶過期時刻的綠色 cache HOT、接近過期時的黃色 cache HOT、紅色 cache COLD，以及 Claude Code 沒有快取資料時暗色的 cache off 與 cache ?](docs/statusline.svg)
-
-## 它做什麼
-
-**觀測（Observe）→ 解釋（Explain）→ 度量（Measure）→ 緩解（Mitigate）。**
-
-| | | |
-|---|---|---|
-| **觀測** | `warmline` 狀態列 | 快取此刻正在發生什麼 |
-| **解釋** | `warmline audit` | 某個工作階段裡發生了什麼，逐輪呈現 |
-| **度量** | `warmline audit --all` | 本機所有工作階段中，風險暴露集中在哪裡 |
-| **緩解** | `warmline keep-warm` | *選用*：預防其中一種可預防的失效模式 |
-
-前三項是唯讀的觀測，也是本專案的重點。第四項需要主動開啟，預設關閉，而且刻意設有
-邊界——見下方「選用：保溫」一節。
 
 ## 安裝
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
-
-warmline status              # 目前安裝並啟用了什麼
-warmline audit               # 本專案最近一個工作階段，逐輪查看
-warmline audit --all         # 本機所有工作階段，排序呈現
-warmline watch               # 所有工作階段的溫度，即時顯示，直到 ctrl-c
 ```
 
-[安裝細節、參數、更新、Windows →](docs/INSTALL.md)（英文）
+接著：
 
-## 為什麼這很重要
+| 指令 | 作用 |
+|---|---|
+| `warmline status` | 目前安裝並啟用了什麼 |
+| `warmline audit` | 本專案最近一個工作階段，逐輪查看 |
+| `warmline audit --all` | 本機所有工作階段，排序呈現 |
+| `warmline watch` | 所有工作階段的溫度，即時顯示，直到 ctrl-c |
 
-Claude 在訊息之間不會記得任何事。你每按一次 Enter，Claude Code 就把*整段*對話重新
-送出一次——系統提示、工具、它讀過的每個檔案、每一則回覆。在長工作階段裡，這輕易
-就是每輪 10 萬以上的輸入 token。
+只需要 `python3` 與 `bash`，沒有別的依賴。
 
-提示快取吸收了這部分成本，但它會在**大約一小時無操作後**被拆掉；而只要對話開頭被
-改寫，它也會立刻消失（`/compact` 與自動壓縮都會這樣做）。午餐後回到一個大工作階段，
-你的下一則訊息就要重付全部的重建成本——偏偏在你最想要結果的時刻。
+[安裝細節、參數、鎖定發行版、更新、Windows →](docs/INSTALL.md)（英文）
+
+## 為什麼是 warmline
+
+大多數 Claude Code 狀態列回答的是這類問題：
+
+- 我在用哪個模型？
+- 脈絡還剩多少？
+- 這個工作階段花了多少錢？
+- 我在哪個分支上？
+
+這些都有用。warmline 回答的是另一個：
+
+> **提示快取現在真的是熱的嗎？**
+
+以及一個任何即時指示器都答不了的問題：
+
+> **它是什麼時候冷的、多久發生一次、值不值得在意？**
+
+狀態列告訴你工作階段裡正在發生什麼。**warmline 告訴你脈絡是否還在被重複使用。**
 
 這裡的一切都是為 10 萬 token 以上的情況而存在。2 萬 token 冷掉了重建也很便宜。
+
+## 從看得見到管得住
+
+**觀測（Observe）**——快取此刻的狀態，來自 Claude Code 自己的資料，就在狀態列上。
+
+**解釋（Explain）**——`HOT`、`COLD`、`off` 與過期時刻各自代表什麼，其中哪些是你
+能採取行動的。
+
+**度量（Measure）**——`warmline audit`：歷史上的冷事件、記錄能證明成因時的原因，
+以及它們大約值多少錢的估算。
+
+**緩解（Mitigate）**——`warmline keep-warm`，只在你確認自己確實需要時。
+
+這是一個遞進，而不是功能清單。它帶你從*「我的快取冷掉了嗎？」*走到*「這多久發生
+一次？」*，再到*「它貴到值得我在意嗎？」*，最後到*「我想為此做點什麼嗎？」*——而
+最後這一問，答案常常是不用。
+
+前三項是唯讀的觀測，也是本專案的重點。第四項需要主動開啟，預設關閉，而且刻意設有
+邊界——見下方「選用：保溫」一節。
 
 ## 觀測：狀態列
 
 ```
-Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
 ```
 
 | 欄位 | 意義 |
 |---|---|
-| `ctx 43% (168k)` | 脈絡視窗使用率——超過 80% 轉黃，自動壓縮會從那裡開始改寫前綴 |
-| `cache HOT (cold ~13:04)` | 快取的前綴是熱的，將在所示時間離開它的 TTL；過期前 15 分鐘內文字不變，只轉黃 |
+| `ctx 64% (127k)` | 脈絡視窗使用率——超過 80% 轉黃，自動壓縮會從那裡開始改寫前綴 |
+| `cache HOT (cold ~11:58)` | 快取的前綴是熱的，將在所示時間離開它的 TTL；過期前 15 分鐘內文字不變，只轉黃 |
 | `cache HOT 5m` | 同上，但走的是 5 分鐘 TTL——用量額度、API key、雲端供應商。1 小時是常態，因此不標註 |
 | `cache COLD` | 前綴已在 TTL 之外；下一輪會把它重新快取 |
 | `cache off` | 提示快取被關閉，或這個供應商／閘道從不回報快取 token。這裡等再久都不會變熱 |
 | `cache ?` | 沒有快取資料——v2.1.251 之前的 Claude Code，或本工作階段第一次 API 回應之前 |
 
-**這些全都來自 Claude Code，而不是 warmline 的推論。** 從 v2.1.251 起，狀態列收到的
-資料裡就帶著快取真實的冷熱、TTL 與過期時間戳，warmline 直接讀取它們，不再靠計算兩輪
-之間的間隔去猜。`COLD`、`off` 與 `?` 是刻意分開的：「快取過期了」「根本沒有在做快取」
+**warmline 不會靠測量 Claude Code 回覆得多快來猜快取是不是熱的。** 上面每一個判定
+都是 Claude Code 交給狀態列的欄位：狀態來自 `prompt_cache.warm`，分桶來自 `ttl`，
+時刻來自 `expires_at`。warmline 只負責排版與上色。它過去確實靠兩輪之間的間隔推論，
+那套機制已經移除了。`COLD`、`off` 與 `?` 是刻意分開的：「快取過期了」「根本沒有在做快取」
 「warmline 看不到」是三件不同的事，把它們揉成一件，正是一個快取儀表開始說謊的起點。
 
 過期時間始終是絕對的牆上時鐘，而不是倒數計時——凍住的倒數計時是*錯的*，凍住的時鐘
@@ -102,6 +142,8 @@ Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04)
 
 ## 解釋與度量：稽核
 
+狀態列上的一個 `HOT` 有用。看到你的工作階段在 8 週裡冷掉了 198 次，更有用。
+
 `warmline audit` 依據 Claude Code 為每個已記錄 API 請求寫下的用量欄位評分——不像
 狀態列，它沒有慢一輪的問題。`--all` 則對本機所有工作階段做同樣的事並排序。（它執行
 的是已安裝的 `warmline-audit` 命令；兩種寫法都有效，已經寫好的腳本繼續可用。）以下
@@ -127,6 +169,8 @@ where the cold came from
 
 estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 ```
+
+這就是可觀測性與裝飾性狀態列的差別：一個你能據以行動、或據以決定不行動的模式。
 
 每個冷輪次都會在紀錄能**證明**的範圍內附上原因——`/compact`、`auto-compact`、
 `model change`、`inactivity`——其餘的一律落進 `unknown`，而它是**殘差桶，不是結論**：
@@ -170,6 +214,15 @@ warmline keep-warm status    # ON／OFF／INCONSISTENT（結束碼 0／1／2）
 一般計費請求：它用幾次便宜的讀取換掉一次昂貴的重建，不繞過任何限制。
 
 [它是什麼、不是什麼、`wait-for`、免睡眠模式、限制與條款討論 →](docs/KEEP-WARM.md)（英文）
+
+## 本機優先，是設計如此
+
+warmline 只在你自己的機器上執行。它不向外傳送資料、不收集遙測、不需要帳號，除
+`python3` 與 `bash` 之外沒有任何依賴。
+
+它顯示的一切，都來自 Claude Code 已經寫在本機的資料：Claude Code 傳給狀態列的 JSON，
+以及 `~/.claude/projects` 底下的工作階段紀錄。**warmline 觀察的是 Claude Code 在本機
+公開的東西**——它對 Anthropic 的任何後端都沒有特殊存取權，也沒有任何要登入的地方。
 
 ## 在哪裡有效
 

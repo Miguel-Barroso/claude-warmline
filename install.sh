@@ -5,11 +5,12 @@ set -euo pipefail
 #
 #   ./install.sh                     # from a checkout
 #   curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/TAG/install.sh | bash -s -- --ref TAG
 #
 # Installs, updates, uninstalls. Post-install control lives in the
 # `warmline` command (warmline --help).
 
-REPO_RAW="https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main"
+REPO="https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 BIN_DIR="${WARMLINE_BIN_DIR:-$HOME/.local/bin}"
 DEST="$CLAUDE_DIR/warmline-statusline.py"
@@ -22,6 +23,14 @@ STATE_DIR="$CLAUDE_DIR/warmline-state"
 MARK_BEGIN="<!-- >>> claude-warmline keep-warm >>> -->"
 MARK_END="<!-- <<< claude-warmline keep-warm <<< -->"
 
+# Which commit's files to install. Unpinned this is main's tip; a release page
+# pins its own tag, so "install v2.0.0" and "install main" stay two different
+# commands even in the week they resolve to the same tree.
+REF="${WARMLINE_REF:-main}"
+PINNED=0
+if [ -n "${WARMLINE_REF:-}" ]; then PINNED=1; fi
+REPO_RAW="$REPO/$REF"
+
 usage() {
   cat <<EOF
 claude-warmline installer: installs, updates, uninstalls.
@@ -30,6 +39,7 @@ Post-install control lives in the warmline command (warmline --help).
   ./install.sh              install or update everything
   ./install.sh --keep-warm  install/update, then turn the keep-warm policy ON
   ./install.sh --force      with install: replace a foreign statusLine
+  ./install.sh --ref TAG    install that tag or branch instead of main's tip
   ./install.sh --uninstall  remove everything this installer added
   ./install.sh --help       this text
 
@@ -37,24 +47,40 @@ Installs the statusline to $CLAUDE_DIR, the warmline and
 warmline-audit commands to $BIN_DIR (override: WARMLINE_BIN_DIR).
 
 Piped through curl, flags go after 'bash -s --':
-  curl -fsSL $REPO_RAW/install.sh | bash -s -- --keep-warm
+  curl -fsSL $REPO/main/install.sh | bash -s -- --keep-warm
+
+A pinned install names the tag twice -- once for this script, once for the
+files it fetches (WARMLINE_REF=TAG does the same as --ref):
+  curl -fsSL $REPO/TAG/install.sh | bash -s -- --ref TAG
 EOF
 }
 
-KEEP_WARM=0 FORCE=0 MODE=install NMODES=0
-for arg in "$@"; do
-  case "$arg" in
+KEEP_WARM=0 FORCE=0 MODE=install NMODES=0 REF_FLAG=0
+while [ $# -gt 0 ]; do
+  case "$1" in
     --keep-warm) KEEP_WARM=1 ;;
     --force) FORCE=1 ;;
+    --ref)
+      shift
+      [ $# -gt 0 ] || { echo "--ref needs a tag or branch (see --help)" >&2; exit 2; }
+      REF="$1"; REF_FLAG=1 ;;
+    --ref=*) REF="${1#--ref=}"; REF_FLAG=1 ;;
     --uninstall) MODE=uninstall; NMODES=$((NMODES + 1)) ;;
     --help|-h)   MODE=help;      NMODES=$((NMODES + 1)) ;;
-    *) echo "unknown flag: $arg (see --help)" >&2; exit 2 ;;
+    *) echo "unknown flag: $1 (see --help)" >&2; exit 2 ;;
   esac
+  shift
 done
-if [ "$NMODES" -gt 1 ] || { [ "$MODE" != install ] && [ $((KEEP_WARM + FORCE)) -gt 0 ]; }; then
+if [ "$NMODES" -gt 1 ] || { [ "$MODE" != install ] && [ $((KEEP_WARM + FORCE + REF_FLAG)) -gt 0 ]; }; then
   echo "--uninstall and --help each work alone (see --help)" >&2
   exit 2
 fi
+if [ "$REF_FLAG" = 1 ]; then PINNED=1; fi
+case "$REF" in
+  ""|-*|*[!A-Za-z0-9._/-]*)
+    echo "--ref takes a tag or branch name, got: '$REF'" >&2; exit 2 ;;
+esac
+REPO_RAW="$REPO/$REF"
 
 if [ "$MODE" = help ]; then
   usage
@@ -101,13 +127,27 @@ fi
 mkdir -p "$CLAUDE_DIR" "$BIN_DIR"
 
 # Prefer local files when run from a checkout; fall back to raw GitHub
-# when piped through curl | bash.
+# when piped through curl | bash. A pinned ref always goes to the network:
+# the checkout you happen to be standing in is not the tag you asked for.
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+if [ "$PINNED" = 1 ]; then
+  command -v curl >/dev/null || { echo "installing a pinned ref needs curl on PATH" >&2; exit 1; }
+  echo "installing claude-warmline from $REF"
+fi
 fetch() { # repo-file dest
-  if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/$1" ]; then
+  if [ "$PINNED" = 0 ] && [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/$1" ]; then
     cp "$SRC_DIR/$1" "$2"
   else
-    curl -fsSL "$REPO_RAW/$1" -o "$2"
+    # download beside the target, not onto it: a bad ref (or a dropped
+    # connection) must not take out the copy already installed
+    tmp="$(mktemp)"
+    curl -fsSL "$REPO_RAW/$1" -o "$tmp" || {
+      rm -f "$tmp"
+      echo "could not fetch $1 from $REF -- is that a real tag or branch?" >&2
+      exit 1
+    }
+    chmod 644 "$tmp"   # mktemp makes it 0600
+    mv "$tmp" "$2"
   fi
   echo "installed $2"
 }

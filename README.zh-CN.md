@@ -6,76 +6,116 @@
 [![version](https://img.shields.io/github/v/tag/Miguel-Barroso/claude-warmline?label=version)](https://github.com/Miguel-Barroso/claude-warmline/tags)
 [![license](https://img.shields.io/github/license/Miguel-Barroso/claude-warmline)](LICENSE)
 
-**面向 Claude Code 的提示缓存可观测性与审计工具。**
+**warmline 让 Claude Code 的提示缓存状态可见。**
 
-Claude Code 每一轮都会重新发送你的整个对话。让这件事仍然负担得起的，是服务端的提示
-缓存：只要它还在，每一轮就以大约正常输入价格的 **0.1 倍**把对话*读*回来；一旦它没
-了，下一轮就要以约 **2 倍**的价格重建。这些 Claude Code 自己全都知道，你问它也会
-说——`/usage` 会打印当前的缓存状态，从 v2.1.251 起状态栏收到的数据里也带着它。它不
-做的，是把这件事一直摆在你眼前，以及告诉你上个月所有会话因为冷掉一共付了多少。
-warmline 两件都做：把 Claude Code 自己的缓存事实放到状态栏上，并在本地审计历史。它
-只读取 Claude Code 早已记录在你机器上的数据，除 `python3` 和 `bash` 之外没有任何
-依赖，也不向外发送任何数据。
+## Claude Code 会悄悄冷掉
+
+一个正在工作的会话带着几万到几十万 token——系统提示、工具、它读过的每个文件、每一条
+回复——而 Claude Code 每一轮都把这些全部重新发送。只要提示缓存还在，那段上下文就以
+大约正常输入价格的 **0.1 倍**被*读*回来；一旦冷掉，同样的上下文就要以约 **2 倍**的
+价格重新处理一遍。它会在大约一小时无操作后冷掉，也会在对话开头被改写的瞬间立刻冷掉
+（`/compact` 与自动压缩都会这样做）。午饭后回到一个大会话，你的下一条消息就要重付
+全部的重建成本——偏偏在你最想要结果的时刻，而会话本身不会告诉你。
+
+**warmline 把缓存状态直接放到你的状态栏上，并给你工具去查看它在历史上的表现。**
+
+```text
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+```
+
+不靠猜测，也不靠计时推断。从 v2.1.251 起，Claude Code 会把它自己的 `prompt_cache`
+对象交给状态栏——前缀是否是热的、走的是哪个 TTL、在哪一秒过期——warmline 只是把这个
+对象里写着的内容显示出来。
+
+至于这一轮之前的一切：
+
+```text
+warmline audit
+```
+
+会依据 Claude Code 记录的用量，为一个会话的每个 API 轮次评分；`--all` 则把本机所有
+会话排序呈现。
 
 ![状态栏的五种状态：带过期时刻的绿色 cache HOT、临近过期时的黄色 cache HOT、红色 cache COLD，以及 Claude Code 没有缓存数据时暗色的 cache off 与 cache ?](docs/statusline.svg)
-
-## 它做什么
-
-**观察（Observe）→ 解释（Explain）→ 度量（Measure）→ 缓解（Mitigate）。**
-
-| | | |
-|---|---|---|
-| **观察** | `warmline` 状态栏 | 缓存此刻正在发生什么 |
-| **解释** | `warmline audit` | 某个会话里发生了什么，逐轮呈现 |
-| **度量** | `warmline audit --all` | 本机所有会话中，风险敞口集中在哪里 |
-| **缓解** | `warmline keep-warm` | *可选*：预防其中一种可预防的失效模式 |
-
-前三项是只读的观测，也是本项目的重点。第四项需要主动开启，默认关闭，并且刻意设有
-边界——见下方“可选：保温”一节。
 
 ## 安装
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
-
-warmline status              # 当前安装并启用了什么
-warmline audit               # 本项目最近一个会话，逐轮查看
-warmline audit --all         # 本机所有会话，排序呈现
-warmline watch               # 所有会话的热度，实时显示，直到 ctrl-c
 ```
 
-[安装细节、参数、更新、Windows →](docs/INSTALL.md)（英文）
+然后：
 
-## 为什么这很重要
+| 命令 | 作用 |
+|---|---|
+| `warmline status` | 当前安装并启用了什么 |
+| `warmline audit` | 本项目最近一个会话，逐轮查看 |
+| `warmline audit --all` | 本机所有会话，排序呈现 |
+| `warmline watch` | 所有会话的热度，实时显示，直到 ctrl-c |
 
-Claude 在消息之间不会记住任何东西。你每按一次回车，Claude Code 就把*整个*对话重新
-发送一遍——系统提示、工具、它读过的每个文件、每一条回复。在长会话里，这轻易就是
-每轮 10 万以上的输入 token。
+只需要 `python3` 和 `bash`，没有别的依赖。
 
-提示缓存吸收了这部分成本，但它会在**大约一小时无操作后**被拆掉；而只要对话开头被
-改写，它也会立刻消失（`/compact` 与自动压缩都会这样做）。午饭后回到一个大会话，你的
-下一条消息就要重付全部的重建成本——偏偏在你最想要结果的时刻。
+[安装细节、参数、锁定发行版、更新、Windows →](docs/INSTALL.md)（英文）
+
+## 为什么是 warmline
+
+大多数 Claude Code 状态栏回答的是这类问题：
+
+- 我在用哪个模型？
+- 上下文还剩多少？
+- 这个会话花了多少钱？
+- 我在哪个分支上？
+
+这些都有用。warmline 回答的是另一个：
+
+> **提示缓存现在真的是热的吗？**
+
+以及一个任何实时指示器都答不了的问题：
+
+> **它是什么时候冷的、多久发生一次、值不值得在意？**
+
+状态栏告诉你会话里正在发生什么。**warmline 告诉你上下文是否还在被复用。**
 
 这里的一切都是为 10 万 token 以上的情况而存在。2 万 token 冷掉了重建也很便宜。
+
+## 从可见到可控
+
+**观察（Observe）**——缓存此刻的状态，来自 Claude Code 自己的数据，就在状态栏上。
+
+**解释（Explain）**——`HOT`、`COLD`、`off` 和过期时刻各自意味着什么，其中哪些是你
+能采取行动的。
+
+**度量（Measure）**——`warmline audit`：历史上的冷事件、记录能证明原因时的成因，
+以及它们大约值多少钱的估算。
+
+**缓解（Mitigate）**——`warmline keep-warm`，仅当你确认自己确实需要时。
+
+这是一个递进，而不是功能清单。它带你从*“我的缓存冷掉了吗？”*走到*“这多久发生
+一次？”*，再到*“它贵到值得我在意吗？”*，最后到*“我想为此做点什么吗？”*——而最后
+这一问，答案常常是不用。
+
+前三项是只读的观测，也是本项目的重点。第四项需要主动开启，默认关闭，并且刻意设有
+边界——见下方“可选：保温”一节。
 
 ## 观察：状态栏
 
 ```
-Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
 ```
 
 | 字段 | 含义 |
 |---|---|
-| `ctx 43% (168k)` | 上下文窗口占用率——超过 80% 变黄，自动压缩会从那里开始改写前缀 |
-| `cache HOT (cold ~13:04)` | 缓存的前缀是热的，将在所示时刻离开它的 TTL；过期前 15 分钟内文字不变，只转黄 |
+| `ctx 64% (127k)` | 上下文窗口占用率——超过 80% 变黄，自动压缩会从那里开始改写前缀 |
+| `cache HOT (cold ~11:58)` | 缓存的前缀是热的，将在所示时刻离开它的 TTL；过期前 15 分钟内文字不变，只转黄 |
 | `cache HOT 5m` | 同上，但走的是 5 分钟 TTL——按量计费额度、API key、云端供应商。1 小时是常态，因此不标注 |
 | `cache COLD` | 前缀已在 TTL 之外；下一轮会把它重新缓存 |
 | `cache off` | 提示缓存被关闭，或这个供应商/网关从不报告缓存 token。这里等多久都不会变热 |
 | `cache ?` | 没有缓存数据——v2.1.251 之前的 Claude Code，或本会话第一次 API 响应之前 |
 
-**这些全都来自 Claude Code，而不是 warmline 的推断。** 从 v2.1.251 起，状态栏收到的
-数据里就带着缓存真实的冷热、TTL 与过期时间戳，warmline 直接读取它们，不再靠计算两轮
-之间的间隔去猜。`COLD`、`off` 和 `?` 是刻意分开的：“缓存过期了”“根本没有在做缓存”
+**warmline 不会通过测量 Claude Code 回复得多快来猜缓存是不是热的。** 上面每一个判定
+都是 Claude Code 交给状态栏的字段：状态来自 `prompt_cache.warm`，分桶来自 `ttl`，
+时刻来自 `expires_at`。warmline 只负责排版和上色。它过去确实靠两轮之间的间隔来推断，
+那套机制已经删掉了。`COLD`、`off` 和 `?` 是刻意分开的：“缓存过期了”“根本没有在做缓存”
 “warmline 看不到”是三件不同的事，把它们揉成一件，正是一个缓存仪表开始说谎的起点。
 
 过期时间始终是绝对的墙上时钟，而不是倒计时——冻住的倒计时是*错的*，冻住的时钟仍然
@@ -102,6 +142,8 @@ Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04)
 
 ## 解释与度量：审计
 
+状态栏上的一个 `HOT` 有用。看到你的会话在 8 周里冷掉了 198 次，更有用。
+
 `warmline audit` 依据 Claude Code 为每个已记录 API 请求写下的用量字段来评分——不像
 状态栏，它没有一轮的滞后。`--all` 则对本机所有会话做同样的事并排序。（它运行的是已
 安装的 `warmline-audit` 命令；两种写法都有效，已经写好的脚本继续可用。）以下是某台
@@ -127,6 +169,8 @@ where the cold came from
 
 estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 ```
+
+这就是可观测性与装饰性状态栏的差别：一个你能据以行动、或据以决定不行动的模式。
 
 每个冷轮次都会在记录能**证明**的范围内附上原因——`/compact`、`auto-compact`、
 `model change`、`inactivity`——其余的一律落进 `unknown`，而它是**残差桶，不是结论**：
@@ -170,6 +214,15 @@ warmline keep-warm status    # ON / OFF / INCONSISTENT（退出码 0 / 1 / 2）
 计费请求：它用几次廉价读取换掉一次昂贵重建，不绕过任何限制。
 
 [它是什么、不是什么、`wait-for`、免睡眠模式、限制与条款讨论 →](docs/KEEP-WARM.md)（英文）
+
+## 本地优先，是设计如此
+
+warmline 只在你自己的机器上运行。它不向外发送数据、不收集遥测、不需要账号，除
+`python3` 和 `bash` 之外没有任何依赖。
+
+它展示的一切，都来自 Claude Code 已经写在本地的数据：Claude Code 传给状态栏的 JSON，
+以及 `~/.claude/projects` 下的会话记录。**warmline 观察的是 Claude Code 在本地公开的
+东西**——它对 Anthropic 的任何后端都没有特殊访问权限，也没有任何需要登录的地方。
 
 ## 在哪些地方有效
 

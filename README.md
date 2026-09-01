@@ -6,83 +6,131 @@
 [![version](https://img.shields.io/github/v/tag/Miguel-Barroso/claude-warmline?label=version)](https://github.com/Miguel-Barroso/claude-warmline/tags)
 [![license](https://img.shields.io/github/license/Miguel-Barroso/claude-warmline)](LICENSE)
 
-**Prompt-cache observability and auditing for Claude Code.**
+**Warmline makes Claude Code's prompt-cache state visible.**
 
-Claude Code re-sends your entire conversation on every turn. A server-side
-prompt cache is what makes that affordable: while it holds, each turn *reads*
-the conversation back at roughly **0.1×** the normal input price; once it's
-gone, the next turn re-creates it at about **2×**. Claude Code knows all of
-this and will tell you when asked — `/usage` prints the live cache state, and
-since v2.1.251 the statusline payload carries it. What it doesn't do is keep
-it in front of you, or tell you what going cold has cost you across last
-month's sessions. warmline does both: it puts Claude Code's own cache truth on
-the status line, and audits the history locally, from data Claude Code already
-records on your machine, with no dependencies beyond `python3` and `bash`, and
-nothing phones home.
+## Claude Code can silently go cold
+
+A working session carries tens or hundreds of thousands of tokens — system
+prompt, tools, every file it read, every reply — and Claude Code re-sends all of
+it on every turn. While the prompt cache holds, that context is *read back* at
+roughly **0.1×** the normal input price. When the cache goes cold, the same
+context is processed again at about **2×**. It goes cold after about an hour of
+inactivity, and instantly whenever the start of the conversation is rewritten —
+`/compact` and auto-compaction both do that. Come back to a big session after
+lunch and your next message pays the rebuild on all of it, at exactly the moment
+you wanted results, and nothing in the session tells you so.
+
+**Warmline puts the cache state directly in your statusline, and gives you the
+tools to see what it has been doing historically.**
+
+```text
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+```
+
+No guessing, and no timing-based inference. Since v2.1.251 Claude Code hands
+the statusline its own `prompt_cache` object — whether the prefix is warm, which
+TTL it is on, the second it expires — and warmline prints what that object says.
+
+Then, for everything before this turn:
+
+```text
+warmline audit
+```
+
+grades every recorded API turn of a session from the usage Claude Code wrote for
+it, and `--all` ranks every session on this machine.
 
 ![The warmline statusline in five states: cache HOT in green with its expiry time, cache HOT in yellow as the expiry nears, cache COLD in red, and cache off and cache ? dimmed when Claude Code reports no cache data](docs/statusline.svg)
-
-## What it does
-
-**Observe → Explain → Measure → Mitigate.**
-
-| | | |
-|---|---|---|
-| **Observe** | the `warmline` statusline | what the cache is doing right now |
-| **Explain** | `warmline audit` | what happened in one session, turn by turn |
-| **Measure** | `warmline audit --all` | where the exposure is across every session on this machine |
-| **Mitigate** | `warmline keep-warm` | *optional*: prevent one preventable failure mode |
-
-The first three are read-only observation, and they are the point of the
-project. The fourth is opt-in, off by default, and deliberately bounded — see
-[optional: keep warm](#optional-keep-warm).
 
 ## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
-
-warmline status              # what's installed and on
-warmline audit               # this project's latest session, turn by turn
-warmline audit --all         # every session on this machine, ranked
-warmline watch               # every session's warmth, live, until ctrl-c
 ```
 
-[Install details, flags, updating, Windows →](docs/INSTALL.md)
+Then:
 
-## Why it matters
+| Command | What it does |
+|---|---|
+| `warmline status` | what's installed and on |
+| `warmline audit` | this project's latest session, turn by turn |
+| `warmline audit --all` | every session on this machine, ranked |
+| `warmline watch` | every session's warmth, live, until ctrl-c |
 
-What gets re-sent is the *entire* conversation — system prompt, tools, every
-file it read, every reply — easily 100k+ input tokens on a long session, every
-single turn. The cache absorbs that, but it is torn down after **about an hour
-of inactivity**, and instantly whenever the start of the conversation is
-rewritten (`/compact` and auto-compaction both do this). Come back to a big
-session after lunch and your next message pays the rebuild on all of it, at
-exactly the moment you wanted results.
+Needs `python3` and `bash`, nothing else.
+
+[Install details, flags, pinning a release, updating, Windows →](docs/INSTALL.md)
+
+## Why warmline
+
+Most Claude Code statuslines answer questions like:
+
+- Which model am I on?
+- How much context is left?
+- What is this session costing?
+- Which branch am I on?
+
+All useful. Warmline answers a different one:
+
+> **Is the prompt cache actually warm?**
+
+and then the one no live indicator can answer:
+
+> **When did it go cold, how often, and did that cost enough to care about?**
+
+A statusline tells you what is happening in your session. **Warmline tells you
+whether your context is still being reused.**
 
 Everything here exists for the 100k+ case. Going cold on 20k tokens is cheap.
+
+## From visibility to control
+
+**Observe** — the cache state in your statusline, live, from Claude Code's own
+data.
+
+**Explain** — what `HOT`, `COLD`, `off` and the expiry clock each mean, and
+which of them you can do anything about.
+
+**Measure** — `warmline audit`: the cold events across your history, what
+caused them where the transcript proves a cause, and an estimate of what they
+were worth.
+
+**Mitigate** — `warmline keep-warm`, if it turns out you need it.
+
+That is a progression, not a feature list. It takes you from *"did my cache go
+cold?"* to *"how often does this happen?"* to *"is it costing me enough to
+care?"* to *"do I want to do something about it?"* — and the honest answer to
+the last one is often no.
+
+The first three are read-only observation, and they are the point of the
+project. The fourth is opt-in, off by default, and deliberately bounded — see
+[optional: keep warm](#optional-keep-warm).
 
 ## Observe: the statusline
 
 ```
-Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
 ```
 
 | Field | Meaning |
 |---|---|
-| `ctx 43% (168k)` | context-window utilization — yellow past 80%, where auto-compaction starts rewriting the prefix |
-| `cache HOT (cold ~13:04)` | the cached prefix is warm and leaves its TTL at the time shown; yellow within 15 minutes of it |
+| `ctx 64% (127k)` | context-window utilization — yellow past 80%, where auto-compaction starts rewriting the prefix |
+| `cache HOT (cold ~11:58)` | the cached prefix is warm and leaves its TTL at the time shown; yellow within 15 minutes of it |
 | `cache HOT 5m` | as above, on the 5-minute TTL — usage credits, an API key, a cloud provider. The 1-hour case is the norm and goes unlabelled |
 | `cache COLD` | the prefix is outside its TTL; the next turn re-caches it |
 | `cache off` | prompt caching is off, or this provider or gateway never reports cache tokens. Nothing here will warm up |
 | `cache ?` | no cache data — Claude Code before v2.1.251, or before the session's first API response |
 
-**Every one of these comes from Claude Code, not from warmline.** Since
-v2.1.251 the statusline payload carries the cache's real warmth, TTL and
-expiry timestamp, so warmline reads them instead of timing the gap between
-turns and guessing. `COLD`, `off` and `?` are kept distinct on purpose: "the
-cache expired", "caching isn't happening" and "warmline can't see" are three
-different facts, and collapsing them is how a cache gauge starts lying.
+**Warmline does not try to work out whether your cache is warm by timing how
+long Claude Code takes to answer.** Every verdict above is a field Claude Code
+handed the statusline: `prompt_cache.warm` for the state, `caching_observed` for
+whether caching is happening at all, `ttl` for the bucket, `expires_at` for the
+clock. Warmline formats and colors them. It used to infer all of this from the
+gap between turns, and that machinery is gone.
+
+`COLD`, `off` and `?` are kept distinct on purpose: "the cache expired",
+"caching isn't happening here" and "warmline can't see" are three different
+facts, and collapsing them is how a cache gauge starts lying.
 
 The expiry is absolute wall-clock, never a countdown — a frozen countdown is
 wrong, while a frozen clock is still true.
@@ -105,6 +153,9 @@ whatever you do next. The only question is what that one pass buys:
 [The full reasoning →](docs/AUDIT.md#when-you-come-back-cold)
 
 ## Explain and measure: the audit
+
+A single `HOT` on your statusline is useful. Seeing that your sessions went cold
+198 times in eight weeks is more useful.
 
 `warmline audit` grades every recorded API request of a session from the usage
 fields Claude Code wrote for it — no one-turn lag, unlike the statusline. `--all`
@@ -132,6 +183,9 @@ where the cold came from
 
 estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 ```
+
+That is the difference between observability and a decorative statusline: a
+pattern you can act on, or decide not to.
 
 Each cold turn carries a cause where the transcript **proves** one — `/compact`,
 `auto-compact`, `model change`, `inactivity`. Everything else lands in
@@ -183,6 +237,17 @@ after ~10 hours. Each ping is an ordinary billed request against your own plan:
 it trades one expensive rebuild for a few cheap reads, and bypasses nothing.
 
 [What it is and isn't, `wait-for`, no-sleep mode, limits, terms →](docs/KEEP-WARM.md)
+
+## Local by design
+
+Warmline runs on your machine. It does not phone home, collect telemetry, or
+require an account, and it has no dependencies beyond `python3` and `bash`.
+
+Everything it shows comes from data Claude Code already produced locally: the
+JSON payload Claude Code pipes to the statusline, and the session transcripts
+under `~/.claude/projects`. **Warmline observes what Claude Code exposes
+locally** — it has no special access to anything of Anthropic's, and there is
+nothing to log into.
 
 ## Where it works
 

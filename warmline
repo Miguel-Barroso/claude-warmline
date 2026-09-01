@@ -6,7 +6,9 @@ set -euo pipefail
 # The installer (install.sh) installs, updates and uninstalls; this command
 # controls what's installed. `warmline --help` lists the subcommands.
 
-REPO_RAW="https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main"
+# last-resort source for the keep-warm policy text; WARMLINE_REF pins it to the
+# same tag a pinned install used, so the fallback can't drift to main's wording
+REPO_RAW="https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/${WARMLINE_REF:-main}"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 DEST="$CLAUDE_DIR/warmline-statusline.py"
 SETTINGS="$CLAUDE_DIR/settings.json"
