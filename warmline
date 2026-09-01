@@ -224,7 +224,7 @@ PY
   elif [ -n "${settings_ttl:-}" ]; then
     ttl_line="${settings_ttl}m (settings.json env)"
   else
-    ttl_line="auto -- from each transcript's cache buckets (60m fallback)"
+    ttl_line="auto -- warmline-audit reads it per transcript (60m fallback); the statusline uses Claude Code's own"
   fi
   if [ "$wired" = warmline ]; then
     if [ -n "$refresh" ]; then

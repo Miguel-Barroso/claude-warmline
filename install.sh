@@ -115,6 +115,14 @@ fetch statusline.py "$DEST";    chmod +x "$DEST"
 fetch warmline "$CLI";          chmod +x "$CLI"
 fetch warmline-audit "$AUDIT";  chmod +x "$AUDIT"
 
+# the statusline used to infer cache state from per-session stamp files; it
+# now reads Claude Code's own prompt_cache fields and keeps no state at all,
+# so an upgrade leaves this directory behind as dead weight
+if [ -d "$STATE_DIR" ]; then
+  rm -rf "$STATE_DIR"
+  echo "removed $STATE_DIR (the statusline no longer keeps state)"
+fi
+
 # the block already in CLAUDE.md is what the agent actually reads, so an
 # upgrade that only refreshes $POLICY leaves every session following the
 # previous release's policy. Keep the old text to tell "never touched" (safe
@@ -174,9 +182,12 @@ if sl and dest not in str(sl.get("command", "")) and not force:
 new = dict(sl) if isinstance(sl, dict) and dest in str(sl.get("command", "")) else {}
 new.update({"type": "command", "command": dest})
 # refreshInterval re-runs the statusline every N seconds while the session
-# idles (a local repaint, no API traffic), so the gauge can't freeze on a
-# stale HOT. WARMLINE_REFRESH_SEC overrides; 0 removes it. Claude Code
-# versions without the setting ignore the key and stay event-driven.
+# idles (a local repaint, no API traffic). Claude Code's own expires_at
+# trigger already flips HOT to COLD at the right second -- verified firing on
+# 2.1.252 -- but it is a single shot at expiry, so nothing repaints when the
+# 15-minute warning window opens. This timer is what turns the line yellow.
+# WARMLINE_REFRESH_SEC overrides; 0 removes it and keeps a correct gauge that
+# just stops warning first. Versions without the setting ignore the key.
 refresh = os.environ.get("WARMLINE_REFRESH_SEC")
 if refresh is not None:
     try:

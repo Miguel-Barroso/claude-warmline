@@ -2,15 +2,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-export WARMLINE_STATE_DIR="$(mktemp -d)"
+export SCRATCH="$(mktemp -d)"
 export WARMLINE_NO_COLOR=1
 # the host machine may configure these; the tests assume the defaults
 unset WARMLINE_TTL_MIN WARMLINE_REFRESH_SEC WARMLINE_FORCE_COLOR
 # an empty config dir, so the keep-warm field of the statusline tests below
 # reads a known-OFF state instead of whoever's real ~/.claude/CLAUDE.md
-export CLAUDE_CONFIG_DIR="$WARMLINE_STATE_DIR/cfg"
+export CLAUDE_CONFIG_DIR="$SCRATCH/cfg"
 mkdir -p "$CLAUDE_CONFIG_DIR"
-trap 'rm -rf "$WARMLINE_STATE_DIR"' EXIT
+trap 'rm -rf "$SCRATCH"' EXIT
 
 pass=0 fail=0
 check() { # name expected payload
@@ -23,179 +23,235 @@ check() { # name expected payload
   fi
 }
 
-HOT='{"session_id":"t1","model":{"display_name":"Test"},"workspace":{"current_dir":"/tmp/proj"},"context_window":{"used_percentage":42.7,"total_input_tokens":168432,"current_usage":{"cache_read_input_tokens":165000,"cache_creation_input_tokens":2000}}}'
-COLD='{"session_id":"t2","model":{"display_name":"Test"},"workspace":{"current_dir":"/tmp/proj"},"context_window":{"used_percentage":81.0,"total_input_tokens":325000,"current_usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":310000}}}'
+# --- statusline: the cache verdict comes only from `prompt_cache` ----------
+# Every payload below is built by hand rather than replayed from a transcript,
+# because that is now the whole contract: no stamp file, no transcript read,
+# no gap timing. What Claude Code says is what the line shows.
 
-check hot     "cache HOT"           "$HOT"
-check cold    "cache COLD(rebuilt)" "$COLD"
-check sparse  "cache ?"             '{"session_id":"t3","model":{"display_name":"Test"}}'
-check garbage "bad input"           'not json'
-
-# TTL inference: backdate t1's stamp 75 minutes, render the same session again.
-python3 - "$WARMLINE_STATE_DIR/t1.stamp" <<'PY'
-import os, sys, time
-t = time.time() - 75 * 60
-os.utime(sys.argv[1], (t, t))
+mkpayload() { # session_id  prompt_cache_json (empty string = field absent)
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+d = {
+    "session_id": sys.argv[1],
+    "model": {"display_name": "Test"},
+    "workspace": {"current_dir": "/tmp/proj"},
+    "context_window": {
+        "used_percentage": 42.7, "total_input_tokens": 168432,
+        # deliberately non-zero: the old statusline read these to guess the
+        # verdict, and the false-HOT regression below depends on them staying
+        # present while `warm` says otherwise
+        "current_usage": {"cache_read_input_tokens": 165000,
+                          "cache_creation_input_tokens": 2000},
+    },
+}
+if sys.argv[2]:
+    d["prompt_cache"] = json.loads(sys.argv[2])
+print(json.dumps(d))
 PY
-out=$(printf '%s' "$HOT" | ./statusline.py)
-if [[ "$out" == *"cache COLD(ttl?)"* && "$out" == *"gap 75m"* ]]; then
-  echo "ok   ttl-gap: $out"; pass=$((pass + 1))
+}
+
+pc() { # minutes_until_expiry ttl  -> a warm prompt_cache object
+  python3 -c 'import json,sys,time
+print(json.dumps({"warm": True, "caching_observed": True, "ttl": sys.argv[2],
+                  "expires_at": time.time() + float(sys.argv[1]) * 60}))' "$1" "$2"
+}
+at() { # minutes_from_now -> HH:MM, the label the line should carry
+  python3 -c 'import sys,time
+print(time.strftime("%H:%M", time.localtime(time.time() + float(sys.argv[1]) * 60)))' "$1"
+}
+
+HOT=$(mkpayload t1 "$(pc 40 1h)")
+
+check hot-expiry "cache HOT (cold ~$(at 40))" "$HOT"
+check warm-noexp "cache HOT" \
+  "$(mkpayload t2 '{"warm":true,"caching_observed":true,"ttl":"1h","expires_at":null}')"
+check cold       "cache COLD" \
+  "$(mkpayload t3 '{"warm":false,"caching_observed":true,"ttl":"1h","expires_at":null}')"
+check off        "cache off" \
+  "$(mkpayload t4 '{"warm":false,"caching_observed":false,"ttl":"1h","expires_at":null}')"
+check absent     "cache ?"   "$(mkpayload t5 '')"
+check unusable   "cache ?"   "$(mkpayload t6 '{"caching_observed":true}')"
+check garbage    "bad input" 'not json'
+
+# THE REGRESSION. Until this release the verdict was inferred from
+# cache_read_input_tokens, so a payload whose authoritative `warm` is false
+# while the (one-turn-stale) usage fields still show a large read rendered a
+# confident green "cache HOT" -- the exact failure this release exists to fix.
+out=$(printf '%s' \
+  "$(mkpayload r1 '{"warm":false,"caching_observed":true,"ttl":"1h","expires_at":null}')" \
+  | ./statusline.py)
+if [[ "$out" == *"cache COLD"* && "$out" != *"HOT"* ]]; then
+  echo "ok   false-hot: warm=false renders COLD despite a 165k cache read"; pass=$((pass + 1))
 else
-  echo "FAIL ttl-gap: expected 'cache COLD(ttl?)' and 'gap 75m' in: $out"; fail=$((fail + 1))
+  echo "FAIL false-hot: authoritative warm=false rendered as: $out"; fail=$((fail + 1))
 fi
 
-# Session isolation: t2 rendering in between must not reset t1's clock.
-python3 - "$WARMLINE_STATE_DIR/t1.stamp" <<'PY'
-import os, sys, time
-t = time.time() - 75 * 60
-os.utime(sys.argv[1], (t, t))
-PY
-printf '%s' "$COLD" | ./statusline.py >/dev/null
-out=$(printf '%s' "$HOT" | ./statusline.py)
-if [[ "$out" == *"gap 75m"* ]]; then
-  echo "ok   session-isolation: $out"; pass=$((pass + 1))
+# The shape a real expiry actually has, captured off 2.1.252: `warm` flips to
+# false but `expires_at` keeps its old value instead of going null, so a
+# renderer that trusted the clock over `warm` would still be inside the TTL
+# for a moment and paint HOT. Warmth comes from `warm`, the clock only labels.
+out=$(printf '%s' \
+  "$(mkpayload r1b "{\"warm\":false,\"caching_observed\":true,\"ttl\":\"5m\",\"expires_at\":$(python3 -c 'import time;print(int(time.time())+120)')}")" \
+  | ./statusline.py)
+if [[ "$out" == *"cache COLD"* && "$out" != *"HOT"* ]]; then
+  echo "ok   expired-stale-clock: warm=false beats a still-future expires_at"; pass=$((pass + 1))
 else
-  echo "FAIL session-isolation: t2's render reset t1's gap: $out"; fail=$((fail + 1))
+  echo "FAIL expired-stale-clock: rendered as: $out"; fail=$((fail + 1))
 fi
 
-# Idle repaints must not reset the clock: rendering t1 again with the same
-# (stale) usage keeps the 75m gap and the COLD(ttl?) verdict on screen.
-out=$(printf '%s' "$HOT" | ./statusline.py)
-if [[ "$out" == *"cache COLD(ttl?)"* && "$out" == *"gap 75m"* ]]; then
-  echo "ok   stale-repaint: $out"; pass=$((pass + 1))
+# caching_observed=false wins over warm: "nothing to wait for" is a different
+# fact from "expired", and must not be shown as a cache that might come back.
+out=$(printf '%s' \
+  "$(mkpayload r2 '{"warm":true,"caching_observed":false,"ttl":"1h","expires_at":null}')" \
+  | ./statusline.py)
+if [[ "$out" == *"cache off"* ]]; then
+  echo "ok   off-precedence: caching_observed=false outranks warm"; pass=$((pass + 1))
 else
-  echo "FAIL stale-repaint: repaint reset the idle clock: $out"; fail=$((fail + 1))
+  echo "FAIL off-precedence: $out"; fail=$((fail + 1))
 fi
 
-# A real API turn (changed usage) is authoritative over the TTL inference,
-# and resets the clock so the next repaint shows no gap.
-HOT2=${HOT/165000/166000}
-out=$(printf '%s' "$HOT2" | ./statusline.py)
-out2=$(printf '%s' "$HOT2" | ./statusline.py)
-if [[ "$out" == *"cache HOT"* && "$out" == *"gap 75m"* \
-   && "$out2" == *"cache HOT"* && "$out2" != *"gap"* ]]; then
-  echo "ok   fresh-turn: $out"; pass=$((pass + 1))
+# An expiry already in the past reads COLD even though `warm` still says true:
+# the authoritative timestamp is the newer fact. This is what keeps a line
+# frozen on screen honest if the expires_at re-run never arrives.
+out=$(printf '%s' "$(mkpayload r3 "$(pc -5 1h)")" | ./statusline.py)
+if [[ "$out" == *"cache COLD"* ]]; then
+  echo "ok   past-expiry: a lapsed expires_at reads COLD, not HOT"; pass=$((pass + 1))
 else
-  echo "FAIL fresh-turn: expected HOT+gap then HOT+no-gap: $out / $out2"; fail=$((fail + 1))
+  echo "FAIL past-expiry: $out"; fail=$((fail + 1))
 fi
 
-# Expiry countdown: still HOT but the gap is 50m of a 60m TTL.
-python3 - "$WARMLINE_STATE_DIR/t1.stamp" <<'PY'
-import os, sys, time
-t = time.time() - 50 * 60
-os.utime(sys.argv[1], (t, t))
-PY
-out=$(printf '%s' "$HOT2" | ./statusline.py)
-if [[ "$out" == *"cache HOT (cold in 10m)"* && "$out" == *"gap 50m"* ]]; then
-  echo "ok   countdown: $out"; pass=$((pass + 1))
+# Approaching expiry is a colour change and nothing else: byte-identical text,
+# so no field shifts width as the deadline nears.
+warn=$(printf '%s' "$(mkpayload r4 "$(pc 9 1h)")" | env -u WARMLINE_NO_COLOR ./statusline.py)
+calm=$(printf '%s' "$(mkpayload r5 "$(pc 40 1h)")" | env -u WARMLINE_NO_COLOR ./statusline.py)
+if [[ "$warn" == *$'\033[33mcache HOT (cold ~'*$'\033[0m'* \
+   && "$calm" == *$'\033[32mcache HOT (cold ~'*$'\033[0m'* ]]; then
+  echo "ok   warn-colour: yellow inside 15m, green outside, same wording"; pass=$((pass + 1))
 else
-  echo "FAIL countdown: expected 'cache HOT (cold in 10m)': $out"; fail=$((fail + 1))
+  echo "FAIL warn-colour: ${warn@Q} / ${calm@Q}"; fail=$((fail + 1))
 fi
 
-# Stale-proof HOT: more than 15m from the TTL, the verdict carries the
-# absolute wall-clock expiry (exactly stamp mtime + TTL), so a line frozen
-# on screen for hours still reads truthfully.
-printf '%s' "${HOT/t1/e1}" | ./statusline.py >/dev/null   # first sighting seeds the stamp
-python3 - "$WARMLINE_STATE_DIR/e1.stamp" <<'PY'
-import os, sys, time
-t = time.time() - 20 * 60
-os.utime(sys.argv[1], (t, t))
-PY
-exp=$(python3 -c 'import os, sys, time
-print(time.strftime("%H:%M", time.localtime(os.path.getmtime(sys.argv[1]) + 3600)))' \
-  "$WARMLINE_STATE_DIR/e1.stamp")
-out=$(printf '%s' "${HOT/t1/e1}" | ./statusline.py)
-if [[ "$out" == *"cache HOT (cold ~$exp)"* && "$out" == *"gap 20m"* ]]; then
-  echo "ok   absolute-expiry: $out"; pass=$((pass + 1))
+# The 5m bucket is badged because it invalidates the mental model built on the
+# 1h default; the 1h case stays unlabelled. Its warning window scales with the
+# TTL, so a 4-minute-old 5m cache is not permanently yellow.
+five=$(printf '%s' "$(mkpayload r6 "$(pc 4 5m)")" | env -u WARMLINE_NO_COLOR ./statusline.py)
+fivewarn=$(printf '%s' "$(mkpayload r7 "$(pc 2 5m)")" | env -u WARMLINE_NO_COLOR ./statusline.py)
+if [[ "$five" == *$'\033[32mcache HOT 5m (cold ~'* \
+   && "$fivewarn" == *$'\033[33mcache HOT 5m (cold ~'* \
+   && "$calm" != *"1h"* ]]; then
+  echo "ok   ttl-badge: 5m badged and scaled; 1h unlabelled"; pass=$((pass + 1))
 else
-  echo "FAIL absolute-expiry: expected 'cache HOT (cold ~$exp)' in: $out"; fail=$((fail + 1))
+  echo "FAIL ttl-badge: ${five@Q} / ${fivewarn@Q}"; fail=$((fail + 1))
 fi
 
-# TTL auto-detect: a transcript whose last cache write went to the 5m
-# bucket sets the gauge's TTL, so a 7m gap is already COLD(ttl?);
-# WARMLINE_TTL_MIN still overrides the sniff.
-T5="$WARMLINE_STATE_DIR/t5-transcript.jsonl"
-printf '%s\n' '{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":9000,"input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":9000,"ephemeral_1h_input_tokens":0}}}}' > "$T5"
-HOT5=$(python3 -c 'import json, sys
-d = json.loads(sys.argv[1]); d["session_id"] = "t5"; d["transcript_path"] = sys.argv[2]
-print(json.dumps(d))' "$HOT" "$T5")
-printf '%s' "$HOT5" | ./statusline.py >/dev/null
-python3 - "$WARMLINE_STATE_DIR/t5.stamp" <<'PY'
-import os, sys, time
-t = time.time() - 7 * 60
-os.utime(sys.argv[1], (t, t))
-PY
-out=$(printf '%s' "$HOT5" | ./statusline.py)
-out2=$(printf '%s' "$HOT5" | WARMLINE_TTL_MIN=60 ./statusline.py)
-if [[ "$out" == *"cache COLD(ttl?)"* && "$out" == *"gap 7m"* \
-   && "$out2" == *"cache HOT"* ]]; then
-  echo "ok   ttl-sniff: 5m bucket -> COLD(ttl?) at a 7m gap; env override wins"; pass=$((pass + 1))
+# Pin the warning window itself, on both sides of each boundary: 15 minutes of
+# an hour, 2.5 of five, and an unrecognised ttl left uncapped at 15. The 5m cap
+# is what stops a flat 15 minutes from painting a 5-minute cache yellow for its
+# whole life; the shape of that rule should not drift unnoticed.
+colour() { # minutes_left  ttl -> GREEN | YELLOW
+  local o
+  o=$(printf '%s' "$(mkpayload rb "$(pc "$1" "$2")")" | env -u WARMLINE_NO_COLOR ./statusline.py)
+  case "$o" in
+    *$'\033[33mcache HOT'*) echo YELLOW ;;
+    *$'\033[32mcache HOT'*) echo GREEN ;;
+    *) echo "other:$o" ;;
+  esac
+}
+edges="$(colour 15.5 1h)/$(colour 14.5 1h) $(colour 2.6 5m)/$(colour 2.4 5m) $(colour 15.5 7d)/$(colour 14.5 7d)"
+if [[ "$edges" == "GREEN/YELLOW GREEN/YELLOW GREEN/YELLOW" ]]; then
+  echo "ok   warn-window: yellow under 15m (1h), 2.5m (5m), 15m (unknown ttl)"; pass=$((pass + 1))
 else
-  echo "FAIL ttl-sniff: $out / $out2"; fail=$((fail + 1))
+  echo "FAIL warn-window: $edges"; fail=$((fail + 1))
 fi
 
-# Colors on by default: a fresh session's HOT should carry the green code.
-out=$(printf '%s' "${HOT/t1/t4}" | env -u WARMLINE_NO_COLOR ./statusline.py)
-if [[ "$out" == *$'\033[32mcache HOT\033[0m'* ]]; then
+# Deleted machinery must stay deleted: no gap field, no state directory, and
+# no transcript read. A transcript_path pointing at a 5m-bucket write used to
+# change the verdict; now it is ignored entirely.
+SNIFF="$SCRATCH/sniff-transcript.jsonl"
+printf '%s\n' '{"type":"assistant","message":{"usage":{"cache_creation":{"ephemeral_5m_input_tokens":9000,"ephemeral_1h_input_tokens":0}}}}' > "$SNIFF"
+withtx=$(python3 -c 'import json,sys
+d = json.loads(sys.argv[1]); d["transcript_path"] = sys.argv[2]; print(json.dumps(d))' \
+  "$(mkpayload r8 "$(pc 40 1h)")" "$SNIFF")
+before=$(ls -A "$SCRATCH" | wc -l)
+out=$(printf '%s' "$withtx" | ./statusline.py)
+after=$(ls -A "$SCRATCH" | wc -l)
+if [[ "$out" == *"cache HOT (cold ~$(at 40))"* && "$out" != *"5m"* \
+   && "$out" != *"gap "* && "$before" == "$after" ]]; then
+  echo "ok   no-inference: transcript ignored, no gap field, no files written"; pass=$((pass + 1))
+else
+  echo "FAIL no-inference: $out (files $before -> $after)"; fail=$((fail + 1))
+fi
+
+# ...and enforced at the source level, so a future edit can't quietly
+# reintroduce statusline-side state or a transcript read.
+if ! grep -qE 'makedirs|os\.utime|getmtime|transcript_path|,[[:space:]]*["'"'"']w["'"'"']' statusline.py; then
+  echo "ok   no-state-source: statusline.py writes nothing and reads no transcript"; pass=$((pass + 1))
+else
+  echo "FAIL no-state-source: statusline.py still contains state/inference code"; fail=$((fail + 1))
+fi
+
+# Colors on by default.
+out=$(printf '%s' "$(mkpayload r9 "$(pc 40 1h)")" | env -u WARMLINE_NO_COLOR ./statusline.py)
+if [[ "$out" == *$'\033[32mcache HOT'* ]]; then
   echo "ok   color: green HOT emitted"; pass=$((pass + 1))
 else
   echo "FAIL color: no green ANSI code in: ${out@Q}"; fail=$((fail + 1))
 fi
+out=$(printf '%s' "$(mkpayload ra '{"warm":false,"caching_observed":true}')" \
+  | env -u WARMLINE_NO_COLOR ./statusline.py)
+if [[ "$out" == *$'\033[31mcache COLD\033[0m'* ]]; then
+  echo "ok   color-cold: red COLD emitted"; pass=$((pass + 1))
+else
+  echo "FAIL color-cold: ${out@Q}"; fail=$((fail + 1))
+fi
 
-# Keep-warm indicator: the same three states the warmline CLI reports, read
-# out of CLAUDE.md on every render (no state file), plus the opt-out.
+# Keep-warm is now an exception-only field: a correct policy and a deliberate
+# absence are both silent, and only the two states you must act on appear.
 KWMD="$CLAUDE_CONFIG_DIR/CLAUDE.md"
-check kw-off "keep-warm off" "${HOT/t1/k1}"     # no CLAUDE.md at all
-printf 'user text\n' > "$KWMD"
-check kw-off2 "keep-warm off" "${HOT/t1/k2}"    # a CLAUDE.md without the block
-printf '%s\npolicy body\n%s\n' \
-  '<!-- >>> claude-warmline keep-warm >>> -->' \
-  '<!-- <<< claude-warmline keep-warm <<< -->' >> "$KWMD"
-check kw-on  "keep-warm on"  "${HOT/t1/k3}"
-out=$(printf '%s' "${HOT/t1/k4}" | env -u WARMLINE_NO_COLOR ./statusline.py)
-if [[ "$out" == *$'\033[32mkeep-warm on\033[0m'* ]]; then
-  echo "ok   kw-color: green keep-warm on emitted"; pass=$((pass + 1))
+KWPOL="$CLAUDE_CONFIG_DIR/warmline-keep-warm.md"
+BLOCK_B='<!-- >>> claude-warmline keep-warm >>> -->'
+BLOCK_E='<!-- <<< claude-warmline keep-warm <<< -->'
+
+out=$(printf '%s' "$(mkpayload k1 "$(pc 40 1h)")" | ./statusline.py)   # no CLAUDE.md
+if [[ "$out" != *"keep-warm"* ]]; then
+  echo "ok   kw-silent-off: no policy, no field"; pass=$((pass + 1))
 else
-  echo "FAIL kw-color: no green keep-warm in: ${out@Q}"; fail=$((fail + 1))
-fi
-printf 'user text\n%s\npolicy body\n' \
-  '<!-- >>> claude-warmline keep-warm >>> -->' > "$KWMD"   # end marker lost
-check kw-malformed "keep-warm ?" "${HOT/t1/k5}"
-out=$(printf '%s' "${HOT/t1/k6}" | WARMLINE_NO_KEEPWARM=1 ./statusline.py)
-if [[ "$out" != *"keep-warm"* && "$out" == *"cache HOT"* ]]; then
-  echo "ok   kw-optout: field omitted"; pass=$((pass + 1))
-else
-  echo "FAIL kw-optout: $out"; fail=$((fail + 1))
+  echo "FAIL kw-silent-off: $out"; fail=$((fail + 1))
 fi
 
-# Stale policy: the block is installed but no longer matches the installed
-# warmline-keep-warm.md, so an upgrade left the agent following the previous
-# release's wording. A plain green "on" hides exactly that; "on*" reports it.
-printf '%s\npolicy body\n%s\n' \
-  '<!-- >>> claude-warmline keep-warm >>> -->' \
-  '<!-- <<< claude-warmline keep-warm <<< -->' > "$KWMD"
-KWPOL="$CLAUDE_CONFIG_DIR/warmline-keep-warm.md"
-printf 'policy   body\n' > "$KWPOL"   # whitespace-insensitive, like the CLI
-out=$(printf '%s' "${HOT/t1/k7}" | ./statusline.py)
-if [[ "$out" == *"keep-warm on" && "$out" != *"on*" ]]; then
-  echo "ok   kw-current: block matches the installed policy: $out"; pass=$((pass + 1))
+printf '%s\npolicy body\n%s\n' "$BLOCK_B" "$BLOCK_E" > "$KWMD"
+printf 'policy   body\n' > "$KWPOL"      # whitespace-insensitive, like the CLI
+out=$(printf '%s' "$(mkpayload k2 "$(pc 40 1h)")" | ./statusline.py)
+if [[ "$out" != *"keep-warm"* ]]; then
+  echo "ok   kw-silent-on: a current policy renders nothing"; pass=$((pass + 1))
 else
-  echo "FAIL kw-current: expected a plain 'keep-warm on' ending: $out"; fail=$((fail + 1))
+  echo "FAIL kw-silent-on: expected silence, got: $out"; fail=$((fail + 1))
 fi
+
 printf 'policy body, revised in a later release\n' > "$KWPOL"
-check kw-stale "keep-warm on*" "${HOT/t1/k8}"
-out=$(printf '%s' "${HOT/t1/k9}" | env -u WARMLINE_NO_COLOR ./statusline.py)
+check kw-stale "keep-warm on*" "$(mkpayload k3 "$(pc 40 1h)")"
+out=$(printf '%s' "$(mkpayload k4 "$(pc 40 1h)")" | env -u WARMLINE_NO_COLOR ./statusline.py)
 if [[ "$out" == *$'\033[33mkeep-warm on*\033[0m'* ]]; then
   echo "ok   kw-stale-color: yellow keep-warm on* emitted"; pass=$((pass + 1))
 else
-  echo "FAIL kw-stale-color: no yellow 'keep-warm on*' in: ${out@Q}"; fail=$((fail + 1))
+  echo "FAIL kw-stale-color: ${out@Q}"; fail=$((fail + 1))
 fi
+
 rm -f "$KWPOL"
-out=$(printf '%s' "${HOT/t1/ka}" | ./statusline.py)
-if [[ "$out" == *"keep-warm on" && "$out" != *"on*" ]]; then
+out=$(printf '%s' "$(mkpayload k5 "$(pc 40 1h)")" | ./statusline.py)
+if [[ "$out" != *"keep-warm"* ]]; then
   echo "ok   kw-nopolicy: nothing to compare against, so no false stale"; pass=$((pass + 1))
 else
   echo "FAIL kw-nopolicy: $out"; fail=$((fail + 1))
+fi
+
+printf 'user text\n%s\npolicy body\n' "$BLOCK_B" > "$KWMD"   # end marker lost
+check kw-malformed "keep-warm ?" "$(mkpayload k6 "$(pc 40 1h)")"
+out=$(printf '%s' "$(mkpayload k7 "$(pc 40 1h)")" | WARMLINE_NO_KEEPWARM=1 ./statusline.py)
+if [[ "$out" != *"keep-warm"* && "$out" == *"cache HOT"* ]]; then
+  echo "ok   kw-optout: field suppressed even when malformed"; pass=$((pass + 1))
+else
+  echo "FAIL kw-optout: $out"; fail=$((fail + 1))
 fi
 rm -f "$KWMD"
 
@@ -216,7 +272,7 @@ fi
 
 # warmline-audit: synthetic transcript with one of each verdict, a duplicate
 # requestId (one API request, two entries) and a sidechain turn to exclude.
-AUDIT_T="$WARMLINE_STATE_DIR/audit-test.jsonl"
+AUDIT_T="$SCRATCH/audit-test.jsonl"
 cat > "$AUDIT_T" <<'EOF'
 {"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"r1","message":{"usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":30000,"input_tokens":5}}}
 {"type":"assistant","timestamp":"2026-01-01T00:02:00Z","requestId":"r2","message":{"usage":{"cache_read_input_tokens":30000,"cache_creation_input_tokens":500,"input_tokens":5}}}
@@ -268,7 +324,7 @@ fi
 
 # Output tokens are summed from the transcript and priced at the output
 # rate: 1,000 + 500 output tokens at the default $15/MTok -> ~$0.02.
-AOUT="$WARMLINE_STATE_DIR/audit-out.jsonl"
+AOUT="$SCRATCH/audit-out.jsonl"
 cat > "$AOUT" <<'EOF'
 {"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"o1","message":{"usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":30000,"input_tokens":5,"output_tokens":1000}}}
 {"type":"assistant","timestamp":"2026-01-01T00:02:00Z","requestId":"o2","message":{"usage":{"cache_read_input_tokens":30000,"cache_creation_input_tokens":500,"input_tokens":5,"output_tokens":500}}}
@@ -281,7 +337,7 @@ else
 fi
 
 # Synthetic multi-project corpus for --all and cold-cause attribution.
-ROOT="$WARMLINE_STATE_DIR/projects"
+ROOT="$SCRATCH/projects"
 mkdir -p "$ROOT/proj-a" "$ROOT/proj-b" "$ROOT/proj-c" "$ROOT/proj-a/sess1/subagents"
 cat > "$ROOT/proj-a/sess1.jsonl" <<'EOF'
 {"type":"assistant","timestamp":"2026-01-01T00:00:00Z","cwd":"/tmp/proj-alpha","message":{"id":"m1","model":"claude-opus-5","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":40000,"input_tokens":5,"output_tokens":700}}}
@@ -424,7 +480,7 @@ fi
 
 # TTL auto-detect: cache writes recorded in the 5m bucket grade the session
 # against a 5m TTL (a 7m gap becomes COLD(ttl)); --ttl still forces one.
-A5="$WARMLINE_STATE_DIR/audit-5m.jsonl"
+A5="$SCRATCH/audit-5m.jsonl"
 cat > "$A5" <<'EOF'
 {"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"id":"q1","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":9000,"input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":9000,"ephemeral_1h_input_tokens":0}}}}
 {"type":"assistant","timestamp":"2026-01-01T00:07:00Z","message":{"id":"q2","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":9100,"input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":9100,"ephemeral_1h_input_tokens":0}}}}
@@ -442,7 +498,7 @@ fi
 # session's own TTL. A 10m-old 1h-bucket session is WARM; the same age on
 # the 5m bucket is already cold; a 3h-old session is cold; warm rows sort
 # first.
-LROOT="$WARMLINE_STATE_DIR/live-projects"
+LROOT="$SCRATCH/live-projects"
 mkdir -p "$LROOT/proj-warm" "$LROOT/proj-shortttl" "$LROOT/proj-stale"
 python3 - "$LROOT" <<'PY'
 import datetime, json, os, sys
@@ -490,7 +546,7 @@ fi
 # ---- installer + warmline CLI (isolated via CLAUDE_CONFIG_DIR / WARMLINE_BIN_DIR) ----
 IROOT="$(mktemp -d)"
 IBIN="$(mktemp -d)"
-trap 'rm -rf "$WARMLINE_STATE_DIR" "$IROOT" "$IBIN"' EXIT
+trap 'rm -rf "$SCRATCH" "$IROOT" "$IBIN"' EXIT
 MB='<!-- >>> claude-warmline keep-warm >>> -->'
 ME='<!-- <<< claude-warmline keep-warm <<< -->'
 inst() { CLAUDE_CONFIG_DIR="$IROOT" WARMLINE_BIN_DIR="$IBIN" ./install.sh "$@"; }
@@ -693,7 +749,7 @@ fi
 # the session's -- the wrapped command's exit code comes straight back
 # (that exit is what releases the OS assertion; this is the /exit-cleanup
 # guarantee, held by construction rather than by a cleanup handler).
-STUB="$WARMLINE_STATE_DIR/awake-stub"
+STUB="$SCRATCH/awake-stub"
 mkdir -p "$STUB"
 cat > "$STUB/caffeinate" <<'EOF'
 #!/usr/bin/env bash
@@ -706,7 +762,7 @@ cat > "$STUB/claude" <<'EOF'
 echo claude-default-ran
 EOF
 chmod +x "$STUB/caffeinate" "$STUB/claude"
-AWAKE_LOG="$WARMLINE_STATE_DIR/awake.log"
+AWAKE_LOG="$SCRATCH/awake.log"
 rc=0; out=$(AWAKE_LOG="$AWAKE_LOG" PATH="$STUB:$PATH" "$IBIN/warmline" awake \
   sh -c 'echo session-running; exit 7') || rc=$?
 if [[ "$rc" == 7 && "$out" == "session-running" \
@@ -728,7 +784,7 @@ fi
 # anything runs; with no inhibitor on PATH the failure is loud, not silent.
 out=$(wl awake --help)
 rc=0; wl awake --bogus >/dev/null 2>&1 || rc=$?
-NOPATH="$WARMLINE_STATE_DIR/awake-nopath"
+NOPATH="$SCRATCH/awake-nopath"
 mkdir -p "$NOPATH"
 ln -sf "$(command -v bash)" "$NOPATH/bash"
 ln -sf "$(command -v python3)" "$NOPATH/python3"
@@ -744,7 +800,7 @@ fi
 # warmline wait-for: the poller half of keep-warm. Each target ends the wait
 # on its own, and the loop's minute is scaled down so the heartbeat, the
 # timeout and the settle window run for real in about a second each.
-WF="$WARMLINE_STATE_DIR/waitfor"
+WF="$SCRATCH/waitfor"
 mkdir -p "$WF"
 wf() { WARMLINE_WAITFOR_MIN_SEC=1 wl wait-for -n 1 "$@"; }
 
@@ -998,7 +1054,7 @@ fi
 # 2.0M of 2.1M; at $10/MTok that is $38.00 of ~$39.90. With <=5 sessions
 # (the main corpus) the premium line must stay bare -- already asserted
 # by the premium-line equality test above.
-CROOT="$WARMLINE_STATE_DIR/conc"
+CROOT="$SCRATCH/conc"
 i=0
 for tok in 600000 500000 400000 300000 200000 100000; do
   i=$((i + 1))

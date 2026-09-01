@@ -26,10 +26,20 @@ nothing phones home.
 | `warmline-audit` | `~/.local/bin/warmline-audit` |
 | `keep-warm.md` | `~/.claude/warmline-keep-warm.md` (the policy source) |
 
+Both commands are installed, and the auditor has two spellings: `warmline audit
+…` is the primary form the docs use, and it runs `warmline-audit`, which remains
+fully supported — it is what scripts should keep calling, what a checkout runs
+(`./warmline-audit`), and the only form available on
+[manual/Windows installs](#windows), where the bash `warmline` wrapper isn't.
+
 `settings.json` is backed up to `settings.json.warmline-bak` on every run, and
 an existing custom `statusLine` is never replaced without `--force`. The wiring
 includes `"refreshInterval": 60`, so the gauge re-renders every minute even
-while a session idles — [why that matters](STATUSLINE.md#staying-current-while-idle).
+while a session idles. Claude Code flips `HOT` to `COLD` on its own at the
+exact expiry second, so this timer is not what makes the verdict correct — it
+is what turns the line yellow *before* the deadline, which nothing else does
+during an idle session
+([why](STATUSLINE.md#staying-current-while-idle)).
 Claude Code usually picks the statusline up within seconds — restart the
 session if it doesn't.
 
@@ -95,20 +105,24 @@ of that file untouched.
 
 | Environment variable | Default | Meaning |
 |---|---|---|
-| `WARMLINE_TTL_MIN` | auto | prompt-cache TTL in minutes; unset, both the statusline and the auditor detect it from each transcript's cache-bucket records (60m fallback) |
+| `WARMLINE_TTL_MIN` | auto | prompt-cache TTL in minutes, for **`warmline-audit`** only; unset, it detects the TTL from each transcript's cache-bucket records (60m fallback) |
 | `WARMLINE_REFRESH_SEC` | `60` | install-time: the statusline `refreshInterval` the installer writes; `0` omits it (a value you hand-edit later survives reinstalls) |
-| `WARMLINE_STATE_DIR` | `~/.claude/warmline-state` | stamp/state directory |
 | `WARMLINE_BIN_DIR` | `~/.local/bin` | where the installer puts the `warmline` and `warmline-audit` commands |
-| `WARMLINE_NO_KEEPWARM` | unset | if set, the statusline omits the keep-warm field |
+| `WARMLINE_NO_KEEPWARM` | unset | if set, the statusline never shows the keep-warm field |
 | `WARMLINE_CTX_WARN_PCT` | `80` | percentage at which the statusline's `ctx` field turns yellow (auto-compact warning); `0` disables |
 | `WARMLINE_NO_COLOR` | unset | if set (or `NO_COLOR`), plain output without ANSI colors |
 | `WARMLINE_FORCE_COLOR` | unset | if set, colored audit output even when piped |
-| `WARMLINE_DEBUG` | unset | if set, keeps the last raw statusline payload for inspection |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code's config dir — warmline follows it for settings, CLAUDE.md and transcripts |
 
 Set these in the environment Claude Code starts from, or in the `env` block of
-`~/.claude/settings.json`. `WARMLINE_TTL_MIN` is honored by both the statusline
-and `warmline-audit`.
+`~/.claude/settings.json`.
+
+`WARMLINE_TTL_MIN` no longer affects the statusline, which reads the TTL from
+Claude Code's own `prompt_cache` data. It still applies to `warmline-audit`,
+which grades historical turns where no such field was ever recorded — that
+split is the whole design: **live truth comes from Claude Code, history comes
+from warmline.** `WARMLINE_STATE_DIR` and `WARMLINE_DEBUG` are gone with the
+stamp files the statusline no longer keeps.
 
 ## Compatibility
 

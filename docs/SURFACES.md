@@ -5,7 +5,7 @@
 Claude Code is one engine behind several front ends. warmline is three
 independent pieces, and they don't all reach every front end:
 
-| Front end | statusline | `warmline-audit` / `watch` | keep-warm policy |
+| Front end | statusline | `warmline audit` / `watch` | keep-warm policy |
 |---|---|---|---|
 | Terminal CLI (`claude`) | ✅ | ✅ | ✅ |
 | Desktop app — Code tab, local session | ❌ not rendered | ✅ same transcripts | ✅ same CLAUDE.md |
@@ -51,7 +51,7 @@ cache health  ██████████████████████
 105 API turns; HOT 103  PARTIAL 2
 ```
 
-So `warmline-audit --all` already covers your desktop sessions — they're in the
+So `warmline audit --all` already covers your desktop sessions — they're in the
 ranking with everything else, no flag needed. (The same is expected of the IDE
 extensions, which bundle the same engine and share `~/.claude`; the desktop
 case is the one we confirmed end to end.)
@@ -72,7 +72,7 @@ What differs is the *scheduling mechanism* the agent reaches for: the CLI has
 `ScheduleWakeup` (or the `/loop` fallback), the desktop app has Scheduled
 tasks. Neither is guaranteed on every build, which is why the policy is written
 to degrade to "simply inert" rather than to fail loudly — and why
-[`warmline-audit`](AUDIT.md) is the way to check whether a long wait actually
+[`warmline audit`](AUDIT.md) is the way to check whether a long wait actually
 stayed warm.
 
 ## Cloud sessions: entirely out of reach

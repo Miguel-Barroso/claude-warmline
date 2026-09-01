@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 240" font-family="'SF Mono', Menlo, 'Cascadia Code', Consolas, monospace">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 348" font-family="'SF Mono', Menlo, 'Cascadia Code', Consolas, monospace">
   <!-- terminal window -->
-  <rect x="1" y="1" width="818" height="238" rx="10" fill="#0d1117" stroke="#30363d"/>
+  <rect x="1" y="1" width="818" height="346" rx="10" fill="#0d1117" stroke="#30363d"/>
   <circle cx="26" cy="19" r="6" fill="#ff5f57"/>
   <circle cx="46" cy="19" r="6" fill="#febc2e"/>
   <circle cx="66" cy="19" r="6" fill="#28c840"/>
@@ -8,14 +8,22 @@
   <line x1="1" y1="37" x2="819" y2="37" stroke="#21262d"/>
 
   <!-- hot -->
-  <text x="24" y="74" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 27% (53k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950" font-weight="bold">cache HOT (cold ~13:04)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950">keep-warm on</tspan></text>
-  <text x="24" y="93" font-size="11" font-style="italic" fill="#8b949e">warm — the previous request read its whole prefix from the cache; it expires at the time shown</text>
+  <text x="24" y="74" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 27% (53k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950" font-weight="bold">cache HOT (cold ~13:04)</tspan></text>
+  <text x="24" y="93" font-size="11" font-style="italic" fill="#8b949e">warm — Claude Code reports the prefix inside its TTL, expiring at the wall-clock time shown</text>
 
-  <!-- cold, rebuilt -->
-  <text x="24" y="128" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#d29922" font-weight="bold">cache COLD(rebuilt)</tspan><tspan fill="#6e7681"> | </tspan>gap 9m<tspan fill="#6e7681"> | </tspan><tspan fill="#3fb950">keep-warm on</tspan></text>
-  <text x="24" y="147" font-size="11" font-style="italic" fill="#8b949e">the prefix was invalidated (e.g. /compact) and has just been re-cached at ~2&#215; input price</text>
+  <!-- hot, inside the warning window -->
+  <text x="24" y="128" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#d29922" font-weight="bold">cache HOT (cold ~13:04)</tspan></text>
+  <text x="24" y="147" font-size="11" font-style="italic" fill="#8b949e">the same wording in yellow inside the last 15 minutes — colour only, so nothing shifts width</text>
 
-  <!-- cold, ttl -->
-  <text x="24" y="182" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#f85149" font-weight="bold">cache COLD(ttl?)</tspan><tspan fill="#6e7681"> | </tspan>gap 74m<tspan fill="#6e7681"> | </tspan><tspan fill="#6e7681">keep-warm off</tspan></text>
-  <text x="24" y="201" font-size="11" font-style="italic" fill="#8b949e">quiet for longer than the TTL — the cache has expired; cheapest moment to /compact</text>
+  <!-- cold -->
+  <text x="24" y="182" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 61% (243k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#f85149" font-weight="bold">cache COLD</tspan></text>
+  <text x="24" y="201" font-size="11" font-style="italic" fill="#8b949e">outside its TTL — the next turn re-caches the whole prefix at ~2&#215; input price</text>
+
+  <!-- caching never happened -->
+  <text x="24" y="236" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 12% (24k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#6e7681">cache off</tspan></text>
+  <text x="24" y="255" font-size="11" font-style="italic" fill="#8b949e">no response has ever reported cache tokens — caching is off, or this gateway never reports it</text>
+
+  <!-- nothing to report yet -->
+  <text x="24" y="290" font-size="13.5" fill="#e6edf3">Fable 5<tspan fill="#6e7681"> | </tspan>claude-warmline<tspan fill="#6e7681"> | </tspan><tspan fill="#79c0ff">ctx 3% (6k)</tspan><tspan fill="#6e7681"> | </tspan><tspan fill="#6e7681">cache ?</tspan></text>
+  <text x="24" y="309" font-size="11" font-style="italic" fill="#8b949e">no cache data — before the session's first API response, or Claude Code older than v2.1.251</text>
 </svg>

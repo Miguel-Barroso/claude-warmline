@@ -3,24 +3,29 @@
 [← back to the README](../README.md)
 
 ```sh
-warmline-audit --help               # every flag, including the ones below
-warmline-audit                      # latest session of the current project
-warmline-audit path/to/session.jsonl
-warmline-audit --json               # the same report, machine-readable
-warmline-audit --ttl 5              # force a TTL instead of detecting it
-warmline-audit --price 3            # add dollar estimates, given your
+warmline audit --help               # every flag, including the ones below
+warmline audit                      # latest session of the current project
+warmline audit path/to/session.jsonl
+warmline audit --json               # the same report, machine-readable
+warmline audit --ttl 5              # force a TTL instead of detecting it
+warmline audit --price 3            # add dollar estimates, given your
                                     # model's base INPUT price per MTok
                                     # (bare --price = $3; --price-in works too)
-warmline-audit --price-out 15       # OUTPUT price per MTok; defaults to
+warmline audit --price-out 15       # OUTPUT price per MTok; defaults to
                                     # 5x the input price
-warmline-audit --all --price 3      # every session on this machine,
-                                    # ranked by estimated avoidable premium
-warmline-audit --live               # which sessions are warm right now
+warmline audit --all --price 3      # every session on this machine,
+                                    # ranked by avoidable cold tokens
+warmline audit --live               # which sessions are warm right now
 warmline watch                      # ...re-rendered live until ctrl-c
 ```
 
-(Installed into `~/.local/bin/`; from a checkout, `./warmline-audit`.
-`warmline audit …` is the same thing.)
+**Two spellings, one program.** `warmline audit …` is the primary form — one
+command, discoverable from `warmline --help`. It runs `warmline-audit`, the
+executable the installer puts in `~/.local/bin/`, which stays fully supported
+and is the form to use in scripts you've already written, from a checkout
+(`./warmline-audit`), and on [manual/Windows installs](INSTALL.md#windows),
+where the `warmline` wrapper (bash) isn't available. Nothing is deprecated;
+error messages print the program's own name, `warmline-audit`.
 
 Transcripts are read from `$CLAUDE_CONFIG_DIR/projects` (default
 `~/.claude/projects`) — where every local front end of the Claude Code engine
@@ -81,11 +86,18 @@ Reading it, top to bottom:
 - The **output line** keeps the bill honest: output tokens are priced at their
   own (higher) rate, and they are never cached — no amount of warmth changes
   that part of the cost. Everything else on this report is input-side.
-- The last line, **estimated avoidable premium**, is what the *potentially*
-  avoidable cold re-caches cost *over* warm reads of the same tokens (a cold
-  re-cache bills ~2× base input; the warm read it replaced would have billed
-  ~0.1× — a 1.9× difference). An estimate from recorded token counts, never
-  billing data — see ["avoidable", precisely](#what-avoidable-means--precisely).
+- **Two dollar figures, and they usually differ.** The `at $3/MTok base input:`
+  line prices *every* cold re-cache in the session. The closing **estimated
+  avoidable premium** prices the same re-caches **minus each session's first
+  cache write**, which no session can avoid. Both read `$0.57` here only because
+  this session resumed into a still-warm cache and never paid a session-start
+  write; a session that starts cold shows the first number higher than the
+  second (a real one on the same machine: `~$0.67` against `~$0.48`). Either way
+  the figure is what cold re-caching cost *over* warm reads of the same tokens —
+  a cold re-cache bills ~2× base input where the warm read it replaced would
+  have billed ~0.1×, a 1.9× difference — and both are estimates of **exposure**
+  computed from recorded token counts, never billing data. See
+  ["avoidable", precisely](#what-avoidable-means--precisely).
 
 ## Verdicts
 
@@ -162,12 +174,44 @@ leak. Sessions at the top with big `ttl` counts are keep-warm candidates —
 money lost to walking away. Big `rebuilt`/`unknown` counts mean prefix churn:
 something rewrote the conversation prefix between turns. Lots of `auto-compact`
 means sessions routinely slamming into the context ceiling, where
-[compacting earlier and deliberately](../README.md#coming-back-cold-compact-clear-or-neither)
+[compacting earlier and deliberately](#when-you-come-back-cold)
 is cheaper. The split on the last line is concentration: is the leak a few
 disasters, or spread thin? On this machine, thin — the top five sessions carry
 less than a third of the premium, which fits the honest headline that silent
 prefix drift (`unknown`, 39%) rebuilt more caches than compaction (44 events,
 19%) did. The leak is rarely where you expect it.
+
+## When you come back cold
+
+The audit tells you where the cold happened. This is what to do when you are
+staring at one — a `COLD(ttl?)` on the statusline, or a big context you know has
+gone quiet past its TTL. The cache is gone; whatever you do next, that context
+gets processed once more at the expensive uncached rate. The only question is
+what that one unavoidable pass buys you:
+
+- **You still need the conversation history → `/compact`.** Compaction must read
+  the whole conversation once to summarize it. On a warm cache that read would be
+  cheap — but it would also destroy a cache you already paid 2× to build, which is
+  why compacting while `HOT` is the worst-timed move (unless you're out of context
+  window and have no choice). On a cold cache the expensive pass was going to
+  happen on your very next message anyway — compaction just redirects it into
+  producing a small summary, so from then on you cache and carry a few thousand
+  tokens instead of 100k+. `/compact` has the most benefit exactly when the cache
+  is already dead.
+- **Your state is written down outside the conversation → `/clear`.** If what you
+  need lives in memory files, a plan document, or the code and git history,
+  `/clear` skips even the summarization pass — nothing ever pays to read the old
+  context again. A fresh session's prefix is just the system prompt, your
+  CLAUDE.md, and the memory index; files are re-read only as they become
+  relevant, which is almost always far cheaper than one summarization pass over
+  a 100k+ conversation.
+- **Small context → do nothing.** Going cold on 20k tokens is cheap to rebuild.
+  Everything here exists for the 100k+ case.
+
+The same reasoning explains the `auto-compact` rows in your audit: a compaction
+you didn't choose, fired near the context ceiling, rewrites the prefix at
+whatever moment it happens — including while the cache was warm. See
+[auto-compact: the one you don't choose](KEEP-WARM.md#auto-compact-the-one-you-dont-choose).
 
 ## Which sessions are warm right now? `--live` / `warmline watch`
 
@@ -249,25 +293,42 @@ counts that. What it counts as *avoidable* is every token re-cached cold
 drift, which different timing (a keep-warm ping, an earlier deliberate
 `/compact`, a stable prefix) *might* have prevented.
 
-That makes the number an estimate of exposure, not money actually wasted: some
-of it is unpreventable in practice (a TTL expiry while your laptop was asleep
-counts as "avoidable", though no ping could have fired), and all of it is
-computed from token counts recorded in your transcripts — warmline never sees,
-and cannot see, what Anthropic actually billed your account.
+**Read it as a measure of exposure, not of money actually wasted.** The word
+"avoidable" in the printed label marks one specific exclusion — each session's
+unavoidable first write — and nothing more. It is not a claim that everything
+counted could have been prevented, and a fair amount of it could not have been:
+a TTL expiry while your laptop was asleep is counted, though no ping could have
+fired; so is an `auto-compact`, which
+[nothing prevents](KEEP-WARM.md#auto-compact-the-one-you-dont-choose) once the
+context window fills. What the number is good for is comparison and ranking —
+which sessions, and which causes, carry your exposure — not a refund estimate.
+
+And all of it is computed from token counts recorded in your own transcripts:
+warmline never sees, and cannot see, what Anthropic actually billed your
+account.
 
 ## Output modes
 
 - Bars and colors are TTY-gated: piped or CI output stays plain. `NO_COLOR` /
   `WARMLINE_NO_COLOR` force plain; `WARMLINE_FORCE_COLOR` forces color without
   a TTY (the opt-outs still win).
-- `--json` is byte-stable and never decorated — per-session records plus a
-  `total` object, including `avoidable_cold_tokens`, `tokens_output`, each
-  session's `ttl_min`/`ttl_source`, and, with `--price`,
-  `avoidable_premium_usd` plus the `price_in_per_mtok`/`price_out_per_mtok`
-  the run used. Percentages are a display convenience only — the JSON carries
-  the raw counts. It combines with `--all` and `--live`, and it is the form to
-  reach for when something other than a human is reading: an agent auditing its
-  own session, CI, or a terminal proxy that reflows the table's columns.
+- `--json` is byte-stable and never decorated. Percentages are a display
+  convenience only — the JSON carries the raw counts. It combines with `--all`
+  and `--live`, and it is the form to reach for when something other than a
+  human is reading: an agent auditing its own session, CI, or a terminal proxy
+  that reflows the table's columns. The shape differs by mode:
+  - **`--all --json`** — per-session records plus a `total` object, including
+    `avoidable_cold_tokens`, `tokens_output`, each session's
+    `ttl_min`/`ttl_source`, and, with `--price`, `avoidable_premium_usd` (on
+    both the sessions and the total) plus the
+    `price_in_per_mtok`/`price_out_per_mtok` the run used.
+  - **single-session `--json`** — a `summary` object plus one record per turn.
+    With `--price` the summary carries `cold_extra_usd` (every cold re-cache,
+    session-start write included), `cache_read_usd` and `output_usd`. Note that
+    `avoidable_premium_usd` is currently emitted by `--all --json` only; for one
+    session, derive it from `avoidable_cold_tokens` (× 1.9 ×
+    `price_in_per_mtok` ÷ 1e6), which is the figure the human report prints on
+    its closing line.
 - `--ttl N` forces the cache TTL for every session (also `WARMLINE_TTL_MIN`);
   unset, it is [auto-detected per session](#the-ttl-is-auto-detected).
 - `--help` prints all of the above. (Before v1.8.0 it didn't — `--help` was

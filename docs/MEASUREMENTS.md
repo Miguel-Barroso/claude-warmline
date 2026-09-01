@@ -4,7 +4,7 @@
 
 Every claim warmline makes is checkable against real transcripts — Claude Code
 records `cache_read_input_tokens` and `cache_creation_input_tokens` for every
-API turn, and [`warmline-audit`](AUDIT.md) grades them.
+API turn, and [`warmline audit`](AUDIT.md) grades them.
 
 ## A real 13-hour session
 
@@ -74,17 +74,22 @@ turns.
 
 ## Eight weeks of one machine's history
 
-`warmline-audit --all` over 147 sessions puts the total estimated avoidable
-premium at **~$69** at Sonnet base input pricing — and attributes 19% of the
-cold-cause events to compaction but **39% to unexplained prefix drift**. The
-leak is rarely where you expect it.
+`warmline audit --all` over 147 sessions puts the total estimated avoidable
+premium at **~$69** at Sonnet base input pricing — an estimate of exposure
+computed from token counts in those transcripts, **not billing data**, and one
+that excludes each session's unavoidable first cache write while still counting
+some cold nobody could have prevented (see
+["avoidable", precisely](AUDIT.md#what-avoidable-means--precisely)). The same
+run attributes 19% of the cold-cause events to compaction and leaves **39%
+unattributed** — a residual bucket the transcript gave no proof for, not a
+named cause. The leak is rarely where you expect it.
 
 ## Measure your own
 
 ```sh
-warmline-audit --all --price 3     # your machine, your model's base input price
-warmline-audit --price 3           # this session, turn by turn
-warmline-audit --price 3 --price-out 15   # output priced explicitly
+warmline audit --all --price 3     # your machine, your model's base input price
+warmline audit --price 3           # this session, turn by turn
+warmline audit --price 3 --price-out 15   # output priced explicitly
                                           # (omitted, it defaults to 5x input)
 ```
 

@@ -3,76 +3,65 @@
 
 Renders one line:
 
-    Fable 5 | my-project | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m | keep-warm on
+    Fable 5 | my-project | ctx 43% (168k) | cache HOT (cold ~13:04)
 
-Every colored field is green/yellow/red unless NO_COLOR or
-WARMLINE_NO_COLOR is set. Cache verdict:
-  HOT (cold ~13:04)  the previous request read from the prompt cache; the
-                  absolute wall-clock expiry makes the line stale-proof --
-                  even a frozen repaint read hours later tells the truth
-  HOT (cold in Nm)  still warm, but the idle gap is within 15 minutes of
-                  the TTL -- ping or come back now, or pay the rebuild
-  COLD(rebuilt)   the previous request wrote the cache without reading it
-                  (the prefix was cold and has just been re-cached)
-  COLD(ttl?)      inferred: this session has been quiet for longer than the
-                  cache TTL, so the prefix has expired regardless of what
-                  the stale usage fields say
-  ?               usage fields unavailable
+The cache verdict comes entirely from the `prompt_cache` object Claude Code
+puts on stdin (v2.1.251+). warmline does not infer cache state: it does not
+read the transcript, does not keep a stamp file, and does not time the gap
+between turns. Claude Code owns the truth; this script owns the display.
 
-The installer wires statusLine.refreshInterval (60s) into settings.json,
-so Claude Code re-runs this script while the session idles and COLD(ttl?)
-appears within a minute of the TTL passing -- no more stale HOT. That
-refresh runs this local script only: it never talks to the API, costs
-nothing, and does not keep the cache warm. On Claude Code versions without
-refreshInterval the line is event-driven and can freeze; the absolute
-expiry time in the HOT verdict keeps even a frozen line honest.
+  cache HOT (cold ~13:04)  the cached prefix is warm and leaves its TTL at
+                  the wall-clock time shown. Absolute, not a countdown, so a
+                  line frozen on screen for hours still reads truthfully.
+                  Yellow within EXPIRY_WARN_MIN of the expiry -- same text,
+                  colour only, so nothing shifts width as the moment nears
+  cache HOT 5m    as above, on the 5-minute TTL. The badge appears only for
+                  the short bucket: usage credits, an API key, a cloud
+                  provider. The 1-hour case is the norm and goes unlabelled,
+                  because a field that never changes is not worth reading
+  cache COLD      the prefix is outside its TTL; the next turn re-caches it
+  cache off       caching_observed is false -- prompt caching is off, or this
+                  provider or gateway never reports cache tokens. Not a
+                  failure to wait out: nothing here will warm up
+  cache ?         no prompt_cache object. Claude Code before v2.1.251, or
+                  before the main conversation's first API response
 
-The usage numbers Claude Code passes to the statusline describe the
-PREVIOUS request, so HOT/COLD(rebuilt) are authoritative but lag one
-turn; COLD(ttl?) is a time inference and is marked with a "?".
+`cache COLD`, `cache off` and `cache ?` are three different facts and are
+deliberately not collapsed: "the cache expired", "caching is not happening"
+and "warmline cannot see" call for different responses, and guessing between
+them is how a cache gauge starts lying.
 
-The keep-warm field reports whether the optional keep-warm policy is
-installed, read from the real CLAUDE.md on every render (never a state
-file), matching `warmline keep-warm status`:
-
-  keep-warm on    the marker-delimited policy block is in CLAUDE.md and
-                  matches the installed policy (green)
-  keep-warm on*   installed, but the block differs from
-                  warmline-keep-warm.md -- an older release's wording, or a
-                  hand edit, so the agent is following superseded
-                  instructions (yellow); refresh with
-                  `warmline keep-warm off && warmline keep-warm on`
-  keep-warm off   no block (dim)
-  keep-warm ?     one marker without its pair -- a malformed block that the
-                  agent may read as truncated policy (yellow); same fix
-
-"on" means the policy is installed, not that a ping is scheduled: it is an
-instruction the agent follows during long waits, and `warmline-audit` is
-how you check whether it actually worked.
+The statistics Claude Code also offers here -- hit_ratio, misses,
+requests, recache_tokens_if_cold -- are deliberately not shown. They are
+retrospective, they name no action you can take mid-session, and `/usage`
+already prints them on demand. `warmline audit` is where history belongs.
 
 The ctx field turns yellow past WARMLINE_CTX_WARN_PCT (default 80) because
 auto-compaction -- measured firing around 84% of the window -- rewrites the
 prefix and voids the cache without being asked. Near the line, a wait isn't
 worth keeping warm: the prefix is about to be replaced anyway.
 
-The gap is measured per session via a stamp file that stores the last-seen
-usage snapshot; its mtime moves only when the snapshot changes -- i.e. when
-an API turn actually happened -- so repaints of an idle session don't reset
-the clock, and COLD(ttl?) appears (and persists) on the next repaint after
-the TTL passes. Concurrent sessions don't reset each other's clock.
+The keep-warm field appears only when something is wrong with it, read from
+the real CLAUDE.md on every render (never a state file):
+
+  keep-warm on*   installed, but the block no longer matches
+                  warmline-keep-warm.md -- an older release's wording, or a
+                  hand edit, so the agent is following superseded
+                  instructions; refresh with
+                  `warmline keep-warm off && warmline keep-warm on`
+  keep-warm ?     one marker without its pair -- a malformed block that the
+                  agent may read as truncated policy; same fix
+
+A correctly installed policy renders nothing. `warmline keep-warm status`
+answers "is it on"; a statusline field that has read the same green `on` for
+three months is wallpaper, and next to a red `cache COLD` it reads as a
+contradiction.
 
 Configuration (environment variables):
-  WARMLINE_TTL_MIN    prompt-cache TTL in minutes. Unset, the TTL is
-                      auto-detected from the transcript's last cache write
-                      (usage entries record the ephemeral_5m/1h bucket),
-                      falling back to 60
-  WARMLINE_STATE_DIR  stamp-file directory (default ~/.claude/warmline-state)
   WARMLINE_NO_COLOR   if set (or NO_COLOR), plain output without ANSI colors
-  WARMLINE_NO_KEEPWARM  if set, omit the keep-warm field
+  WARMLINE_NO_KEEPWARM  if set, never show the keep-warm field
   WARMLINE_CTX_WARN_PCT  context-window percentage at which the ctx field
                       turns yellow (default 80; 0 or less disables it)
-  WARMLINE_DEBUG      if set, keep the last raw statusline payload in
-                      $WARMLINE_STATE_DIR/last-payload.json for inspection
   CLAUDE_CONFIG_DIR   Claude Code's config directory (default ~/.claude);
                       its CLAUDE.md is where the keep-warm block lives
 """
@@ -82,12 +71,10 @@ import re
 import sys
 import time
 
-TTL_MIN = float(os.environ.get("WARMLINE_TTL_MIN", "60"))
-STATE_DIR = os.path.expanduser(
-    os.environ.get("WARMLINE_STATE_DIR", "~/.claude/warmline-state")
-)
-STAMP_MAX_AGE_DAYS = 7
+# how close to expiry the HOT verdict turns yellow. Capped at half the TTL,
+# so the 5-minute bucket doesn't spend its whole life in warning colours.
 EXPIRY_WARN_MIN = 15
+TTL_MINUTES = {"5m": 5.0, "1h": 60.0}
 
 CLAUDE_DIR = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
 KW_BEGIN = "<!-- >>> claude-warmline keep-warm >>> -->"
@@ -118,10 +105,7 @@ def keep_warm_state():
     'stale' is the case a plain on/off hides: the block is installed but no
     longer matches warmline-keep-warm.md, so an upgrade left the agent
     reading a previous release's policy. Same normalized comparison
-    `warmline keep-warm status` reports as `policy modified`. It adds one
-    small read and two regex passes to a render that already read CLAUDE.md
-    -- measured at 0.15 ms, against a refreshInterval of 60 s -- and the
-    comparison is skipped entirely unless both markers are present.
+    `warmline keep-warm status` reports as `policy modified`.
     """
     try:
         with open(os.path.join(CLAUDE_DIR, "CLAUDE.md")) as f:
@@ -141,76 +125,53 @@ def keep_warm_state():
     return "on" if norm(body) == norm(policy) else "stale"
 
 
-def sniff_ttl(transcript_path):
-    """TTL in minutes from the transcript's last cache write, or None.
+def cache_field(prompt_cache, now):
+    """(text, color) for the cache verdict, from the authoritative object.
 
-    Transcript usage entries record which bucket a cache write went to
-    (cache_creation.ephemeral_5m/1h_input_tokens); the statusline payload
-    doesn't carry that, so peek at the transcript tail.
+    Gated on the shape of the payload rather than on the reported Claude Code
+    version: any build that sends a usable `prompt_cache` gets the real
+    verdict, and any build that doesn't gets `?`. Nothing here falls back to
+    guessing, because a confident wrong verdict is worse than an honest "?".
     """
-    if not transcript_path:
-        return None
-    try:
-        with open(transcript_path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - 65536))
-            tail = f.read().decode("utf-8", "replace")
-    except OSError:
-        return None
-    for line in reversed(tail.splitlines()):
-        if '"ephemeral_5m_input_tokens"' not in line:
-            continue
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue  # the 64k window can start mid-line
-        if not isinstance(e, dict):
-            continue
-        cc = ((e.get("message") or {}).get("usage") or {}).get("cache_creation") or {}
-        e5 = cc.get("ephemeral_5m_input_tokens") or 0
-        e1 = cc.get("ephemeral_1h_input_tokens") or 0
-        if e5 or e1:
-            return 5 if e5 > e1 else 60
-    return None
+    if not isinstance(prompt_cache, dict):
+        return "cache ?", DIM              # pre-2.1.251, or pre-first-response
 
+    if prompt_cache.get("caching_observed") is False:
+        return "cache off", DIM            # nothing to wait for
 
-def session_state(session_id, snapshot, raw):
-    """(minutes since this session's last API turn or None, fresh_turn).
+    # `warm` is the only warmth signal, checked before the clock on purpose:
+    # at expiry Claude Code flips it to false but leaves `expires_at` at its
+    # old value rather than nulling it (observed on 2.1.252).
+    warm = prompt_cache.get("warm")
+    if warm is False:
+        return "cache COLD", RED
+    if warm is not True:
+        return "cache ?", DIM              # object present but unusable
 
-    The stamp is rewritten -- resetting its mtime -- only when the usage
-    snapshot differs from the stored one. fresh_turn is True when a change
-    was seen against a previous snapshot: the usage fields are then current,
-    not stale, and take precedence over the TTL inference.
-    """
-    gap, fresh = None, False
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        stamp = os.path.join(STATE_DIR, session_id + ".stamp")
-        prev = None
-        try:
-            gap = (time.time() - os.path.getmtime(stamp)) / 60
-            with open(stamp) as f:
-                prev = f.read()
-        except OSError:
-            pass
-        if prev != snapshot:
-            fresh = prev is not None
-            with open(stamp, "w") as f:
-                f.write(snapshot)
-        if os.environ.get("WARMLINE_DEBUG"):
-            with open(os.path.join(STATE_DIR, "last-payload.json"), "w") as f:
-                f.write(raw)
-        cutoff = time.time() - STAMP_MAX_AGE_DAYS * 86400
-        for name in os.listdir(STATE_DIR):
-            path = os.path.join(STATE_DIR, name)
-            try:
-                if os.path.getmtime(path) < cutoff:
-                    os.remove(path)
-            except OSError:
-                pass
-    except OSError:
-        pass
-    return gap, fresh
+    ttl = prompt_cache.get("ttl")
+    badge = " 5m" if ttl == "5m" else ""   # anomaly only; 1h is the norm
+
+    expires_at = prompt_cache.get("expires_at")
+    if not isinstance(expires_at, (int, float)) or isinstance(expires_at, bool):
+        return "cache HOT" + badge, GREEN  # warm, but no usable expiry
+
+    remaining_min = (expires_at - now) / 60
+    if remaining_min <= 0:
+        # The authoritative expiry has passed while `warm` still claims true.
+        # Claude Code re-runs this script at expires_at (verified on 2.1.252),
+        # so normally the flip has already arrived; this covers a repaint that
+        # the trigger couldn't deliver, such as one slept through.
+        return "cache COLD", RED
+
+    # yellow for the final EXPIRY_WARN_MIN, but never for more than half the
+    # TTL: 15 minutes of an hour, 2.5 of five. An unrecognised ttl string is
+    # left uncapped rather than guessed at, since assuming a short TTL would
+    # paint most of a long one yellow.
+    ttl_min = TTL_MINUTES.get(ttl)
+    warn_min = EXPIRY_WARN_MIN if ttl_min is None else min(EXPIRY_WARN_MIN, ttl_min / 2)
+    cold_at = time.strftime("%H:%M", time.localtime(expires_at))
+    text = "cache HOT%s (cold ~%s)" % (badge, cold_at)
+    return text, YELLOW if remaining_min <= warn_min else GREEN
 
 
 def main():
@@ -221,57 +182,12 @@ def main():
         print("warmline: bad input")
         return
 
-    cw = d.get("context_window") or {}
-    usage = cw.get("current_usage") or {}
-    cache_read = usage.get("cache_read_input_tokens") or 0
-    cache_creation = usage.get("cache_creation_input_tokens") or 0
-    snapshot = json.dumps(
-        [cache_read, cache_creation, cw.get("total_input_tokens"),
-         usage.get("input_tokens")]
-    )
-
-    session = str(d.get("session_id") or "default")
-    session = "".join(c for c in session if c.isalnum() or c in "-_") or "default"
-    gap_min, fresh = session_state(session, snapshot, raw)
-
-    if gap_min is None:
-        tp = d.get("transcript_path")
-        if tp and os.path.exists(tp):
-            gap_min = (time.time() - os.path.getmtime(tp)) / 60
-
     model = (d.get("model") or {}).get("display_name") or (d.get("model") or {}).get("id") or "?"
     ws = d.get("workspace") or {}
     cwd = os.path.basename(ws.get("current_dir") or d.get("cwd") or "") or "?"
-
-    ttl_min = TTL_MIN
-    if "WARMLINE_TTL_MIN" not in os.environ:
-        ttl_min = sniff_ttl(d.get("transcript_path")) or TTL_MIN
-
-    # a fresh turn just reset the clock, so the full TTL lies ahead; the
-    # stamp's mtime (which gap_min was read from) predates the reset
-    remaining = ttl_min if fresh else (
-        None if gap_min is None else ttl_min - gap_min)
-    warn_min = min(EXPIRY_WARN_MIN, ttl_min / 2)
-    if not fresh and remaining is not None and remaining <= 0:
-        cache = paint("cache COLD(ttl?)", RED)
-    elif cache_read > 0:
-        if remaining is None:
-            cache = paint("cache HOT", GREEN)
-        elif not fresh and remaining <= warn_min:
-            cache = paint("cache HOT (cold in %dm)" % max(1, round(remaining)), YELLOW)
-        else:
-            # absolute wall-clock expiry: stale-proof on harnesses that
-            # never repaint an idle line
-            cold_at = time.strftime(
-                "%H:%M", time.localtime(time.time() + remaining * 60))
-            cache = paint("cache HOT (cold ~%s)" % cold_at, GREEN)
-    elif cache_creation > 0:
-        cache = paint("cache COLD(rebuilt)", YELLOW)
-    else:
-        cache = paint("cache ?", DIM)
-
     parts = [model, cwd]
 
+    cw = d.get("context_window") or {}
     pct = cw.get("used_percentage")
     tokens = cw.get("total_input_tokens")
     try:
@@ -285,17 +201,16 @@ def main():
     except (TypeError, ValueError):
         pass
 
-    parts.append(cache)
-
-    if gap_min is not None and gap_min >= 5:
-        parts.append(f"gap {int(gap_min)}m")
+    text, color = cache_field(d.get("prompt_cache"), time.time())
+    parts.append(paint(text, color))
 
     if SHOW_KEEPWARM:
         kw = keep_warm_state()
-        # the star is the whole point of 'stale': still on, no longer current
-        label = "on*" if kw == "stale" else kw
-        parts.append(paint("keep-warm " + label,
-                           {"on": GREEN, "off": DIM}.get(kw, YELLOW)))
+        # only the states that need doing something about: a correct policy
+        # and a deliberate absence are both silent
+        if kw in ("stale", "?"):
+            label = "on*" if kw == "stale" else "?"
+            parts.append(paint("keep-warm " + label, YELLOW))
 
     print(" | ".join(parts))
 

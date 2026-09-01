@@ -6,114 +6,111 @@
 [![version](https://img.shields.io/github/v/tag/Miguel-Barroso/claude-warmline?label=version)](https://github.com/Miguel-Barroso/claude-warmline/tags)
 [![license](https://img.shields.io/github/license/Miguel-Barroso/claude-warmline)](LICENSE)
 
-**See when Claude Code quietly re-processes your entire conversation — and prevent the avoidable part.**
+**Prompt-cache observability and auditing for Claude Code.**
 
-Lightweight observability for Claude Code's hidden context/cache economics: a
-statusline, an auditor, and an optional keep-warm policy. No dependencies
-beyond `python3` and `bash`; nothing phones home — everything is read from data
-Claude Code already records on your machine.
+Claude Code re-sends your entire conversation on every turn. A server-side
+prompt cache is what makes that affordable: while it holds, each turn *reads*
+the conversation back at roughly **0.1×** the normal input price; once it's
+gone, the next turn re-creates it at about **2×**. Claude Code knows all of
+this and will tell you when asked — `/usage` prints the live cache state, and
+since v2.1.251 the statusline payload carries it. What it doesn't do is keep
+it in front of you, or tell you what going cold has cost you across last
+month's sessions. warmline does both: it puts Claude Code's own cache truth on
+the status line, and audits the history locally, from data Claude Code already
+records on your machine, with no dependencies beyond `python3` and `bash`, and
+nothing phones home.
 
-![The warmline statusline in its three states: cache HOT in green with keep-warm on, cache COLD(rebuilt) in yellow, cache COLD(ttl?) in red with keep-warm off](docs/statusline.svg)
+![The warmline statusline in five states: cache HOT in green with its expiry time, cache HOT in yellow as the expiry nears, cache COLD in red, and cache off and cache ? dimmed when Claude Code reports no cache data](docs/statusline.svg)
 
-## The 30-second version
+## What it does
 
-Claude doesn't remember anything between messages. Every time you press enter,
-Claude Code re-sends the *entire* conversation so far — system prompt, tools,
-every file it read, every reply. On a long session that's easily 100k+ tokens
-of input, every single turn.
+**Observe → Explain → Measure → Mitigate.**
 
-What makes this affordable is a server-side **prompt cache**. Think of it as a
-workspace Claude has already set up for your conversation: while the workspace
-stands, each new message *reads* it at roughly **0.1×** the normal input price.
-Setting it up costs about **2×** — paid once, then amortized over every turn.
+| | | |
+|---|---|---|
+| **Observe** | the `warmline` statusline | what the cache is doing right now |
+| **Explain** | `warmline audit` | what happened in one session, turn by turn |
+| **Measure** | `warmline audit --all` | where the exposure is across every session on this machine |
+| **Mitigate** | `warmline keep-warm` | *optional*: prevent one preventable failure mode |
 
-The catch: the workspace is quietly torn down after **about an hour of
-inactivity**, and instantly whenever the start of the conversation is rewritten
-(`/compact` always triggers a full rebuild). Come back to a big session after
-lunch and your next message pays 2× on all of it, at exactly the moment you
-wanted results.
+The first three are read-only observation, and they are the point of the
+project. The fourth is opt-in, off by default, and deliberately bounded — see
+[optional: keep warm](#optional-keep-warm).
 
-Claude Code doesn't surface any of this. warmline makes it visible — and helps
-prevent the part that's avoidable.
-
-## Quick start
+## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 
 warmline status              # what's installed and on
-warmline keep-warm on        # optional: prevent avoidable cold starts
-```
-
-Then use Claude Code normally — the statusline shows the cache state live.
-When you want to know what a session (or all of them) actually cost:
-
-```sh
-warmline-audit               # this session, turn by turn
-warmline-audit --all         # every session, ranked by where the money leaked
+warmline audit               # this project's latest session, turn by turn
+warmline audit --all         # every session on this machine, ranked
 warmline watch               # every session's warmth, live, until ctrl-c
 ```
 
 [Install details, flags, updating, Windows →](docs/INSTALL.md)
 
-## Reading the line
+## Why it matters
+
+What gets re-sent is the *entire* conversation — system prompt, tools, every
+file it read, every reply — easily 100k+ input tokens on a long session, every
+single turn. The cache absorbs that, but it is torn down after **about an hour
+of inactivity**, and instantly whenever the start of the conversation is
+rewritten (`/compact` and auto-compaction both do this). Come back to a big
+session after lunch and your next message pays the rebuild on all of it, at
+exactly the moment you wanted results.
+
+Everything here exists for the 100k+ case. Going cold on 20k tokens is cheap.
+
+## Observe: the statusline
 
 ```
-Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04) | gap 12m | keep-warm on
+Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04)
 ```
 
 | Field | Meaning |
 |---|---|
-| `ctx 43% (168k)` | context-window utilization and input tokens in the conversation — yellow past 80%, where auto-compaction starts rewriting the prefix |
-| `cache HOT (cold ~13:04)` | the previous request read from the prompt cache; the cache expires at the time shown (green) |
-| `cache HOT (cold in 9m)` | still warm, but within 15 minutes of the TTL — act now or pay the rebuild (yellow) |
-| `cache COLD(rebuilt)` | the previous request found the prefix cold and re-cached it (yellow) |
-| `cache COLD(ttl?)` | *inferred*: quiet for longer than the TTL, so the cache has expired (red) |
-| `gap 12m` | minutes since this session's last API turn; idle repaints don't reset it |
-| `keep-warm on` | the [keep-warm policy](#keep-warm) is installed and current — `on*` if an upgrade left your CLAUDE.md block behind, `off` dim, `?` if the block is malformed |
+| `ctx 43% (168k)` | context-window utilization — yellow past 80%, where auto-compaction starts rewriting the prefix |
+| `cache HOT (cold ~13:04)` | the cached prefix is warm and leaves its TTL at the time shown; yellow within 15 minutes of it |
+| `cache HOT 5m` | as above, on the 5-minute TTL — usage credits, an API key, a cloud provider. The 1-hour case is the norm and goes unlabelled |
+| `cache COLD` | the prefix is outside its TTL; the next turn re-caches it |
+| `cache off` | prompt caching is off, or this provider or gateway never reports cache tokens. Nothing here will warm up |
+| `cache ?` | no cache data — Claude Code before v2.1.251, or before the session's first API response |
 
-The line can't go stale: the installer wires `refreshInterval: 60`, so Claude
-Code re-runs the gauge every minute even while the session just sits there —
-the countdown ticks, and `COLD(ttl?)` takes over within a minute of expiry
-instead of a green `HOT` frozen on screen all evening. (That refresh is a
-local repaint; it never touches the API and doesn't keep the cache warm.) Two
-honest caveats remain: the usage numbers describe the *previous* request, so
-`HOT`/`COLD(rebuilt)` lag one turn, and `COLD(ttl?)` is a time-based
-inference — hence the `?`.
+**Every one of these comes from Claude Code, not from warmline.** Since
+v2.1.251 the statusline payload carries the cache's real warmth, TTL and
+expiry timestamp, so warmline reads them instead of timing the gap between
+turns and guessing. `COLD`, `off` and `?` are kept distinct on purpose: "the
+cache expired", "caching isn't happening" and "warmline can't see" are three
+different facts, and collapsing them is how a cache gauge starts lying.
 
-[Every field, colors, the gap mechanics, troubleshooting →](docs/STATUSLINE.md)
+The expiry is absolute wall-clock, never a countdown — a frozen countdown is
+wrong, while a frozen clock is still true.
 
-## Coming back cold: `/compact`, `/clear`, or neither?
+[Every field, colors, troubleshooting →](docs/STATUSLINE.md)
 
-A `COLD(ttl?)` on a big context is a fork in the road. The cache is gone;
-whatever you do next, that context gets processed once more at the expensive
-uncached rate. The only question is what that one unavoidable pass buys you:
+### When you come back cold
 
-- **You still need the conversation history → `/compact`.** Compaction must read
-  the whole conversation once to summarize it. On a warm cache that read would be
-  cheap — but it would also destroy a cache you already paid 2× to build, which is
-  why compacting while `HOT` is the worst-timed move (unless you're out of context
-  window and have no choice). On a cold cache the expensive pass was going to
-  happen on your very next message anyway — compaction just redirects it into
-  producing a small summary, so from then on you cache and carry a few thousand
-  tokens instead of 100k+. `/compact` has the most benefit exactly when the cache
-  is already dead.
-- **Your state is written down outside the conversation → `/clear`.** If what you
-  need lives in memory files, a plan document, or the code and git history,
-  `/clear` skips even the summarization pass — nothing ever pays to read the old
-  context again. A fresh session's prefix is just the system prompt, your
-  CLAUDE.md, and the memory index; files are re-read only as they become
-  relevant, which is almost always far cheaper than one summarization pass over
-  a 100k+ conversation.
-- **Small context → do nothing.** Going cold on 20k tokens is cheap to rebuild.
-  Everything here exists for the 100k+ case.
+The cache is gone; that context gets processed once more at the uncached rate
+whatever you do next. The only question is what that one pass buys:
 
-## Where the money went
+- **You still need the conversation history →** `/compact`. The expensive pass
+  was coming anyway; this way it produces a summary you carry cheaply from then on.
+- **Your state is written down outside the conversation** (memory files, a plan
+  document, the code) **→** `/clear`. It skips even the summarization pass.
+- **Small context →** do nothing. Rebuilding 20k tokens is cheap.
+- **Never while `HOT`**, unless you are out of context window: compacting
+  destroys a cache you already paid ~2× to build.
 
-`warmline-audit` grades every recorded API request of a session — no lag, no
-inference — and `--all` ranks every session on the machine by **avoidable cold
-tokens**: everything re-cached cold *after* the first write a session can't
-avoid. Real output from one machine's 8 weeks of history:
+[The full reasoning →](docs/AUDIT.md#when-you-come-back-cold)
+
+## Explain and measure: the audit
+
+`warmline audit` grades every recorded API request of a session from the usage
+fields Claude Code wrote for it — no one-turn lag, unlike the statusline. `--all`
+does the same across every session on this machine and ranks them. (It runs the
+installed `warmline-audit`; both spellings work, and scripts pinned to the
+hyphenated one keep working.) Real output from 8 weeks of history:
 
 ```
 $ warmline-audit --all --price 3
@@ -136,109 +133,81 @@ where the cold came from
 estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 ```
 
-Each cold turn carries a cause where the transcript proves one — `/compact`,
-`auto-compact`, `model change`, `inactivity` — and an honest `unknown` where it
-doesn't (in practice, prefix drift: an edited CLAUDE.md, changed git state, MCP
-availability). The percentages make the ranking immediate: on this machine,
-silent drift caused 39% of the cold — more than all compaction combined — and
-the worst single session holds 11% of the entire leak. The leak is rarely
-where you expect it.
+Each cold turn carries a cause where the transcript **proves** one — `/compact`,
+`auto-compact`, `model change`, `inactivity`. Everything else lands in
+`unknown`, which is a **residual bucket, not a finding**: the transcript
+recorded no proof, so warmline declines to name a cause. Anthropic documents
+several prefix-invalidating actions a transcript never witnesses — changing the
+effort level, turning on fast mode, denying a whole tool, enabling or disabling
+a plugin, connecting an MCP server whose tools load into the prefix, and
+upgrading Claude Code itself — and any of them lands here. Editing CLAUDE.md
+mid-session does not: Anthropic lists that under the actions that *keep* the
+cache. Here `unknown` holds 39% of the cold, more than all compaction combined,
+and the worst single session holds 11% of the total — read that as "the largest
+share is unexplained", which is a reason to look, not a diagnosis.
+(Verdicts come from recorded usage, but the
+split between `COLD(rebuilt)` and `COLD(ttl)` rests on the TTL, auto-detected
+per session from its own cache-bucket records.)
 
-The premium is an estimate computed from token counts in your own transcripts,
-never billing data — and it prices input and output tokens separately, because
-Claude does: `--price` is your model's base **input** $/MTok (all cache
-economics live on that side), `--price-out` your **output** $/MTok, defaulting
-to 5× input as on the current price sheet. Output tokens are never cached, so
-the audit reports them on their own line rather than pretending warmth could
+**The dollar figures estimate exposure from token counts in your own
+transcripts. They are not billing data** — warmline never sees, and cannot see,
+what Anthropic actually billed you. The closing line is labeled `estimated
+avoidable premium`, where "avoidable" means only *after each session's
+unavoidable first cache write*: some of what it counts was never preventable,
+such as a TTL expiry while the laptop was asleep. `--price` is your model's base
+**input** $/MTok, where all cache economics live; output tokens are never cached,
+so the audit prices them on their own line rather than pretending warmth could
 save them.
 
-And where the audit grades the past, **`warmline watch`** shows the present: a
-live view of every session's warmth — which prefixes the cache still holds,
-and when each goes cold — re-rendered every 10 seconds. Sessions from the
-desktop app appear too; they write the same transcripts even though they can't
-render a statusline.
+Where the audit grades the past, **`warmline watch`** shows the present: every
+session's warmth, live, until ctrl-c. Desktop-app sessions appear too — they
+write the same transcripts even though they can't render a statusline.
 
 [Full walkthrough, verdicts, causes, `--all`, `--live`, `--json` →](docs/AUDIT.md)
 
-## Keep Warm
+## Optional: keep warm
 
-Everything above *observes*. Keep Warm is the optional half that *prevents*: a
-short instruction block in your `~/.claude/CLAUDE.md` telling the agent to ping
-a long, quiet wait about every 50 minutes, so the cache is still warm when the
-results land.
+Everything above observes. Keep Warm is the optional fourth capability: a short
+instruction block in your `~/.claude/CLAUDE.md` telling the agent to ping a long,
+quiet wait about every 50 minutes, so the cache is still warm when results land.
 
 ```sh
-warmline keep-warm on        # global, persists across sessions and updates
+warmline keep-warm on        # off by default; global; reversible
 warmline keep-warm status    # ON / OFF / INCONSISTENT (exit 0 / 1 / 2)
-warmline keep-warm off
-warmline awake               # no-sleep mode: one claude session with system
-                             # sleep held off; normal sleep returns on /exit
-warmline wait-for --pid N    # wake the session when a detached job ends
 ```
 
 It is **not a daemon** — no cron, no process, nothing outside a running Claude
 Code session. It skips when background tasks are already keeping the cache warm
 for free, skips small contexts, stops the moment work resumes, and gives up
-after ~10 hours. A ping costs ~0.1× your context; the rebuild it prevents costs
-~2×. The policy names no particular scheduler, only the requirement — something
-must re-enter the session inside one TTL, and must be removable — because
-builds differ in what they offer.
+after ~10 hours. Each ping is an ordinary billed request against your own plan:
+it trades one expensive rebuild for a few cheap reads, and bypasses nothing.
 
-When the wait is on *this* machine, a timed ping is the wrong tool.
-`warmline wait-for` is a poller you run as a background task: it wakes the
-session when the job ends **or fails**, needs no schedule, and terminates
-itself. Pings are for waits nothing local can watch.
-
-The one thing no ping survives is a sleeping machine. For a wait you intend to
-sit out, `warmline awake` starts your `claude` session with system sleep
-inhibited — and because the inhibition lives exactly as long as the session,
-the OS restores normal sleep the instant you `/exit` (or crash out). Nothing
-to remember to turn off.
-
-[What it is and isn't, when it can't operate, terms →](docs/KEEP-WARM.md)
+[What it is and isn't, `wait-for`, no-sleep mode, limits, terms →](docs/KEEP-WARM.md)
 
 ## Where it works
 
-| Front end | statusline | `warmline-audit` / `watch` | keep-warm |
+| Front end | statusline | `warmline audit` / `watch` | keep-warm |
 |---|---|---|---|
 | Terminal CLI | ✅ | ✅ | ✅ |
 | Desktop app (local Code tab) | ❌ | ✅ | ✅ |
 | VS Code / JetBrains panel | ❌ | ✅ | ✅ |
 | Cloud / Cowork sessions | ❌ | ❌ | ❌ |
 
-The desktop app and the IDE panels don't render custom statuslines
-([open request](https://github.com/anthropics/claude-code/issues/41456)) — but
-they run the same engine *locally*, share the same `~/.claude`, and write the
-same transcripts, so the auditor, the live `warmline watch` view, and the
-keep-warm policy work there unchanged. **Cloud and Cowork sessions are the
-exception: no part of warmline reaches them.** They run on Anthropic's
-infrastructure, leave no transcripts on your machine, and never read your
-local `~/.claude/CLAUDE.md`. In the desktop app, run `claude` in the
-integrated terminal when you want the gauge too.
+The local graphical front ends don't render custom statuslines
+([open request](https://github.com/anthropics/claude-code/issues/41456)), but they
+run the same engine, share the same `~/.claude` and write the same transcripts, so
+the audit, `warmline watch` and keep-warm work there unchanged. **Cloud and Cowork
+sessions are the exception: no part of warmline reaches them.**
 
 [The full surface matrix, and how it was verified →](docs/SURFACES.md)
 
-## Measured, not modeled
+## Evidence
 
-- **96% hot across a 4.5-hour supervised wait, 0 tokens re-cached cold** — the
-  policy on, 187 turns, 16.1M tokens read from cache. Every warmth break was an
-  *auto*-compaction, none a TTL expiry.
-- **Auto-compact fires around 84% of the window** (three times, at 167–169k of
-  200k). That is the one cache killer keep-warm cannot prevent — only warn
-  about, which is why `ctx` goes yellow at 80%.
-- **50 minutes idle: warm. 70 minutes: cold.** A clean-room two-arm probe read
-  a full 71,312-token prefix back after 50 minutes and re-wrote 45,033 tokens
-  after 70. The 1-hour TTL is real, and reads refresh it — which is exactly why
-  pinging works.
-- **Background work keeps the cache warm for free.** Task notifications every
-  ~9 minutes held a 300k context hot for four hours at ~400 tokens of
-  cache-write per wake. That's why keep-warm skips that case.
-- **No wakeup survives a closed lid.** The one TTL expiry in a 260-turn,
-  13-hour session came after a 6-hour overnight silence with the machine
-  asleep. (`warmline awake` exists for exactly this.)
-- **Prefix stability matters as much as TTL.** A drifting system prompt
-  (edited CLAUDE.md, changed git state, MCP availability) re-caches everything
-  past the divergence, and no ping can help.
+The TTL is measured, not assumed. In a clean-room two-arm probe, a session idle
+**50 minutes** read its full 71,312-token prefix back from cache; an identical
+one idle **70 minutes** found the cache gone and re-wrote all 45,033 tokens.
+Warm at 50, cold at 70 — and reads refresh the clock. Everything else on this
+page comes from the same corpus the audit above grades.
 
 [Numbers, method, how to reproduce →](docs/MEASUREMENTS.md)
 

@@ -2,9 +2,11 @@
 
 [← back to the README](../README.md)
 
-The statusline and the auditor *observe*. Keep Warm is the optional half that
-*prevents*: it keeps the cache from expiring during long waits you intend to
-come back to.
+The statusline and the auditor *observe* — that is the project's core. Keep Warm
+is the optional fourth capability, the one that *acts*: it keeps the cache from
+expiring during long waits you intend to come back to. It is off until you turn
+it on, and it addresses exactly one of the failure modes the audit reports (TTL
+expiry during an idle stretch), not compaction and not prefix drift.
 
 ```sh
 warmline keep-warm on        # turn it on (once)
@@ -90,7 +92,7 @@ re-write, so it pays for itself for idle stretches up to roughly 10–12 hours
   [auto-compact](#auto-compact-the-one-you-dont-choose) for the half you don't
   control.
 - **It's an instruction, not code.** The agent can fail to follow it.
-  [`warmline-audit`](AUDIT.md) is how you verify it actually worked: look for
+  [`warmline audit`](AUDIT.md) is how you verify it actually worked: look for
   ~400-token cache writes at ~50-minute intervals instead of a full re-cache.
 
 ## Waiting on work you launched yourself: `warmline wait-for`
@@ -168,7 +170,7 @@ does nothing about that, so here is the honest picture.
 fills. In that session it fired three times at 167–169k input tokens — about
 **84%** of a 200k window, consistent with a threshold set a fixed distance
 below the window. Compaction rewrites the prefix, so the next turn re-caches
-from the divergence: a `PARTIAL` in [`warmline-audit`](AUDIT.md), attributed
+from the divergence: a `PARTIAL` in [`warmline audit`](AUDIT.md), attributed
 to `auto-compact`.
 
 **What can actually be done.**

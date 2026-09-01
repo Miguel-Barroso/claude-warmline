@@ -4,6 +4,88 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.0.0] — 2026-09-01
+
+Claude Code v2.1.251 began handing the statusline a `prompt_cache` object — the
+prefix's real warmth, its TTL, and the epoch second it expires. Every live cache
+fact warmline used to *infer* is now **read**, and the machinery that did the
+inferring is gone. Claude Code owns live truth; warmline presents it and owns
+cross-session history. Verified against a running 2.1.252; see
+[docs/STATUSLINE.md](docs/STATUSLINE.md).
+
+### Fixed
+- **`cache HOT` on a cache that was already cold.** The verdict came from
+  `cache_read_input_tokens`, which describes the request *before* this one, so a
+  session that had gone quiet long enough to lose its prefix still painted a
+  confident green — the gauge was wrong precisely when it mattered, on the idle
+  session it exists to watch. Warmth now comes from `prompt_cache.warm`, and a
+  regression test pins the old failure: `warm: false` beside a 165k-token cache
+  read renders `COLD`.
+- **A `warm: false` carrying a stale expiry.** At expiry 2.1.252 flips `warm` to
+  `false` but leaves `expires_at` at its old value rather than nulling it, which
+  the docs don't say. `warm` is therefore checked before the clock, and the clock
+  is only ever used for the label. Also pinned by a test.
+
+### Added
+- **`cache off`.** `caching_observed: false` — no response this session ever
+  reported cache tokens, so prompt caching is off, or this provider or gateway
+  never reports it. Nothing here will warm up, which is not the same as a cache
+  you can wait out.
+- **`cache ?`.** No `prompt_cache` object at all: Claude Code before v2.1.251, or
+  before the session's first API response. Honest ignorance instead of a guess,
+  gated on the shape of the payload rather than on a version string.
+- **`HOT 5m`.** The short TTL is badged because it invalidates the mental model
+  built on the hour — it is what usage credits, an API key and cloud providers
+  give you, and it breaks keep-warm outright. The 1-hour bucket is the norm and
+  stays unlabelled; a field that reads the same for three months stops being
+  read.
+
+### Changed
+- **`COLD`, `off` and `?` are three verdicts, not one.** "It expired", "caching
+  isn't happening" and "warmline can't see" each call for something different,
+  and collapsing them is how a cache gauge starts lying.
+- **`refreshInterval: 60` is warning UX, not correctness.** Claude Code re-runs a
+  statusline when the warm cache it last sent reaches `expires_at`, and warmline
+  has now watched it fire: a session sitting silent — no user message, no
+  assistant message, polling parked at an hour — was re-run at expiry+1s with
+  `warm: false` and repainted itself red. Refreshing before expiry replaces that
+  trigger rather than stacking on it. So the trigger owns `HOT` → `COLD`, and the
+  timer is kept for the one thing a single shot at expiry cannot do: repaint when
+  the warning window *opens*, 15 minutes earlier, in a session generating no
+  other events. In that same run the line went green straight to red and the
+  yellow never rendered. `WARMLINE_REFRESH_SEC=0` still leaves a correct gauge —
+  it just stops warning you first.
+- **The warning window is capped at half the TTL**: 15 minutes of an hour, 2.5 of
+  five, 15 for a `ttl` string warmline doesn't recognise. A flat 15 minutes is
+  longer than a 5-minute cache ever lives, and a warning that is always on is not
+  a warning.
+
+### Removed
+- **All live cache inference.** The transcript TTL sniffing, the per-session
+  stamp files and the `warmline-state` directory they lived in (deleted on
+  upgrade), the session-state protocol, and the staleness handling each of those
+  needed. The statusline now reads no transcript and writes no file.
+- **`WARMLINE_TTL_MIN`, `WARMLINE_STATE_DIR` and `WARMLINE_DEBUG` from the
+  statusline.** `WARMLINE_TTL_MIN` remains an auditor knob:
+  [`warmline audit`](docs/AUDIT.md) still infers a TTL per session, because
+  historical transcripts contain no `prompt_cache` to read. That split is the
+  design — live truth from Claude Code, history from warmline.
+- **`gap Nm`, `COLD(rebuilt)`, `COLD(ttl?)` and `(cold in Nm)` from the line.**
+  The gap fed the inference; the two `COLD` variants were an inference reported
+  as a verdict; the countdown was wrong the moment the line stopped repainting,
+  where the absolute `cold ~13:04` stays true. The auditor keeps `COLD(rebuilt)`
+  and `COLD(ttl)`: there the verdict is graded from recorded usage, and the split
+  between the two rests on the TTL it infers per session — bounded inference over
+  transcripts that carry no authoritative payload, which is a different job from
+  the live line's.
+- **`keep-warm on` in the normal case.** The field now appears only when the
+  policy needs attention (`on*` stale, `?` malformed). A correct policy and a
+  deliberate absence are both silent; `warmline keep-warm status` is where you
+  ask.
+
+Requires Claude Code **v2.1.251+** for a live verdict. Older builds render
+`cache ?` — the line still works, it just declines to guess.
+
 ## [1.8.0] — 2026-08-31
 
 Everything in this release comes from one 4.5-hour supervised wait with the
