@@ -2,7 +2,7 @@ class Warmline < Formula
   desc "Make Claude Code's prompt cache state visible: statusline, auditor, keep-warm"
   homepage "https://github.com/Miguel-Barroso/claude-warmline"
   url "https://github.com/Miguel-Barroso/claude-warmline/archive/refs/tags/v2.2.0.tar.gz"
-  sha256 "REPLACE_WITH_SHA256_OF_THE_TAGGED_TARBALL"
+  sha256 "d954a2ecc7f06551a6cdc577aac994aeb25c50b3443e480a969f1d4a290c7ba7"
   license "MIT"
   head "https://github.com/Miguel-Barroso/claude-warmline.git", branch: "main"
 
