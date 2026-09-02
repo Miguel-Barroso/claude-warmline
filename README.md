@@ -72,23 +72,27 @@ too, `brew upgrade` re-wires it, and `brew uninstall` unwires it again.
 
 ## Why warmline
 
-Most Claude Code statuslines answer questions like:
+Any statusline can now show you whether the cache is warm. Since v2.1.251
+Claude Code hands every statusline script the same `prompt_cache` object
+warmline reads — warmline's own gauge is, deliberately, nothing more than what
+that object says. The live light matters, and it is no longer the point.
 
-- Which model am I on?
-- How much context is left?
-- What is this session costing?
-- Which branch am I on?
+Warmline exists for the questions no live light can answer:
 
-All useful. Warmline answers a different one:
+> **When did the cache go cold, how often, why — and did it cost enough to
+> care about?**
 
-> **Is the prompt cache actually warm?**
-
-and then the one no live indicator can answer:
-
-> **When did it go cold, how often, and did that cost enough to care about?**
+That is `warmline audit`: every recorded turn of your history graded from the
+usage Claude Code wrote for it, each cold event attributed to a cause only
+where the transcript proves one, and the avoidable premium priced at rates
+derived from your own sessions. Around the audit sits the full loop — observe,
+explain, measure, mitigate (`keep-warm`, `wait-for --until-cold`, `awake`) —
+so a cold event goes from noticed to explained to priced to, when it earns it,
+prevented.
 
 A statusline tells you what is happening in your session. **Warmline tells you
-whether your context is still being reused.**
+whether your context is still being reused — and what it has cost you when it
+wasn't.**
 
 Everything here exists for the 100k+ case. Going cold on 20k tokens is cheap.
 
@@ -172,51 +176,57 @@ whatever you do next. The only question is what that one pass buys:
 ## Explain and measure: the audit
 
 A single `HOT` on your statusline is useful. Seeing that your sessions went cold
-198 times in eight weeks is more useful.
+211 times in ten weeks is more useful.
 
 `warmline audit` grades every recorded API request of a session from the usage
 fields Claude Code wrote for it — no one-turn lag, unlike the statusline. `--all`
 does the same across every session on this machine and ranks them. (It runs the
 installed `warmline-audit`; both spellings work, and scripts pinned to the
-hyphenated one keep working.) Real output from 8 weeks of history, priced at a
+hyphenated one keep working.) Real output from 10 weeks of history, priced at a
 flat `--price 3` for a stable example — a bare `--price` solves your real rate
 instead, per project:
 
 ```
 $ warmline-audit --all --price 3
-147 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl per session from its cache buckets, 60m fallback)
+132 sessions under /Users/mb/.claude/projects  (8 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  95% hot  (10,394 of 10,921 turns)
-cold events   198  (159 rebuilt, 39 ttl) -- 1.8% of all turns
+cache health  █████████████████████████░  96% hot  (13,378 of 13,994 turns)
+cold events   211  (158 rebuilt, 53 ttl) -- 1.5% of all turns
 
 start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770    11%      $7.38
+08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770   9.7%      $7.38
    ⋮
-TOTAL                                10921  10394   329      159    39      12,134,109   100%     $69.16
+TOTAL                                13994  13378   405      158    53      13,306,845   100%     $75.85
 
 where the cold came from
-  unknown             ██████████████████████████  92 (39%)
-  session start       █████████████████  59 (25%)
-  auto-compact        ██████████  37 (16%)
-  inactivity          █████████  31 (13%)
+  unknown             ██████████████████████████  83 (29%)
+  auto-compact        ██████████████████████  70 (25%)
+  session start       ██████████████████████  69 (24%)
+  inactivity          ███████████  34 (12%)
+  inactivity+compact  ██████  19 (6.7%)
+  /compact            ██  7 (2.5%)
+  model change        █  1 (<1%)
 
-estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
+estimated avoidable premium ~$75.85  (top 5 sessions: $22.19, other 127: $53.66)
 ```
 
 That is the difference between observability and a decorative statusline: a
 pattern you can act on, or decide not to.
 
 Each cold turn carries a cause where the transcript **proves** one — `/compact`,
-`auto-compact`, `model change`, `inactivity`. Everything else lands in
-`unknown`, which is a **residual bucket, not a finding**: the transcript
+`auto-compact`, `model change`, `inactivity`, and `claude upgrade`: every
+transcript entry records the Claude Code build, so a cold rebuild whose
+`version` differs from the previous turn's is the upgrade rewriting the system
+prompt and tools. Everything else lands in `unknown`, which is a **residual
+bucket, not a finding**: the transcript
 recorded no proof, so warmline declines to name a cause. Anthropic documents
 several prefix-invalidating actions a transcript never witnesses — changing the
 effort level, turning on fast mode, denying a whole tool, enabling or disabling
-a plugin, connecting an MCP server whose tools load into the prefix, and
-upgrading Claude Code itself — and any of them lands here. Editing CLAUDE.md
-mid-session does not: Anthropic lists that under the actions that *keep* the
-cache. Here `unknown` holds 39% of the cold, more than all compaction combined,
-and the worst single session holds 11% of the total — read that as "the largest
+a plugin, connecting an MCP server whose tools load into the prefix — and any
+of them lands here. Editing CLAUDE.md mid-session does not: Anthropic lists
+that under the actions that *keep* the
+cache. Here `unknown` holds 29% of the cold, still the largest single bucket,
+and the worst single session holds 9.7% of the total — read that as "the largest
 share is unexplained", which is a reason to look, not a diagnosis.
 (Verdicts come from recorded usage, but the
 split between `COLD(rebuilt)` and `COLD(ttl)` rests on the TTL, auto-detected

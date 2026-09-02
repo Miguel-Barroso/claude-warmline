@@ -188,7 +188,7 @@ fetch keep-warm.md "$POLICY"
 if [ -f "$CLAUDE_MD" ]; then
   MB="$MARK_BEGIN" ME="$MARK_END" PREV="$PREV_POLICY" \
     python3 - "$CLAUDE_MD" "$POLICY" <<'PY'
-import os, re, sys
+import hashlib, os, re, sys
 md, policy = sys.argv[1], sys.argv[2]
 mb, me = os.environ["MB"], os.environ["ME"]
 text = open(md).read()
@@ -202,7 +202,21 @@ if norm(body) == norm(new):
     sys.exit(0)
 prev = os.environ.get("PREV") or ""
 prev = open(prev).read() if prev and os.path.exists(prev) else None
-if prev is not None and norm(body) == norm(prev):
+# Every superseded release's policy wording, as sha256 of the normalized text,
+# so skipping releases doesn't turn official text into a "hand edit" the
+# refresh below refuses to touch. Only text matching none of these is really
+# the user's. Same list in warmline's cmd_setup -- keep the two in sync.
+# Regenerate:  git show TAG:keep-warm.md | python3 -c 'import hashlib,re,sys;
+#   print(hashlib.sha256(re.sub(r"\s+"," ",sys.stdin.read()).strip().encode()).hexdigest())'
+released = {
+    "ccf9f481845afd31e6d8e2a7e3a88ed16040b339d05d4c2660c45ad5e67fb106",  # v1.0.0
+    "307242b3b057d5f465fa25c54c8d87a883b8b311795fda823bfa2c42e54dfaeb",  # v1.1.0-v1.3.0
+    "ccd1d8fef148092d4373758e17ff78c44f99edb6343309c1145542fd88552cc8",  # v1.4.0-v1.6.0
+    "5137843bc921531d39d51e597957ebf9074cd7d7b5ab0f9ddd0f2307622d0c69",  # v1.7.0
+    "2be2c0965b2b7fdf058578ea8fcf7edbd2b406495828ff4750d0c9bc8461c219",  # v1.8.0-v2.1.0
+}
+if (prev is not None and norm(body) == norm(prev)) \
+        or hashlib.sha256(norm(body).encode("utf-8")).hexdigest() in released:
     open(md, "w").write(head + mb + "\n" + new.rstrip() + "\n" + me + tail)
     print(f"refreshed the keep-warm block in {md} (policy updated)")
 else:

@@ -70,7 +70,8 @@ Verdicts (authoritative here, unlike the statusline's one-turn lag):
   PARTIAL        it read some cache but re-wrote more than it read
                  (prefix edited mid-conversation)
   COLD(rebuilt)  nothing read, prefix re-cached, gap within the TTL
-                 (invalidation: /compact, context edits, model change)
+                 (invalidation: /compact, context edits, model change,
+                 a Claude Code upgrade)
   COLD(ttl)      nothing read, prefix re-cached after a gap beyond the TTL
 
 Cold turns (and compact-explained PARTIALs) carry a cause where the
@@ -79,6 +80,10 @@ transcript supports one:
   /compact        a compact_boundary marker (manual trigger) sits between
                   this turn and the previous one; auto-compact likewise
   model change    the model differs from the previous turn's
+  claude upgrade  the Claude Code build recorded on the turn differs from
+                  the previous turn's -- an upgrade rewrites the system
+                  prompt and tools, so the prefix provably changed (model
+                  change, the other prefix proof, is checked first)
   inactivity      the COLD(ttl) case; "inactivity+compact" when a compact
                   also happened inside the same gap (either explains it)
   unknown         a rebuild the transcript can't explain (env/prefix drift)
@@ -218,7 +223,9 @@ def parse_ts(ts):
 
 def parse_transcript(path):
     """(turns, compacts, label, bucket): turns are (time, read, write,
-    model, output) per API request; compacts are sorted (time, trigger); label is
+    model, output, version) per API request -- version is the Claude Code
+    build that wrote the entry, None on transcripts that predate it;
+    compacts are sorted (time, trigger); label is
     the basename of the first assistant entry's cwd; bucket is the cache TTL
     bucket the session's writes were billed at ('5m' or '1h', None when
     unrecorded) -- it sets both the TTL to grade against and the premium
@@ -266,7 +273,7 @@ def parse_transcript(path):
             eph5 += cc.get("ephemeral_5m_input_tokens") or 0
             eph1h += cc.get("ephemeral_1h_input_tokens") or 0
             turns.append((t, read, write, msg.get("model"),
-                          usage.get("output_tokens") or 0))
+                          usage.get("output_tokens") or 0, e.get("version")))
     turns.sort(key=lambda x: x[0])
     compacts.sort(key=lambda x: x[0])
     bucket = "5m" if eph5 > eph1h else "1h" if eph1h else None
@@ -283,9 +290,12 @@ def verdict_of(read, write, gap_min, ttl_min):
     return "?"
 
 
-def cause_of(verdict, prev_t, t, prev_model, model, compacts):
+def cause_of(verdict, prev_t, t, prev_model, model, compacts,
+             prev_version, version):
     """Attribute a cold or rewritten turn to what the transcript can
-    actually show; 'unknown' rather than a guess when it can't."""
+    actually show; 'unknown' rather than a guess when it can't. The two
+    prefix-change proofs are checked in a fixed order -- model change, then
+    claude upgrade -- so a turn carrying both always reports the same one."""
     if verdict not in ("PARTIAL", "COLD(ttl)", "COLD(rebuilt)"):
         return None
     trig = 0
@@ -310,20 +320,27 @@ def cause_of(verdict, prev_t, t, prev_model, model, compacts):
         return compact
     if prev_model and model and model != prev_model:
         return "model change"
+    if prev_version and version and version != prev_version:
+        # a new Claude Code build ships a new system prompt and tool set:
+        # the prefix provably changed even though the conversation didn't.
+        # Transcripts that predate version recording carry None and claim
+        # nothing -- absence of the field is not evidence of anything.
+        return "claude upgrade"
     return "unknown"
 
 
 def grade(turns, compacts, ttl_min):
     """Rows with gap, verdict and cause for one session's turns."""
     rows, prev = [], None
-    for t, read, write, model, output in turns:
+    for t, read, write, model, output, version in turns:
         gap = (t - prev[0]).total_seconds() / 60 if prev else None
         v = verdict_of(read, write, gap, ttl_min)
         rows.append({"time": t, "gap_min": None if gap is None else round(gap, 1),
                      "read": read, "write": write, "output": output, "verdict": v,
                      "cause": cause_of(v, prev[0] if prev else None, t,
-                                       prev[1] if prev else None, model, compacts)})
-        prev = (t, model)
+                                       prev[1] if prev else None, model, compacts,
+                                       prev[2] if prev else None, version)})
+        prev = (t, model, version)
     return rows
 
 
@@ -602,7 +619,8 @@ def fmt_gap(m):
 
 def fmt_causes(causes):
     order = ["inactivity", "inactivity+compact", "/compact", "auto-compact",
-             "compact", "model change", "unknown", "session start"]
+             "compact", "model change", "claude upgrade", "unknown",
+             "session start"]
     total = sum(causes.values())
     return "  ".join("%s %d (%s)" % (c, causes[c], pct(causes[c], total))
                      for c in order if causes.get(c))

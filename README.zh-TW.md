@@ -67,22 +67,23 @@ brew install Miguel-Barroso/warmline/warmline
 
 ## 為什麼是 warmline
 
-大多數 Claude Code 狀態列回答的是這類問題：
+現在任何狀態列都能告訴你快取是不是熱的。從 v2.1.251 起，Claude Code 會把 warmline
+讀取的同一個 `prompt_cache` 物件交給每一個狀態列腳本——warmline 自己的儀表刻意
+只做一件事：把這個物件裡寫著的內容顯示出來。即時指示器仍然重要，但它已不再是
+重點所在。
 
-- 我在用哪個模型？
-- 脈絡還剩多少？
-- 這個工作階段花了多少錢？
-- 我在哪個分支上？
+warmline 存在的理由，是那些任何即時指示器都答不了的問題：
 
-這些都有用。warmline 回答的是另一個：
+> **快取是什麼時候冷的、多久發生一次、為什麼——以及它貴到值得在意嗎？**
 
-> **提示快取現在真的是熱的嗎？**
+這就是 `warmline audit`：依據 Claude Code 寫下的用量，為你歷史上每個已記錄的輪次
+評分；只在紀錄能證明成因時，才為冷事件歸上原因；並用從你自己工作階段推導出的
+單價，為可避免的額外成本計價。圍繞著稽核的是完整的迴圈——觀測、解釋、度量、緩解
+（`keep-warm`、`wait-for --until-cold`、`awake`）——讓一個冷事件從被注意到，到被
+解釋、被計價，再到值得時被預防。
 
-以及一個任何即時指示器都答不了的問題：
-
-> **它是什麼時候冷的、多久發生一次、值不值得在意？**
-
-狀態列告訴你工作階段裡正在發生什麼。**warmline 告訴你脈絡是否還在被重複使用。**
+狀態列告訴你工作階段裡正在發生什麼。**warmline 告訴你脈絡是否還在被重複使用——
+以及當它沒有被重複使用時，已經花掉了你多少。**
 
 這裡的一切都是為 10 萬 token 以上的情況而存在。2 萬 token 冷掉了重建也很便宜。
 
@@ -155,46 +156,51 @@ Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 7
 
 ## 解釋與度量：稽核
 
-狀態列上的一個 `HOT` 有用。看到你的工作階段在 8 週裡冷掉了 198 次，更有用。
+狀態列上的一個 `HOT` 有用。看到你的工作階段在 10 週裡冷掉了 211 次，更有用。
 
 `warmline audit` 依據 Claude Code 為每個已記錄 API 請求寫下的用量欄位評分——不像
 狀態列，它沒有慢一輪的問題。`--all` 則對本機所有工作階段做同樣的事並排序。（它執行
 的是已安裝的 `warmline-audit` 命令；兩種寫法都有效，已經寫好的腳本繼續可用。）以下
-是某台機器 8 週歷史的真實輸出，為了讓範例穩定而一律按 `--price 3` 計價——不帶數值的
+是某台機器 10 週歷史的真實輸出，為了讓範例穩定而一律按 `--price 3` 計價——不帶數值的
 `--price` 會按專案求解你真實的單價：
 
 ```
 $ warmline-audit --all --price 3
-147 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl per session from its cache buckets, 60m fallback)
+132 sessions under /Users/mb/.claude/projects  (8 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  95% hot  (10,394 of 10,921 turns)
-cold events   198  (159 rebuilt, 39 ttl) -- 1.8% of all turns
+cache health  █████████████████████████░  96% hot  (13,378 of 13,994 turns)
+cold events   211  (158 rebuilt, 53 ttl) -- 1.5% of all turns
 
 start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770    11%      $7.38
+08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770   9.7%      $7.38
    ⋮
-TOTAL                                10921  10394   329      159    39      12,134,109   100%     $69.16
+TOTAL                                13994  13378   405      158    53      13,306,845   100%     $75.85
 
 where the cold came from
-  unknown             ██████████████████████████  92 (39%)
-  session start       █████████████████  59 (25%)
-  auto-compact        ██████████  37 (16%)
-  inactivity          █████████  31 (13%)
+  unknown             ██████████████████████████  83 (29%)
+  auto-compact        ██████████████████████  70 (25%)
+  session start       ██████████████████████  69 (24%)
+  inactivity          ███████████  34 (12%)
+  inactivity+compact  ██████  19 (6.7%)
+  /compact            ██  7 (2.5%)
+  model change        █  1 (<1%)
 
-estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
+estimated avoidable premium ~$75.85  (top 5 sessions: $22.19, other 127: $53.66)
 ```
 
 這就是可觀測性與裝飾性狀態列的差別：一個你能據以行動、或據以決定不行動的模式。
 
 每個冷輪次都會在紀錄能**證明**的範圍內附上原因——`/compact`、`auto-compact`、
-`model change`、`inactivity`——其餘的一律落進 `unknown`，而它是**殘差桶，不是結論**：
+`model change`、`inactivity`，以及 `claude upgrade`：每一筆紀錄條目都寫著當時的
+Claude Code 組建版本，所以一次冷重建的 `version` 若與前一輪不同，那就是升級在改寫
+系統提示與工具。其餘的一律落進 `unknown`，而它是**殘差桶，不是結論**：
 紀錄裡沒有留下證據，所以 warmline 拒絕給它安一個原因。Anthropic 記錄了好幾種紀錄
 永遠看不見的前綴失效操作——改變思考強度、開啟 fast 模式、拒絕整個工具、啟用或停用
-外掛、連接會把工具載入前綴的 MCP 伺服器，以及升級 Claude Code 本身——它們都會落到
-這裡。工作階段中途編輯 CLAUDE.md 不會：Anthropic 把那一項列在*保住*快取的操作裡。在
-這台機器上，`unknown` 占了冷事件的 39%，比所有壓縮加起來還多，而最糟的單一工作階段
-獨占總量的 11%——這應當讀作「占比最大的部分尚未得到解釋」，那是去查的理由，而不是
-診斷結論。（判定來自紀錄的用量，但 `COLD(rebuilt)` 與 `COLD(ttl)` 之間的劃分取決於
+外掛、連接會把工具載入前綴的 MCP 伺服器——它們都會落到這裡。工作階段中途編輯
+CLAUDE.md 不會：Anthropic 把那一項列在*保住*快取的操作裡。在這台機器上，`unknown`
+占了冷事件的 29%，仍是占比最大的單一類別，而最糟的單一工作階段獨占總量的 9.7%——
+這應當讀作「占比最大的部分尚未得到解釋」，那是去查的理由，而不是診斷結論。
+（判定來自紀錄的用量，但 `COLD(rebuilt)` 與 `COLD(ttl)` 之間的劃分取決於
 TTL——它按工作階段從各自的快取分桶紀錄中自動偵測。）
 
 **這些金額是從你自己紀錄中的 token 數推算出的暴露估計，不是帳單資料**——warmline
@@ -271,11 +277,10 @@ warmline 的任何部分都碰不到它們。**
 
 ## 實測證據
 
-- **閒置 50 分鐘：溫的。70 分鐘：冷的。** 在無干擾環境下的雙臂探測中，50 分鐘後的
-  探針讀回了完整的 71,312 token 前綴，70 分鐘後則重寫了 45,033 個 token。一小時的
-  TTL 是真的，而且讀取會刷新它。
-- **147 個工作階段、10,921 個輪次的稽核**（同一台機器）：95% 為 hot，但其中 39% 的冷
-  事件**沒有歸到任何原因上**——那是紀錄未能提供證據的殘差，不是一個有名字的成因。
+TTL 是實測出來的，不是假設。在無干擾環境下的雙臂探測中，閒置 **50 分鐘**的工作階段
+從快取讀回了完整的 71,312 token 前綴；一個完全相同、閒置 **70 分鐘**的工作階段則
+發現快取已經消失，重寫了全部 45,033 個 token。50 分鐘是溫的，70 分鐘是冷的——而且
+讀取會刷新時鐘。本頁其餘的一切，都來自上文稽核所評分的同一批語料。
 
 [資料、方法、如何重現 →](docs/MEASUREMENTS.md)（英文）
 

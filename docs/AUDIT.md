@@ -131,6 +131,7 @@ Causes are attribution, not guesswork:
 | `/compact`, `auto-compact` | a structured `compact_boundary` marker with its trigger recorded |
 | `compact` | a boundary marker without metadata — certainly a compaction, manual-vs-auto would be a guess |
 | `model change` | the model recorded on the turn differs from the previous turn's |
+| `claude upgrade` | the Claude Code build recorded on the entry (its `version` field) differs from the previous turn's — an upgrade rewrites the system prompt and tools, so the prefix provably changed. When a model change proves the same turn, `model change` is reported: the tie-break is fixed, so the verdict never flips between runs. Transcripts that predate version recording claim nothing |
 | `inactivity` | the `COLD(ttl)` case |
 | `inactivity+compact` | both happened inside the same gap; either explains it |
 | `unknown` | a rebuild the transcript can't explain — in practice mostly prefix drift (an edited CLAUDE.md, changed git state, MCP availability) |

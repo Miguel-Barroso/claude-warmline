@@ -292,6 +292,15 @@ says so; if it doesn't — you edited it — it is left exactly as it is, with a
 note telling you the wording moved on and how to adopt it. Your own text
 before and after the markers is never touched either way.
 
+One thing a refresh cannot do is reach the session that runs it. CLAUDE.md is
+read once, at session start, so a session upgrading warmline already carries
+the old wording in its prompt prefix — and Anthropic lists editing CLAUDE.md
+mid-session among the actions that *keep* the cache, so the rewrite neither
+updates that session nor invalidates its warmth. Nothing needs doing about
+this; it is just what an upgrade looks like from the inside: the new policy
+text takes effect at the next session, and the one that installed it finishes
+out on the policy it started with.
+
 ## Is this within Anthropic's terms?
 
 We researched this rather than assuming. The mechanism keep-warm relies on is

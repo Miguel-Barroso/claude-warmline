@@ -4,6 +4,63 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.3.0] — 2026-09-02
+
+The audit proves one more cause, upgrades stop mistaking old official wording
+for hand edits, and the release dance is written down as a script. No change to
+the statusline or the keep-warm policy text.
+
+### Added
+- **`claude upgrade` is now a proven cold cause.** Every transcript entry
+  records the Claude Code build that wrote it (`version`), and an upgrade ships
+  a new system prompt and tool set — so a cold rebuild whose version differs
+  from the previous turn's provably came from the upgrade. The tie-break with
+  `model change` (the other prefix proof) is fixed — model change wins — so a
+  report never flips between runs, and transcripts that predate version
+  recording claim nothing. Honestly measured: on this machine's own ten-week
+  corpus the new cause attributes zero events, because both observed mid-session
+  upgrades landed on `PARTIAL` turns, which take no cause by the existing rule.
+  The cause exists because the proof exists, not because this corpus needed it.
+- **`scripts/release.sh`** — the two-step every release repeats, written down:
+  tag and push, wait for GitHub's tarball, pin its sha256 into the cask on
+  main, copy the pinned cask into the tap. Idempotent, so a partial failure is
+  resumed by re-running; it will never move a published tag; and the checks
+  that stay manual on purpose (`brew style`, `brew audit`, the release page)
+  come out as a printed checklist instead of being half-automated.
+
+### Changed
+- **Skipping releases no longer costs you the keep-warm refresh.** The block
+  refresh in `install.sh` and `warmline setup` used to recognize only the
+  policy text it was just replacing, so upgrading across more than one release
+  classified the old *official* wording as a hand edit and left it, stale, for
+  the agent to keep following. Both refresh sites now carry the sha256 of every
+  superseded release's normalized policy text (five variants, v1.0.0 through
+  v2.1.0) and refresh a block matching any of them. Text matching none of them
+  really is yours, and is still never touched.
+- **README repositioned around what is still unique.** Since v2.1.251 Claude
+  Code hands every statusline script the same `prompt_cache` object warmline
+  reads, so a live warmth light is no longer a distinction and the README stops
+  claiming it as one. What no live light can answer — when the cache went cold,
+  how often, why, and what it cost — is the audit's job, and "Why warmline" now
+  leads with it. The example output is a fresh real capture: ten weeks, 13,994
+  turns, 96% hot, 211 cold events, `unknown` down to 29% and now barely ahead
+  of auto-compact. Mirrored to all three translations.
+
+### Documentation
+- [`docs/KEEP-WARM.md`](docs/KEEP-WARM.md): a policy refresh cannot reach the
+  session that runs it — CLAUDE.md is read once at session start, and Anthropic
+  lists mid-session edits among the actions that *keep* the cache, so the
+  rewrite neither updates that session nor voids its warmth. The new wording
+  takes effect next session. Observed live long before it was written down.
+- [`docs/AUDIT.md`](docs/AUDIT.md): the `claude upgrade` cause, its proof, and
+  its tie-break.
+
+### Tests
+- 98 → 105: the upgrade cause (fires, doesn't fire without a version change,
+  loses the tie to model change, claims nothing on version-less transcripts)
+  and the historical-hash refresh (real v1.6.0 wording refreshed on both code
+  paths, genuinely edited text still preserved).
+
 ## [2.2.1] — 2026-09-02
 
 Packaging and documentation only — no change to the statusline, the auditor, the

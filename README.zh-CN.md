@@ -67,22 +67,22 @@ brew install Miguel-Barroso/warmline/warmline
 
 ## 为什么是 warmline
 
-大多数 Claude Code 状态栏回答的是这类问题：
+现在任何状态栏都能告诉你缓存是不是热的。从 v2.1.251 起，Claude Code 会把 warmline
+读取的那个 `prompt_cache` 对象交给每一个状态栏脚本——warmline 自己的仪表刻意不多做
+一步，只显示这个对象里写着的内容。实时的指示灯依然重要，但它已不再是重点。
 
-- 我在用哪个模型？
-- 上下文还剩多少？
-- 这个会话花了多少钱？
-- 我在哪个分支上？
+warmline 为那些任何实时指示灯都答不了的问题而存在：
 
-这些都有用。warmline 回答的是另一个：
+> **缓存是什么时候冷的、多久发生一次、为什么——以及它贵到值得在意吗？**
 
-> **提示缓存现在真的是热的吗？**
+这就是 `warmline audit`：你历史上的每个已记录轮次都依据 Claude Code 写下的用量评分，
+每个冷事件只在记录能证明原因时才被归因，而可避免的溢价按从你自己会话中求解出的单价
+计价。围绕审计的是完整的闭环——观察、解释、度量、缓解（`keep-warm`、
+`wait-for --until-cold`、`awake`）——让一次冷事件从被注意到，到被解释、被计价，再到
+（当它值得时）被阻止。
 
-以及一个任何实时指示器都答不了的问题：
-
-> **它是什么时候冷的、多久发生一次、值不值得在意？**
-
-状态栏告诉你会话里正在发生什么。**warmline 告诉你上下文是否还在被复用。**
+状态栏告诉你会话里正在发生什么。**warmline 告诉你上下文是否还在被复用——以及当它
+不再被复用时，已经花了你多少钱。**
 
 这里的一切都是为 10 万 token 以上的情况而存在。2 万 token 冷掉了重建也很便宜。
 
@@ -155,45 +155,50 @@ Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 7
 
 ## 解释与度量：审计
 
-状态栏上的一个 `HOT` 有用。看到你的会话在 8 周里冷掉了 198 次，更有用。
+状态栏上的一个 `HOT` 有用。看到你的会话在 10 周里冷掉了 211 次，更有用。
 
 `warmline audit` 依据 Claude Code 为每个已记录 API 请求写下的用量字段来评分——不像
 状态栏，它没有一轮的滞后。`--all` 则对本机所有会话做同样的事并排序。（它运行的是已
 安装的 `warmline-audit` 命令；两种写法都有效，已经写好的脚本继续可用。）以下是某台
-机器 8 周历史的真实输出，为了让示例稳定而统一按 `--price 3` 计价——不带数值的
+机器 10 周历史的真实输出，为了让示例稳定而统一按 `--price 3` 计价——不带数值的
 `--price` 会按项目求解你真实的单价：
 
 ```
 $ warmline-audit --all --price 3
-147 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl per session from its cache buckets, 60m fallback)
+132 sessions under /Users/mb/.claude/projects  (8 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  95% hot  (10,394 of 10,921 turns)
-cold events   198  (159 rebuilt, 39 ttl) -- 1.8% of all turns
+cache health  █████████████████████████░  96% hot  (13,378 of 13,994 turns)
+cold events   211  (158 rebuilt, 53 ttl) -- 1.5% of all turns
 
 start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770    11%      $7.38
+08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770   9.7%      $7.38
    ⋮
-TOTAL                                10921  10394   329      159    39      12,134,109   100%     $69.16
+TOTAL                                13994  13378   405      158    53      13,306,845   100%     $75.85
 
 where the cold came from
-  unknown             ██████████████████████████  92 (39%)
-  session start       █████████████████  59 (25%)
-  auto-compact        ██████████  37 (16%)
-  inactivity          █████████  31 (13%)
+  unknown             ██████████████████████████  83 (29%)
+  auto-compact        ██████████████████████  70 (25%)
+  session start       ██████████████████████  69 (24%)
+  inactivity          ███████████  34 (12%)
+  inactivity+compact  ██████  19 (6.7%)
+  /compact            ██  7 (2.5%)
+  model change        █  1 (<1%)
 
-estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
+estimated avoidable premium ~$75.85  (top 5 sessions: $22.19, other 127: $53.66)
 ```
 
 这就是可观测性与装饰性状态栏的差别：一个你能据以行动、或据以决定不行动的模式。
 
 每个冷轮次都会在记录能**证明**的范围内附上原因——`/compact`、`auto-compact`、
-`model change`、`inactivity`——其余的一律落进 `unknown`，而它是**残差桶，不是结论**：
-记录里没有留下证据，所以 warmline 拒绝给它安一个原因。Anthropic 记录了好几种记录
-永远看不见的前缀失效操作——改变思考强度、打开 fast 模式、拒绝整个工具、启用或停用
-插件、连接会把工具载入前缀的 MCP 服务器，以及升级 Claude Code 本身——它们都会落到
-这里。会话中途编辑 CLAUDE.md 不会：Anthropic 把那一项列在*保住*缓存的操作里。在这台
-机器上，`unknown` 占了冷事件的 39%，比所有压缩加起来还多，而最糟的单个会话独占总量
-的 11%——这应当读作“占比最大的部分尚未得到解释”，那是去查的理由，而不是诊断结论。
+`model change`、`inactivity`，以及 `claude upgrade`：每条记录条目都写有当时的
+Claude Code 构建版本，所以一次 `version` 与上一轮不同的冷重建，就是升级在重写系统
+提示与工具。其余的一律落进 `unknown`，而它是**残差桶，不是结论**：记录里没有留下
+证据，所以 warmline 拒绝给它安一个原因。Anthropic 记录了好几种记录永远看不见的前缀
+失效操作——改变思考强度、打开 fast 模式、拒绝整个工具、启用或停用插件、连接会把工具
+载入前缀的 MCP 服务器——它们都会落到这里。会话中途编辑 CLAUDE.md 不会：Anthropic 把
+那一项列在*保住*缓存的操作里。在这台机器上，`unknown` 占了冷事件的 29%，仍是最大的
+单一类别，而最糟的单个会话独占总量的 9.7%——这应当读作“占比最大的部分尚未得到解释”，
+那是去查的理由，而不是诊断结论。
 （判定来自记录的用量，但 `COLD(rebuilt)` 与 `COLD(ttl)` 之间的划分取决于 TTL——它按
 会话从各自的缓存分桶记录中自动检测。）
 
@@ -271,11 +276,10 @@ warmline 的任何部分都触及不到它们。**
 
 ## 实测证据
 
-- **闲置 50 分钟：热的。70 分钟：冷的。** 在无干扰环境下的双臂探测中，50 分钟后的
-  探针读回了完整的 71,312 token 前缀，70 分钟后则重写了 45,033 个 token。一小时的
-  TTL 是真的，而且读取会刷新它。
-- **147 个会话、10,921 个轮次的审计**（同一台机器）：95% 为 hot，但其中 39% 的冷事件
-  **没有归到任何原因上**——那是记录未能提供证据的残差，不是一个有名字的成因。
+TTL 是实测的，不是假设的。在无干扰环境下的双臂探测中，一个闲置 **50 分钟**的会话
+从缓存读回了完整的 71,312 token 前缀；一个完全相同、闲置 **70 分钟**的会话则发现
+缓存已消失，重写了全部 45,033 个 token。50 分钟热，70 分钟冷——而且读取会刷新计时。
+本页其余的一切，都来自上面那份审计所评判的同一份语料。
 
 [数据、方法、如何复现 →](docs/MEASUREMENTS.md)（英文）
 

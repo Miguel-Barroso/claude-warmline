@@ -556,6 +556,65 @@ else
   echo "FAIL degenerate-marker:"; echo "$out"; fail=$((fail + 1))
 fi
 
+# `claude upgrade`: every entry records the Claude Code build that wrote it,
+# and a build change between consecutive turns is a proven prefix rewrite
+# (new system prompt, new tools). Same model throughout, so only the version
+# proof can claim this rebuild.
+AUPG="$SCRATCH/audit-upgrade.jsonl"
+cat > "$AUPG" <<'EOF'
+{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","version":"2.1.100","message":{"id":"u1","model":"claude-opus-5","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":20000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T00:02:00Z","version":"2.1.100","message":{"id":"u2","model":"claude-opus-5","usage":{"cache_read_input_tokens":20000,"cache_creation_input_tokens":300,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T00:04:00Z","version":"2.1.200","message":{"id":"u3","model":"claude-opus-5","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":21000,"input_tokens":5}}}
+EOF
+out=$(./warmline-audit "$AUPG")
+if [[ "$out" == *"COLD(rebuilt)  <- claude upgrade"* \
+   && "$out" == *"claude upgrade 1"* ]]; then
+  echo "ok   upgrade-cause: a build change between turns is attributed"; pass=$((pass + 1))
+else
+  echo "FAIL upgrade-cause:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Same build throughout: nothing for the version proof to claim, so the
+# rebuild falls through to unknown exactly as before.
+ASAMEV="$SCRATCH/audit-samever.jsonl"
+sed 's/2\.1\.200/2.1.100/' "$AUPG" > "$ASAMEV"
+out=$(./warmline-audit "$ASAMEV")
+if [[ "$out" == *"COLD(rebuilt)  <- unknown"* && "$out" != *"claude upgrade"* ]]; then
+  echo "ok   upgrade-same: unchanged version claims nothing"; pass=$((pass + 1))
+else
+  echo "FAIL upgrade-same:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Model change and build change on the same cold turn: both prove a prefix
+# rewrite; model change is the documented winner, so the report never flips
+# between the two proofs.
+ABOTH="$SCRATCH/audit-bothchange.jsonl"
+sed '3s/claude-opus-5/claude-sonnet-5/' "$AUPG" > "$ABOTH"
+out=$(./warmline-audit "$ABOTH")
+if [[ "$out" == *"COLD(rebuilt)  <- model change"* && "$out" != *"claude upgrade"* ]]; then
+  echo "ok   upgrade-vs-model: model change wins the tie, deterministically"; pass=$((pass + 1))
+else
+  echo "FAIL upgrade-vs-model:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Transcripts that predate version recording carry no field at all; absence
+# is not evidence, so the rebuild grades unknown exactly as it always did.
+ANOVER="$SCRATCH/audit-nover.jsonl"
+python3 - "$AUPG" "$ANOVER" <<'PY'
+import json, sys
+out = open(sys.argv[2], "w")
+for line in open(sys.argv[1]):
+    e = json.loads(line)
+    del e["version"]
+    out.write(json.dumps(e) + "\n")
+PY
+out=$(./warmline-audit "$ANOVER")
+if [[ "$out" == *"COLD(rebuilt)  <- unknown"* && "$out" != *"claude upgrade"* ]]; then
+  echo "ok   upgrade-nofield: missing version behaves as before (unknown)"; pass=$((pass + 1))
+else
+  echo "FAIL upgrade-nofield:"; echo "$out"; fail=$((fail + 1))
+fi
+
 # --all --price: the TOTAL row itself carries the premium (30200 avoidable
 # * 1.9 * $10/MTok = $0.57), the estimate disclaimer prints, and the notes
 # say which side of the input/output split the premium lives on.
@@ -1183,6 +1242,31 @@ else
 fi
 wl keep-warm off >/dev/null && wl keep-warm on >/dev/null   # back to a clean block
 
+# A user who skipped releases has a block that matches neither the current
+# policy nor the snapshot just replaced -- but it is still official wording,
+# recognized by the embedded hash list. Pull the v1.6.0 text from history so
+# the list is tested against what a release actually shipped (needs the tags,
+# i.e. a full clone). "ScheduleWakeup" appears only in that old wording.
+V16_POLICY="$SCRATCH/policy-v1.6.0.md"
+git show v1.6.0:keep-warm.md > "$V16_POLICY"
+python3 - "$IROOT/CLAUDE.md" "$MB" "$ME" "$V16_POLICY" <<'PY'
+import sys
+md, mb, me, pol = sys.argv[1:5]
+text = open(md).read()
+head, rest = text.split(mb, 1)
+_, tail = rest.split(me, 1)
+open(md, "w").write(head + mb + "\n" + open(pol).read() + me + tail)
+PY
+out=$(inst)   # $POLICY holds the *current* text, so the prev snapshot can't match
+if [[ "$out" == *"refreshed the keep-warm block"* ]] \
+   && ! grep -q "ScheduleWakeup" "$IROOT/CLAUDE.md" \
+   && grep -q "Keep the prompt cache warm" "$IROOT/CLAUDE.md" \
+   && grep -q 'my own rules' "$IROOT/CLAUDE.md"; then
+  echo "ok   ins-refresh-historical: a skipped-releases block is brought up to date"; pass=$((pass + 1))
+else
+  echo "FAIL ins-refresh-historical:"; echo "$out"; fail=$((fail + 1))
+fi
+
 # --uninstall removes everything warmline added, keeps the user's own text.
 inst --uninstall >/dev/null
 if [[ ! -e "$IROOT/warmline-statusline.py" && ! -e "$IBIN/warmline" \
@@ -1250,6 +1334,46 @@ if [[ "$out" == *"removed statusLine from"* && "$out" == *"keep-warm is still ON
   echo "ok   setup-remove: unwired, files gone, keep-warm block left and flagged"; pass=$((pass + 1))
 else
   echo "FAIL setup-remove: rc=$rc :: $out"; fail=$((fail + 1))
+fi
+
+# setup's refresh recognizes historical wording too. --remove above deleted
+# $POLICY, so there is no prev snapshot to match either: only the hash list
+# can tell this v1.6.0 block from a hand edit.
+python3 - "$SROOT/CLAUDE.md" "$MB" "$ME" "$V16_POLICY" <<'PY'
+import sys
+md, mb, me, pol = sys.argv[1:5]
+text = open(md).read()
+head, rest = text.split(mb, 1)
+_, tail = rest.split(me, 1)
+open(md, "w").write("my setup rules\n" + head + mb + "\n" + open(pol).read() + me + tail)
+PY
+out=$(setup)
+if [[ "$out" == *"refreshed the keep-warm block"* ]] \
+   && ! grep -q "ScheduleWakeup" "$SROOT/CLAUDE.md" \
+   && grep -q "Keep the prompt cache warm" "$SROOT/CLAUDE.md" \
+   && grep -q 'my setup rules' "$SROOT/CLAUDE.md"; then
+  echo "ok   setup-refresh-historical: old official wording refreshed in place"; pass=$((pass + 1))
+else
+  echo "FAIL setup-refresh-historical:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# ...while text matching no release -- current, previous, or historical -- is
+# a real hand edit, and stays exactly as the user wrote it.
+python3 - "$SROOT/CLAUDE.md" "$MB" "$ME" <<'PY'
+import sys
+md, mb, me = sys.argv[1:4]
+text = open(md).read()
+head, rest = text.split(mb, 1)
+_, tail = rest.split(me, 1)
+open(md, "w").write(head + mb + "\nMY OWN SETUP POLICY, HAND EDITED\n" + me + tail)
+PY
+out=$(setup)
+if [[ "$out" == *"looks"* && "$out" == *"hand-edited"* ]] \
+   && grep -q "MY OWN SETUP POLICY, HAND EDITED" "$SROOT/CLAUDE.md" \
+   && grep -q 'my setup rules' "$SROOT/CLAUDE.md"; then
+  echo "ok   setup-respects-edits: hand-edited block kept, refresh advised"; pass=$((pass + 1))
+else
+  echo "FAIL setup-respects-edits:"; echo "$out"; fail=$((fail + 1))
 fi
 
 # No data files anywhere: fail with the fix, don't wire a path to nothing.
