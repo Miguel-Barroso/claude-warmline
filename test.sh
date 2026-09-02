@@ -12,6 +12,25 @@ export CLAUDE_CONFIG_DIR="$SCRATCH/cfg"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# A synthetic Claude Code cost record, so derived prices are deterministic and
+# the developer's real ~/.claude.json is never read. Each entry solves to a
+# round rate: input-equivalent = in + 5*out + 2*write + 0.1*read, and
+# lastCost / that = the $/MTok the assertions below expect.
+python3 - "$CLAUDE_CONFIG_DIR/.claude.json" "$PWD" <<'PY'
+import json, sys
+def entry(rate, sid="s"):
+    tok = dict(lastTotalInputTokens=100000, lastTotalOutputTokens=20000,
+               lastTotalCacheCreationInputTokens=500000,
+               lastTotalCacheReadInputTokens=4000000,
+               lastTotalWebSearchRequests=0, lastSessionId=sid)
+    tok["lastCost"] = rate * 1.6   # 1.6 MTok input-equivalent
+    return tok
+json.dump({"projects": {sys.argv[2]: entry(3.0),          # the repo: $3/MTok
+                        "/tmp/priced-a": entry(10.0),
+                        "/tmp/priced-b": entry(5.0)}},
+          open(sys.argv[1], "w"))
+PY
+
 pass=0 fail=0
 check() { # name expected payload
   local out
@@ -28,15 +47,19 @@ check() { # name expected payload
 # because that is now the whole contract: no stamp file, no transcript read,
 # no gap timing. What Claude Code says is what the line shows.
 
-mkpayload() { # session_id  prompt_cache_json (empty string = field absent)
-  python3 - "$1" "$2" <<'PY'
+mkpayload() { # session_id  prompt_cache_json (empty = absent)  [pct] [tokens]
+              # [window: 0 omits the field]  [rate_limits json]
+  python3 - "$1" "$2" "${3:-42.7}" "${4:-85400}" "${5:-200000}" "${6:-}" <<'PY'
 import json, sys
 d = {
     "session_id": sys.argv[1],
     "model": {"display_name": "Test"},
     "workspace": {"current_dir": "/tmp/proj"},
     "context_window": {
-        "used_percentage": 42.7, "total_input_tokens": 168432,
+        # pct and tokens agree, as Claude Code's own payload does: it rounds
+        # the one from the other against the window below
+        "used_percentage": float(sys.argv[3]),
+        "total_input_tokens": int(sys.argv[4]),
         # deliberately non-zero: the old statusline read these to guess the
         # verdict, and the false-HOT regression below depends on them staying
         # present while `warm` says otherwise
@@ -44,8 +67,12 @@ d = {
                           "cache_creation_input_tokens": 2000},
     },
 }
+if sys.argv[5] != "0":
+    d["context_window"]["context_window_size"] = int(sys.argv[5])
 if sys.argv[2]:
     d["prompt_cache"] = json.loads(sys.argv[2])
+if sys.argv[6]:
+    d["rate_limits"] = json.loads(sys.argv[6])
 print(json.dumps(d))
 PY
 }
@@ -256,18 +283,91 @@ fi
 rm -f "$KWMD"
 
 # Auto-compact proximity: the compaction nobody chooses fires near the top of
-# the window and rewrites the prefix, so ctx goes yellow past the threshold.
-CTXHI=${HOT/42.7/86.0}
-out=$(printf '%s' "${CTXHI/t1/c1}" | env -u WARMLINE_NO_COLOR ./statusline.py)
-out2=$(printf '%s' "${CTXHI/t1/c2}" | WARMLINE_CTX_WARN_PCT=0 env -u WARMLINE_NO_COLOR ./statusline.py)
-out3=$(printf '%s' "${HOT/t1/c3}" | env -u WARMLINE_NO_COLOR ./statusline.py)
-out4=$(printf '%s' "${CTXHI/t1/c4}" | WARMLINE_CTX_WARN_PCT=nonsense env -u WARMLINE_NO_COLOR ./statusline.py)
-if [[ "$out" == *$'\033[33mctx 86% (168k)\033[0m'* && "$out2" == *"ctx 86% (168k) |"* \
+# the window and rewrites the prefix, so ctx goes yellow before it -- at the
+# threshold Claude Code actually uses (window - 33000), not a round guess.
+sl() { printf '%s' "$1" | env -u WARMLINE_NO_COLOR "${@:2}" ./statusline.py; }
+CTXHI=$(mkpayload c1 "$(pc 40 1h)" 86.0 172000)          # 5k inside 167000
+out=$(sl "$CTXHI")
+out2=$(sl "$(mkpayload c2 "$(pc 40 1h)" 86.0 172000)" env WARMLINE_CTX_WARN_PCT=0)
+out3=$(sl "$HOT")                                        # 43%, nowhere near
+out4=$(sl "$(mkpayload c4 "$(pc 40 1h)" 86.0 172000)" env WARMLINE_CTX_WARN_PCT=nonsense)
+if [[ "$out" == *$'\033[33mctx 86% (172k)\033[0m'* && "$out2" == *"ctx 86% (172k) |"* \
    && "$out2" != *$'\033[33mctx'* && "$out3" != *$'\033[33mctx'* \
    && "$out4" == *$'\033[33mctx 86%'* ]]; then
-  echo "ok   ctx-warn: yellow past 80%, plain below, 0 disables, junk falls back"; pass=$((pass + 1))
+  echo "ok   ctx-warn: yellow near the real threshold, 0 disables, junk = auto"; pass=$((pass + 1))
 else
   echo "FAIL ctx-warn: ${out@Q} / ${out2@Q} / ${out3@Q} / ${out4@Q}"; fail=$((fail + 1))
+fi
+
+# The same 86% is nowhere near compaction in a 1M window (967k), so a
+# percentage rule cries wolf there and the real threshold doesn't. An
+# explicit WARMLINE_CTX_WARN_PCT still overrides both ways.
+out=$(sl "$(mkpayload c5 "$(pc 40 1h)" 86.0 860000 1000000)")
+out2=$(sl "$(mkpayload c6 "$(pc 40 1h)" 86.0 860000 1000000)" env WARMLINE_CTX_WARN_PCT=80)
+if [[ "$out" != *$'\033[33mctx'* && "$out" == *"ctx 86% (860k)"* \
+   && "$out2" == *$'\033[33mctx 86%'* ]]; then
+  echo "ok   ctx-window: 86% of 1M stays plain, an explicit percent still warns"; pass=$((pass + 1))
+else
+  echo "FAIL ctx-window: ${out@Q} / ${out2@Q}"; fail=$((fail + 1))
+fi
+
+# Nothing to warn about when auto-compact can't fire, and nothing to compute
+# from when the payload carries no window: silence beats a guess in both.
+out=$(sl "$CTXHI" env DISABLE_AUTO_COMPACT=1)
+printf '{"autoCompactEnabled": false}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+out2=$(sl "$CTXHI")
+rm -f "$CLAUDE_CONFIG_DIR/settings.json"
+out3=$(sl "$(mkpayload c7 "$(pc 40 1h)" 86.0 172000 0)")
+if [[ "$out" != *$'\033[33mctx'* && "$out2" != *$'\033[33mctx'* \
+   && "$out3" != *$'\033[33mctx'* && "$out3" == *"ctx 86%"* ]]; then
+  echo "ok   ctx-nocompact: env, settings and an unknown window all stay quiet"; pass=$((pass + 1))
+else
+  echo "FAIL ctx-nocompact: ${out@Q} / ${out2@Q} / ${out3@Q}"; fail=$((fail + 1))
+fi
+
+# The stake: how big the next rebuild would be is the one number that says
+# whether keeping this cache warm is worth a wakeup, so it rides inside the
+# cache field rather than costing a segment of its own.
+out=$(sl "$(mkpayload s1 '{"warm":true,"caching_observed":true,"ttl":"1h","expires_at":null,"recache_tokens_if_cold":127000}')")
+out2=$(sl "$(mkpayload s2 '{"warm":true,"caching_observed":true,"ttl":"5m","expires_at":null,"recache_tokens_if_cold":1234567}')")
+out3=$(sl "$(mkpayload s3 '{"warm":true,"caching_observed":true,"ttl":"1h","expires_at":null,"recache_tokens_if_cold":400}')")
+out4=$(sl "$(mkpayload s4 "$(pc 40 1h)")")
+if [[ "$out" == *"cache HOT (127k)"* && "$out2" == *"cache HOT 5m (1.2M)"* \
+   && "$out3" == *"cache HOT"* && "$out3" != *"(0k"* && "$out3" != *"(400"* \
+   && "$out4" == *"cache HOT (cold ~$(at 40))"* ]]; then
+  echo "ok   cache-stake: rebuild size shown, rounded, hidden when trivial"; pass=$((pass + 1))
+else
+  echo "FAIL cache-stake: ${out@Q} / ${out2@Q} / ${out3@Q} / ${out4@Q}"; fail=$((fail + 1))
+fi
+
+# Plan limits are the currency a subscription user actually feels, and
+# Claude Code hands them to the statusline: show the window nearest its cap,
+# quietly until it matters, with the reset time once it does.
+q() { python3 -c 'import json,sys,time
+w = {"used_percentage": float(sys.argv[1])}
+if len(sys.argv) > 2: w["resets_at"] = time.time() + float(sys.argv[2]) * 60
+print(json.dumps({sys.argv[3] if len(sys.argv) > 3 else "five_hour": w}))' "$@"; }
+out=$(sl "$(mkpayload q1 "$(pc 40 1h)" 42.7 85400 200000 "$(q 40)")")
+out2=$(sl "$(mkpayload q2 "$(pc 40 1h)" 42.7 85400 200000 "$(q 62)")")
+out3=$(sl "$(mkpayload q3 "$(pc 40 1h)" 42.7 85400 200000 "$(q 91 25)")")
+out4=$(sl "$(mkpayload q4 "$(pc 40 1h)" 42.7 85400 200000 "$(q 96 25 seven_day)")")
+out5=$(sl "$(mkpayload q5 "$(pc 40 1h)" 42.7 85400 200000 "$(q 91 25)")" env WARMLINE_NO_QUOTA=1)
+if [[ "$out" != *"5h"* && "$out2" == *"| 5h 62%"* && "$out2" != *$'\033[33m5h'* \
+   && "$out3" == *$'\033[33m5h 91% ('"$(at 25)"$')\033[0m'* \
+   && "$out4" == *$'\033[31m7d 96% ('"$(at 25)"$')\033[0m'* \
+   && "$out5" != *"5h"* ]]; then
+  echo "ok   quota: hidden under 50%, plain, yellow with reset, red, opt-out"; pass=$((pass + 1))
+else
+  echo "FAIL quota: ${out@Q} / ${out2@Q} / ${out3@Q} / ${out4@Q} / ${out5@Q}"; fail=$((fail + 1))
+fi
+
+# API-key, Bedrock and Vertex sessions have no plan windows, so Claude Code
+# sends no rate_limits at all: no field, no zeros, no invented 0%.
+out=$(sl "$HOT")
+if [[ "$out" != *"5h"* && "$out" != *"7d"* && "$out" == *"cache HOT"* ]]; then
+  echo "ok   quota-absent: no plan limits in the payload, no quota field"; pass=$((pass + 1))
+else
+  echo "FAIL quota-absent: ${out@Q}"; fail=$((fail + 1))
 fi
 
 # warmline-audit: synthetic transcript with one of each verdict, a duplicate
@@ -303,23 +403,61 @@ fi
 out=$(./warmline-audit --price 10 "$AUDIT_T")
 if [[ "$out" == *'cost ~$1.16 more'* \
    && "$out" == *'estimated avoidable premium ~$0.59'* \
-   && "$out" == *'output tokens at $50/MTok'* ]]; then
+   && "$out" == *'output tokens at $50/MTok'* \
+   && "$out" == *'input $10/MTok as given on the command line'* ]]; then
   echo "ok   audit-price: cold cost \$1.16, premium \$0.59, output at 5x input"; pass=$((pass + 1))
 else
   echo "FAIL audit-price: expected '~\$1.16', '~\$0.59', '\$50/MTok' in:"; echo "$out"; fail=$((fail + 1))
 fi
 
-# Bare --price prices at the current sheet ($3/MTok input, 5x = $15 output);
-# --price-out overrides the output rate independently of the input rate.
+# Bare --price derives the rate from Claude Code's own cost record (the
+# fixture ledger solves to exactly $3/MTok, 5x = $15 output) and says so;
+# --price-in / --price-out still override, and say that instead.
 out=$(./warmline-audit --price "$AUDIT_T")
 out2=$(./warmline-audit --price-in 10 --price-out 25 "$AUDIT_T")
-if [[ "$out" == *'at $3/MTok base input'* && "$out" == *'output tokens at $15/MTok'* \
+if [[ "$out" == *'input $3/MTok, derived from'* \
+   && "$out" == *'($4.80 over 1.6 MTok input-equivalent)'* \
+   && "$out" == *'output tokens at $15/MTok'* \
    && "$out" == *'estimated avoidable premium ~$0.18'* \
-   && "$out2" == *'at $10/MTok base input'* \
+   && "$out2" == *'input $10/MTok as given on the command line'* \
    && "$out2" == *'output tokens at $25/MTok'* ]]; then
-  echo "ok   audit-price-defaults: bare --price = \$3/\$15, --price-out overrides"; pass=$((pass + 1))
+  echo "ok   audit-price-defaults: bare --price derives \$3/\$15, flags override"; pass=$((pass + 1))
 else
   echo "FAIL audit-price-defaults:"; echo "$out"; echo "$out2"; fail=$((fail + 1))
+fi
+
+# No cost record to solve from: the $3 placeholder is still used, but it is
+# labeled ASSUMED rather than passed off as the user's rate.
+out=$(HOME="$SCRATCH/nohome" CLAUDE_CONFIG_DIR="$SCRATCH/nohome" \
+      ./warmline-audit --price "$AUDIT_T")
+if [[ "$out" == *'input $3/MTok ASSUMED (Sonnet tier)'* \
+   && "$out" == *"placeholder, not your price"* \
+   && "$out" != *"derived from"* ]]; then
+  echo "ok   audit-price-assumed: unreadable cost record labels its fallback"; pass=$((pass + 1))
+else
+  echo "FAIL audit-price-assumed:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# The premium multiplier follows the session's own cache bucket: a 5m write
+# costs 1.25x and a warm read 0.1x, so only 1.15x is avoidable -- not the
+# 1.9x of the 1-hour bucket. Same tokens, 39% less premium.
+A5M="$SCRATCH/audit-5m.jsonl"
+python3 - "$AUDIT_T" "$A5M" <<'PY'
+import json, sys
+out = open(sys.argv[2], "w")
+for line in open(sys.argv[1]):
+    e = json.loads(line)
+    u = e["message"]["usage"]
+    u["cache_creation"] = {"ephemeral_5m_input_tokens": u["cache_creation_input_tokens"],
+                           "ephemeral_1h_input_tokens": 0}
+    out.write(json.dumps(e) + "\n")
+PY
+out=$(./warmline-audit --price 10 "$A5M")
+if [[ "$out" == *"~1.25x base input on this session's 5m cache"* \
+   && "$out" == *'estimated avoidable premium ~$0.36'* ]]; then
+  echo "ok   premium-bucket: 5m session priced at 1.15x, not 1.9x"; pass=$((pass + 1))
+else
+  echo "FAIL premium-bucket:"; echo "$out"; fail=$((fail + 1))
 fi
 
 # Output tokens are summed from the transcript and priced at the output
@@ -423,11 +561,36 @@ fi
 # say which side of the input/output split the premium lives on.
 out=$(./warmline-audit --all --price 10 "$ROOT")
 if [[ "$(echo "$out" | grep '^TOTAL')" == *'$0.57'* && "$out" == *"not billing data"* \
-   && "$out" == *'base input $10/MTok'* && "$out" == *"input-side only"* \
+   && "$out" == *'input $10/MTok as given on the command line'* \
+   && "$out" == *"per session's own cache bucket"* && "$out" == *"input-side only"* \
    && "$out" == *'$50/MTok warm or cold'* ]]; then
   echo "ok   all-price: TOTAL premium \$0.57, input/output split labeled"; pass=$((pass + 1))
 else
   echo "FAIL all-price:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Across projects there is no single right price -- an Opus project and a
+# Sonnet one bill differently -- so each session is priced at the rate
+# derived for its own project: identical transcripts, 2x apart in premium.
+PROOT="$SCRATCH/priced"
+mkdir -p "$PROOT/-tmp-priced-a" "$PROOT/-tmp-priced-b"
+for p in a b; do
+  python3 - "$AUDIT_T" "$PROOT/-tmp-priced-$p/sess.jsonl" "/tmp/priced-$p" <<'PY'
+import json, sys
+out = open(sys.argv[2], "w")
+for line in open(sys.argv[1]):
+    e = json.loads(line)
+    e["cwd"] = sys.argv[3]
+    out.write(json.dumps(e) + "\n")
+PY
+done
+out=$(./warmline-audit --all --price "$PROOT")
+if [[ "$(echo "$out" | grep 'priced-a')" == *'$0.59'* \
+   && "$(echo "$out" | grep 'priced-b')" == *'$0.29'* \
+   && "$out" == *"each project's sessions are priced at its own derived rate"* ]]; then
+  echo "ok   all-price-per-project: \$10 and \$5 projects priced apart"; pass=$((pass + 1))
+else
+  echo "FAIL all-price-per-project:"; echo "$out"; fail=$((fail + 1))
 fi
 
 # --all --json --price: machine-readable, correct ordering, totals, premiums.
@@ -902,6 +1065,51 @@ else
   echo "FAIL wait-usage: rcs=$rc$rc2$rc3$rc4$rc5$rc6$rc7"; echo "$out"; fail=$((fail + 1))
 fi
 
+# --until-cold: the wake is timed off this session's real expiry, read from
+# its own transcript, instead of a schedule guessed in advance. A transcript
+# whose last turn is two hours old is already past its 1h deadline.
+WFSLUG=$(python3 -c 'import os,re;print(re.sub(r"[^A-Za-z0-9]","-",os.getcwd()))')
+mkdir -p "$IROOT/projects/$WFSLUG"
+wfsess() { # minutes_ago -> a one-turn transcript ending that long ago
+  python3 -c 'import datetime, json, sys
+t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=float(sys.argv[2]))
+print(json.dumps({"type": "assistant", "timestamp": t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "requestId": "w1", "cwd": "/tmp/proj",
+                  "message": {"usage": {"input_tokens": 5, "cache_read_input_tokens": 0,
+                                        "cache_creation_input_tokens": 30000,
+                                        "cache_creation": {"ephemeral_1h_input_tokens": 30000}}}}))' \
+    _ "$1" > "$IROOT/projects/$WFSLUG/sess.jsonl"
+}
+
+wfsess 120
+rc=0; out=$(wf --until-cold --every 0 --timeout 5) || rc=$?
+sleep 2 & WFPID=$!
+wfsess 0
+rc2=0; out2=$(wf --pid "$WFPID" --until-cold --every 0 --timeout 5) || rc2=$?
+wfsess 120
+sleep 3 & WFPID2=$!
+rc3=0; out3=$(wf --pid "$WFPID2" --until-cold --every 0 --timeout 5) || rc3=$?
+kill "$WFPID2" 2>/dev/null || true
+if [[ "$rc" == 3 && "$out" == *"cache deadline reached"* \
+   && "$rc2" == 0 && "$out2" == *"pid $WFPID finished"* \
+   && "$rc3" == 3 && "$out3" == *"still waiting on pid"* ]]; then
+  echo "ok   wait-until-cold: expiry ends the wait (exit 3), a live target wins"; pass=$((pass + 1))
+else
+  echo "FAIL wait-until-cold: rc=$rc/$rc2/$rc3 :: $out | $out2 | $out3"; fail=$((fail + 1))
+fi
+
+# No transcript to read the expiry from is a setup error, and it is worth
+# failing on before the wait rather than at the deadline that never comes.
+rm -f "$IROOT/projects/$WFSLUG/sess.jsonl"
+rc=0; err=$(wf --until-cold --every 0 --timeout 5 2>&1 >/dev/null) || rc=$?
+out=$(wl wait-for --help)
+if [[ "$rc" == 2 && "$err" == *"can't read this session's cache expiry"* \
+   && "$out" == *"--until-cold"* && "$out" == *"cache deadline came first"* ]]; then
+  echo "ok   wait-until-cold-guard: unreadable expiry exits 2, help documents 3"; pass=$((pass + 1))
+else
+  echo "FAIL wait-until-cold-guard: rc=$rc :: $err"; fail=$((fail + 1))
+fi
+
 # Installer help: install-side flags only, pointing control at warmline.
 out=$(inst --help)
 if [[ "$out" == *"--keep-warm"* && "$out" == *"--uninstall"* \
@@ -995,6 +1203,72 @@ if [[ "$rc1" == 2 && "$rc2" == 2 && "$rc3" == 2 ]]; then
   echo "ok   ins-flags-rejected: --status/--keep-warm-off gone, modes exclusive"; pass=$((pass + 1))
 else
   echo "FAIL ins-flags-rejected: rc1=$rc1 rc2=$rc2 rc3=$rc3"; fail=$((fail + 1))
+fi
+
+# `warmline setup` is the wiring half of install.sh on its own, for package
+# managers: they put the commands on PATH, and a package must never edit the
+# user's Claude Code config. It has to work from a prefix layout too, where
+# the CLI is a symlink in bin and the data files sit in ../share/warmline.
+SROOT="$(mktemp -d)"; SPREFIX="$(mktemp -d)"
+mkdir -p "$SPREFIX/bin" "$SPREFIX/share/warmline"
+cp warmline warmline-audit "$SPREFIX/bin/"
+cp statusline.py keep-warm.md "$SPREFIX/share/warmline/"
+mkdir -p "$SPREFIX/linked"; ln -sf "$SPREFIX/bin/warmline" "$SPREFIX/linked/warmline"
+setup() { CLAUDE_CONFIG_DIR="$SROOT" "$SPREFIX/linked/warmline" setup "$@"; }
+out=$(setup)
+if [[ "$out" == *"statusLine wired in"* ]] \
+   && [ -x "$SROOT/warmline-statusline.py" ] && [ -f "$SROOT/warmline-keep-warm.md" ] \
+   && grep -qF "warmline-statusline.py" "$SROOT/settings.json" \
+   && grep -qF '"refreshInterval": 60' "$SROOT/settings.json"; then
+  echo "ok   setup-prefix: wires from bin/ + share/warmline through a symlink"; pass=$((pass + 1))
+else
+  echo "FAIL setup-prefix:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Same refusal contract as the installer: a foreign statusLine needs --force.
+printf '{"statusLine":{"type":"command","command":"/usr/bin/other-line"}}\n' > "$SROOT/settings.json"
+rc=0; out=$(setup) || rc=$?
+rc2=0; setup --force >/dev/null || rc2=$?
+if [[ "$rc" == 1 && "$out" == *"re-run with --force"* && "$rc2" == 0 ]] \
+   && [ -f "$SROOT/settings.json.warmline-bak" ] \
+   && grep -qF "warmline-statusline.py" "$SROOT/settings.json"; then
+  echo "ok   setup-foreign: refused bare, replaced with --force, backup kept"; pass=$((pass + 1))
+else
+  echo "FAIL setup-foreign: rc=$rc rc2=$rc2 :: $out"; fail=$((fail + 1))
+fi
+
+# --remove unwires and takes back its own files -- and says what it did not
+# touch, because the keep-warm block is a separate decision.
+CLAUDE_CONFIG_DIR="$SROOT" "$SPREFIX/linked/warmline" keep-warm on >/dev/null
+out=$(setup --remove)
+rc=0; setup --remove --force >/dev/null 2>&1 || rc=$?
+if [[ "$out" == *"removed statusLine from"* && "$out" == *"keep-warm is still ON"* \
+   && "$rc" == 2 ]] \
+   && [ ! -e "$SROOT/warmline-statusline.py" ] && [ ! -e "$SROOT/warmline-keep-warm.md" ] \
+   && ! grep -q statusLine "$SROOT/settings.json" \
+   && grep -qF "$MB" "$SROOT/CLAUDE.md"; then
+  echo "ok   setup-remove: unwired, files gone, keep-warm block left and flagged"; pass=$((pass + 1))
+else
+  echo "FAIL setup-remove: rc=$rc :: $out"; fail=$((fail + 1))
+fi
+
+# No data files anywhere: fail with the fix, don't wire a path to nothing.
+rm -f "$SPREFIX/share/warmline/statusline.py"
+rc=0; err=$(cd "$SPREFIX" && CLAUDE_CONFIG_DIR="$SROOT" ./linked/warmline setup 2>&1 >/dev/null) || rc=$?
+if [[ "$rc" == 1 && "$err" == *"can't find statusline.py"* && "$err" == *"WARMLINE_SHARE_DIR"* ]]; then
+  echo "ok   setup-no-source: missing data files exit 1 with the override named"; pass=$((pass + 1))
+else
+  echo "FAIL setup-no-source: rc=$rc :: $err"; fail=$((fail + 1))
+fi
+rm -rf "$SROOT" "$SPREFIX"
+
+# install.sh can fetch with wget where curl isn't installed: minimal images
+# ship one or the other, and the one-liner on the front page offers both.
+if grep -q 'command -v curl' install.sh && grep -q 'wget -qO' install.sh \
+   && grep -q 'needs curl or wget' install.sh; then
+  echo "ok   ins-wget: curl-or-wget download path"; pass=$((pass + 1))
+else
+  echo "FAIL ins-wget: install.sh still assumes curl"; fail=$((fail + 1))
 fi
 
 # Color gating: piped output carries no ANSI even with the opt-outs unset

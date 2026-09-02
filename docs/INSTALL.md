@@ -6,6 +6,20 @@
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 ```
 
+or, on a machine with `wget` and no `curl` (the installer uses whichever it
+finds, for its own downloads too):
+
+```sh
+wget -qO- https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
+```
+
+or with Homebrew, from this project's tap:
+
+```sh
+brew install Miguel-Barroso/warmline/warmline
+warmline setup
+```
+
 or from a checkout:
 
 ```sh
@@ -15,7 +29,8 @@ cd claude-warmline
 ```
 
 Requires `python3` (standard library only) and `bash`. Nothing else, and
-nothing phones home.
+nothing phones home. The Homebrew path is two commands rather than one on
+purpose — [see below](#from-a-package-manager).
 
 ## Installing a specific release
 
@@ -38,6 +53,41 @@ A pinned install always goes to the network, even from a checkout: the tree you
 happen to be standing in is not the tag you asked for. From a checkout, the
 equivalent is `git checkout v2.1.0 && ./install.sh` — which needs no network at
 all. Releases before v2.1.0 predate the flag; pin those with the checkout form.
+
+## From a package manager
+
+A package manager owns its prefix and nothing else. It can put `warmline` and
+`warmline-audit` on your `PATH` and the data files in `share/warmline`, but it
+must not reach into `~/.claude` and rewrite your `settings.json` — so that half
+is a command you run:
+
+```sh
+warmline setup            # installs the statusline, wires settings.json
+warmline setup --force    # replace a statusLine that isn't warmline's
+warmline setup --remove   # unwire it and take back the files it installed
+```
+
+`setup` is exactly the wiring half of `install.sh`: same backup, same refusal to
+replace a foreign statusline without `--force`, same `refreshInterval`, same
+keep-warm block refresh. It finds `statusline.py` and `keep-warm.md` beside the
+command or in `../share/warmline`, following symlinks (which is how a Homebrew
+`bin` symlink into the Cellar resolves); `WARMLINE_SHARE_DIR` overrides. Re-run
+it after upgrading the package, and `warmline status` confirms the result.
+
+Homebrew is the one that exists today:
+
+```sh
+brew install Miguel-Barroso/warmline/warmline   # taps Miguel-Barroso/homebrew-warmline
+brew upgrade warmline && warmline setup         # later
+```
+
+`brew uninstall warmline` takes the commands away; run `warmline setup --remove`
+**first** if you want the Claude Code side unwired too, since after the uninstall
+there is no command left to do it. The formula's source of truth is
+[`packaging/homebrew/warmline.rb`](../packaging/homebrew/warmline.rb) in this
+repo, copied into the tap on each release —
+[`packaging/README.md`](../packaging/README.md) covers how it is built and
+tested, and what a distro package would need to do.
 
 ## What lands where
 
@@ -93,7 +143,7 @@ claude-warmline status  (config: /Users/mb/.claude)
   statusline  ON   /Users/mb/.claude/warmline-statusline.py
   keep-warm   OFF  (enable: warmline keep-warm on)
   auditor     ON   /Users/mb/.local/bin/warmline-audit
-  ttl         auto -- from each transcript's cache buckets (60m fallback)
+  ttl         auto -- warmline-audit reads it per transcript (60m fallback); the statusline uses Claude Code's own
   refresh     every 60s while idle -- the gauge can't go stale
 ```
 
@@ -134,7 +184,9 @@ of that file untouched.
 | `WARMLINE_BIN_DIR` | `~/.local/bin` | where the installer puts the `warmline` and `warmline-audit` commands |
 | `WARMLINE_REF` | `main` | the tag or branch the installer fetches files from — same as `--ref`; also pins the `warmline` command's last-resort download of the policy text |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, the statusline never shows the keep-warm field |
-| `WARMLINE_CTX_WARN_PCT` | `80` | percentage at which the statusline's `ctx` field turns yellow (auto-compact warning); `0` disables |
+| `WARMLINE_NO_QUOTA` | unset | if set, the statusline never shows the plan-limit field (`5h 78%`) |
+| `WARMLINE_SHARE_DIR` | unset | where `warmline setup` looks for `statusline.py` and `keep-warm.md`; unset, beside the command then `../share/warmline` |
+| `WARMLINE_CTX_WARN_PCT` | unset (auto) | percentage at which the statusline's `ctx` field turns yellow; unset, it warns within 10k of where auto-compact actually fires (`window - 33000`) and stays silent when auto-compact is off; `0` disables |
 | `WARMLINE_NO_COLOR` | unset | if set (or `NO_COLOR`), plain output without ANSI colors |
 | `WARMLINE_FORCE_COLOR` | unset | if set, colored audit output even when piped |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code's config dir — warmline follows it for settings, CLAUDE.md and transcripts |
@@ -151,7 +203,7 @@ stamp files the statusline no longer keeps.
 
 ## Compatibility
 
-Verified against Claude Code **2.1.233**. The statusline's JSON fields were
+Verified against Claude Code **2.1.252**. The statusline's JSON fields were
 checked against real harness payloads, and `warmline-audit` parses every
 transcript format present on the reference machine — Claude Code versions
 **2.1.181 through 2.1.233**, 145 sessions, zero malformed entries. One known
@@ -206,7 +258,12 @@ installed copy intact); the `warmline` CLI's
 keep-warm state transitions (on→on, off→off, malformed blocks reported
 truthfully instead of a false ON), with unrelated CLAUDE.md content verified to
 survive every operation and a clean-install check that the `warmline` command
-actually lands; and `warmline awake` against a stub inhibitor — the exact
+actually lands; `warmline awake` against a stub inhibitor — the exact
 `caffeinate -is` invocation, the default `claude` command, and the wrapped
 command's exit propagating straight through (the no-sleep cleanup-on-`/exit`
-guarantee, held by construction). The same suite runs in CI on every push.
+guarantee, held by construction); and `warmline setup` against a synthetic
+prefix (`bin/` + `share/warmline`, reached through a symlink), covering the
+force/refusal contract, `--remove`, and a missing source tree. Pricing is
+hermetic: the suite ships a synthetic `.claude.json` whose arithmetic solves to
+round rates, so no test reads your real cost data. The same suite runs in CI on
+every push.

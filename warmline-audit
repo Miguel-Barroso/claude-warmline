@@ -20,10 +20,10 @@ Usage:
                                       # filtering proxy) is doing the reading;
                                       # combines with --all and --live
     warmline-audit --ttl 5            # force a TTL instead of detecting it
-    warmline-audit --price [3]        # dollar estimates; the number is your
-                                      # model's base INPUT $/MTok (bare
-                                      # --price uses $3, the current Sonnet
-                                      # input price); --price-in is an alias
+    warmline-audit --price            # dollar estimates at YOUR rate, solved
+                                      # from Claude Code's own cost record
+    warmline-audit --price 5          # ...or override with a base INPUT
+                                      # $/MTok; --price-in is an alias
     warmline-audit --price-out [15]   # OUTPUT $/MTok, for the output-token
                                       # line; defaults to 5x the input price
                                       # -- the ratio every current Claude
@@ -34,6 +34,13 @@ Usage:
     warmline-audit --live             # which sessions are warm RIGHT NOW,
                                       # and when each goes cold (this is
                                       # what `warmline watch` re-renders)
+    warmline-audit --cold-at          # one machine-readable line for the
+                                      # current session: expiry epoch, cache
+                                      # bucket, ttl minutes, transcript --
+                                      # read from the file's tail, so a
+                                      # poller can ask every few seconds
+                                      # (this is what `wait-for --until-cold`
+                                      # asks)
 
 Input and output tokens bill at different rates, so they are priced
 separately: all cache economics (reads, writes, the avoidable premium)
@@ -41,10 +48,22 @@ are INPUT-side and use --price; output tokens are never cached -- warmth
 doesn't change what they cost -- and are reported as their own line at
 the --price-out rate, so the totals aren't mistaken for the whole bill.
 
+warmline ships no price sheet, because one would go stale and would
+misprice the moment you switched models. Bare --price instead solves for
+your effective base input rate from the cost Claude Code itself recorded
+for your last session in .claude.json, using the ratios every Claude
+pricing tier shares (output 5x base input, a 1-hour cache write 2x, a
+5-minute write 1.25x, a warm read 0.1x). --all prices each project at its
+own derived rate. Where the number came from is printed with it, every
+time; --price N overrides, and a placeholder $3 is used only when Claude
+Code's cost record can't be read -- labelled ASSUMED when it is.
+
 The TTL each session is graded against is auto-detected from its own
 usage entries (cache writes record their ephemeral_5m/1h bucket);
 --ttl / WARMLINE_TTL_MIN force one, and 60m is the fallback when a
-transcript predates bucket recording.
+transcript predates bucket recording. That same bucket sets the premium:
+1.9x on the 1-hour cache, 1.15x on the 5-minute one. A forced --ttl
+changes what counts as expired, never what a write cost.
 
 Verdicts (authoritative here, unlike the statusline's one-turn lag):
   HOT            the turn read its prefix from the cache
@@ -92,16 +111,26 @@ TTL_FORCED = "WARMLINE_TTL_MIN" in os.environ
 PROJECTS_DIR = os.path.join(
     os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"),
     "projects")
-# a 1h-TTL cache write bills ~2x base input; a warm read ~0.1x -- the
-# avoidable premium of going cold is the 1.9x difference. Both are
-# multiples of the INPUT price; output tokens are never cached.
-PREMIUM_X = 1.9
-# defaults mirror the current Claude API price sheet: $3/MTok base input
-# (Sonnet tier, the price the docs' examples use), and output at 5x input
-# -- the ratio every current Claude model bills at ($3/$15, $5/$25,
-# $1/$5, $10/$50)
+# Every Claude pricing tier bills the same multiples of its own base input
+# price: output 5x, a 1-hour cache write 2x, a 5-minute cache write 1.25x, a
+# warm read 0.1x, and $0.01 per web search. Verified identical across all
+# seven tiers Claude Code ships with, which is what lets everything below be
+# computed without knowing which model ran.
+RATIO_OUT, RATIO_W1H, RATIO_W5M, RATIO_READ = 5.0, 2.0, 1.25, 0.1
+WEB_SEARCH_USD = 0.01
+# the avoidable premium of going cold is write minus read: 1.9x on the
+# 1-hour bucket, 1.15x on the 5-minute one. Applying 1.9x to a 5m session
+# overstates it by ~65%, so the bucket the session actually used decides.
+PREMIUM_X = {"1h": RATIO_W1H - RATIO_READ, "5m": RATIO_W5M - RATIO_READ}
+PREMIUM_DEFAULT = PREMIUM_X["1h"]
+# last-resort input price, used only when Claude Code's own cost accounting
+# can't be read: $3/MTok is the Sonnet tier, the price the docs' examples
+# use. Always labelled "assumed" when it is what got used.
 PRICE_IN_DEFAULT = 3.0
-PRICE_OUT_RATIO = 5
+PRICE_OUT_RATIO = RATIO_OUT
+# a derived price outside this range means the arithmetic found something
+# other than a Claude session; fall back rather than print a wrong number
+PRICE_SANE_MIN, PRICE_SANE_MAX = 0.5, 30.0
 
 # ANSI only when a human is watching: stdout is a tty and neither NO_COLOR
 # nor WARMLINE_NO_COLOR is set. WARMLINE_FORCE_COLOR turns color on without
@@ -188,11 +217,12 @@ def parse_ts(ts):
 
 
 def parse_transcript(path):
-    """(turns, compacts, label, ttl_hint): turns are (time, read, write,
+    """(turns, compacts, label, bucket): turns are (time, read, write,
     model, output) per API request; compacts are sorted (time, trigger); label is
-    the basename of the first assistant entry's cwd; ttl_hint is the TTL
-    in minutes the session's cache writes imply (5 when the 5m bucket
-    dominates, 60 for the 1h bucket, None when unrecorded)."""
+    the basename of the first assistant entry's cwd; bucket is the cache TTL
+    bucket the session's writes were billed at ('5m' or '1h', None when
+    unrecorded) -- it sets both the TTL to grade against and the premium
+    multiplier, since the two buckets don't cost the same."""
     turns, seen, compacts, label = [], set(), [], None
     eph5 = eph1h = 0
     with open(path) as f:
@@ -239,8 +269,8 @@ def parse_transcript(path):
                           usage.get("output_tokens") or 0))
     turns.sort(key=lambda x: x[0])
     compacts.sort(key=lambda x: x[0])
-    ttl_hint = 5 if eph5 > eph1h else 60 if eph1h else None
-    return turns, compacts, label, ttl_hint
+    bucket = "5m" if eph5 > eph1h else "1h" if eph1h else None
+    return turns, compacts, label, bucket
 
 
 def verdict_of(read, write, gap_min, ttl_min):
@@ -315,19 +345,224 @@ def summarize(rows):
 
 
 def audit_session(path):
-    turns, compacts, label, ttl_hint = parse_transcript(path)
+    turns, compacts, label, bucket = parse_transcript(path)
     if not turns:
         return None
+    ttl_hint = {"5m": 5.0, "1h": 60.0}.get(bucket)
     ttl = TTL_MIN if TTL_FORCED else (ttl_hint or TTL_MIN)
     rows = grade(turns, compacts, ttl)
     s = summarize(rows)
     s["transcript"] = path
     s["project"] = label or os.path.basename(os.path.dirname(path))
+    # the directory name is the cwd's slug -- the join key to Claude Code's
+    # own per-project cost record
+    s["slug"] = os.path.basename(os.path.dirname(path))
     s["start"] = rows[0]["time"]
     s["ttl_min"] = ttl
     s["ttl_source"] = ("forced" if TTL_FORCED else
-                       "buckets" if ttl_hint else "default")
+                       "buckets" if bucket else "default")
+    # a forced TTL changes what counts as expired, never what a write cost:
+    # the bucket is a billing fact, so the premium follows the transcript
+    s["bucket"] = bucket
+    s["premium_x"] = PREMIUM_X.get(bucket, PREMIUM_DEFAULT)
     return s, rows
+
+
+def tail_lines(path, nbytes=262144):
+    """The last nbytes of a file as whole lines. A transcript grows without
+    bound; when all that's wanted is the latest turn, the cost of finding it
+    shouldn't grow with it."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - nbytes))
+        data = f.read()
+    if size > nbytes:
+        data = data.split(b"\n", 1)[-1]   # drop the partial first line
+    return data.decode("utf-8", "replace").splitlines()
+
+
+def cold_at(path):
+    """(epoch, bucket, ttl_min) for when this session's cache expires, or
+    None when the tail holds no API turn. Read from the end of the file so a
+    poller can ask repeatedly for the price of a seek."""
+    last_t, bucket = None, None
+    for line in tail_lines(path):
+        if "assistant" not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("isSidechain") or e.get("type") != "assistant":
+            continue
+        usage = (e.get("message") or {}).get("usage") or {}
+        t = parse_ts(e["timestamp"]) if e.get("timestamp") else None
+        if not usage or t is None:
+            continue
+        if last_t is None or t > last_t:
+            last_t = t
+        cc = usage.get("cache_creation") or {}
+        if cc.get("ephemeral_5m_input_tokens"):
+            bucket = "5m"
+        elif cc.get("ephemeral_1h_input_tokens"):
+            bucket = "1h"
+    if last_t is None:
+        return None
+    ttl = TTL_MIN if TTL_FORCED else ({"5m": 5.0, "1h": 60.0}.get(bucket) or TTL_MIN)
+    return last_t.timestamp() + ttl * 60, bucket or "?", ttl
+
+
+def ledger_path():
+    """Claude Code's own config file, where it records what each project's
+    last session cost. $CLAUDE_CONFIG_DIR wins when it holds one."""
+    for base in (os.environ.get("CLAUDE_CONFIG_DIR"), "~"):
+        if not base:
+            continue
+        p = os.path.join(os.path.expanduser(base), ".claude.json")
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def derive_price(project_dir=None):
+    """Base input $/MTok solved from Claude Code's own cost accounting.
+
+    Every projects[] entry in .claude.json carries the last session's cost
+    beside its token totals. Because all Claude tiers bill on the same
+    ratios, one session pins the input price without a price sheet:
+
+        p_in = (cost - web searches) / (in + 5*out + 2*write + 0.1*read)
+
+    which is the point: it follows whatever model actually ran, and it
+    re-derives itself every session instead of going stale in this file. The
+    write term assumes the 1-hour bucket the main conversation uses; a
+    session that wrote 5-minute caches (subagent-heavy work) derives a
+    slightly low price, never a wildly wrong one.
+
+    project_dir picks whose session to use; the largest entry is the
+    fallback, being the one with the most tokens behind its arithmetic.
+    Returns (usd_per_mtok, note) or None when nothing usable is on disk.
+    """
+    best = None
+    for name, entry in ledger_projects().items():
+        cand = solve_price(name, entry)
+        if cand is None:
+            continue
+        if project_dir and os.path.abspath(name) == os.path.abspath(project_dir):
+            return cand
+        if best is None or cand[1]["mtok"] > best[1]["mtok"]:
+            best = cand
+    return best
+
+
+def ledger_projects():
+    path = ledger_path()
+    if not path:
+        return {}
+    try:
+        with open(path) as f:
+            projects = (json.load(f) or {}).get("projects") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return projects if isinstance(projects, dict) else {}
+
+
+def solve_price(name, entry):
+    """(usd_per_mtok, provenance) for one project's recorded session, or None
+    when its numbers don't add up to a price worth showing."""
+    if not isinstance(entry, dict):
+        return None
+    try:
+        cost = float(entry.get("lastCost") or 0)
+        tok_in = float(entry.get("lastTotalInputTokens") or 0)
+        tok_out = float(entry.get("lastTotalOutputTokens") or 0)
+        write = float(entry.get("lastTotalCacheCreationInputTokens") or 0)
+        read = float(entry.get("lastTotalCacheReadInputTokens") or 0)
+        web = float(entry.get("lastTotalWebSearchRequests") or 0)
+    except (TypeError, ValueError):
+        return None
+    mtok = (tok_in + RATIO_OUT * tok_out + RATIO_W1H * write
+            + RATIO_READ * read) / 1e6
+    if cost <= 0 or mtok <= 0:
+        return None
+    usd = (cost - WEB_SEARCH_USD * web) / mtok
+    if not (PRICE_SANE_MIN <= usd <= PRICE_SANE_MAX):
+        return None
+    return usd, {"project": os.path.basename(name) or name,
+                 "cost_usd": round(cost, 2), "mtok": round(mtok, 1)}
+
+
+def derive_price_map():
+    """{transcript-directory slug: (usd, provenance)}, so an --all run can
+    price each project's sessions at that project's own rate. A history that
+    mixes Opus and Haiku work has no single honest number."""
+    out = {}
+    for name, entry in ledger_projects().items():
+        got = solve_price(name, entry)
+        if got:
+            out[re.sub(r"[^A-Za-z0-9]", "-", name)] = got
+    return out
+
+
+def rate(usd):
+    """A $/MTok rate: whole where it is whole ($15), two decimals where a
+    derived one isn't ($4.17). Neither '$15.00' nor '$20.869565'."""
+    s = "%.2f" % usd
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
+def price_note(price):
+    """One line saying where the dollars came from, always printed with
+    them. A number whose provenance isn't on screen is a number nobody can
+    check -- and an invented price sheet is what this replaced."""
+    if price["source"] == "flag":
+        return "input $%s/MTok as given on the command line" % rate(price["in"])
+    if price["source"] == "derived":
+        p = price["provenance"]
+        return ("input $%s/MTok, derived from Claude Code's own cost for the "
+                "last session in %s ($%.2f over %s MTok input-equivalent) -- "
+                "no price sheet, so it follows the models you actually run"
+                % (rate(price["in"]), p["project"], p["cost_usd"],
+                   "{:,.1f}".format(p["mtok"])))
+    return ("input $%s/MTok ASSUMED (Sonnet tier): Claude Code's own cost "
+            "record wasn't readable, so this is a placeholder, not your price"
+            % rate(price["in"]))
+
+
+def resolve_price(p_in, p_out, project_dir):
+    """The price dict every report prices with, and where it came from."""
+    source, provenance = "flag", None
+    if p_in is None:
+        derived = derive_price(project_dir)
+        if derived:
+            p_in, source, provenance = derived[0], "derived", derived[1]
+        else:
+            p_in, source = PRICE_IN_DEFAULT, "assumed"
+    return rebase_price({"source": source, "out_given": p_out}, p_in, provenance)
+
+
+def rebase_price(price, usd_in, provenance):
+    """Same price dict at a different base input rate; --price-out, when it
+    was given, is an absolute figure and doesn't move with it."""
+    out = price["out_given"]
+    return dict(price, **{"in": usd_in, "provenance": provenance,
+                          "out": usd_in * PRICE_OUT_RATIO if out is None else out})
+
+
+def session_price_in(s, price, price_map):
+    """Base input price for one session: its own project's derived rate when
+    the report is deriving, and the single given number when it isn't --
+    an explicit --price is an override, not a hint."""
+    if price["source"] != "derived":
+        return price["in"]
+    got = price_map.get(s.get("slug"))
+    return got[0] if got else price["in"]
+
+
+def premium_usd(s, price_in, key="avoidable_cold_tokens"):
+    """Avoidable premium in dollars, at this session's own TTL multiplier."""
+    return s[key] * s["premium_x"] * price_in / 1e6
 
 
 def find_transcript(path):
@@ -378,6 +613,12 @@ def print_single(path, price, as_json):
     if audited is None:
         sys.exit("warmline-audit: no API turns with usage in %s" % path)
     s, rows = audited
+    if price is not None and price["source"] == "derived":
+        # price the session at its own project's rate, not at whichever
+        # project the process happens to be standing in
+        got = derive_price_map().get(s["slug"])
+        if got:
+            price = rebase_price(price, got[0], got[1])
     out_rows = [{"time": r["time"].astimezone().strftime("%m-%d %H:%M:%S"),
                  "gap_min": r["gap_min"], "read": r["read"], "write": r["write"],
                  "output": r["output"],
@@ -389,13 +630,16 @@ def print_single(path, price, as_json):
                "avoidable_cold_tokens": s["avoidable_cold_tokens"],
                "tokens_read_from_cache": s["tokens_read_from_cache"],
                "tokens_output": s["tokens_output"]}
+    summary["cache_bucket"] = s["bucket"]
+    summary["premium_x"] = s["premium_x"]
     if price is not None:
-        summary["price_in_per_mtok"] = price["in"]
-        summary["price_out_per_mtok"] = price["out"]
+        summary["price_in_per_mtok"] = round(price["in"], 4)
+        summary["price_out_per_mtok"] = round(price["out"], 4)
+        summary["price_source"] = price["source"]
         summary["cold_extra_usd"] = round(
-            s["tokens_recached_cold"] * PREMIUM_X * price["in"] / 1e6, 4)
+            premium_usd(s, price["in"], "tokens_recached_cold"), 4)
         summary["cache_read_usd"] = round(
-            s["tokens_read_from_cache"] * 0.1 * price["in"] / 1e6, 4)
+            s["tokens_read_from_cache"] * RATIO_READ * price["in"] / 1e6, 4)
         summary["output_usd"] = round(
             s["tokens_output"] * price["out"] / 1e6, 4)
     if as_json:
@@ -426,15 +670,19 @@ def print_single(path, price, as_json):
     print("tokens re-cached while cold: {:,}   read from cache: {:,}   "
           "output: {:,}".format(s["tokens_recached_cold"],
                                 s["tokens_read_from_cache"], s["tokens_output"]))
-    print("(a cold re-cache bills ~2x base input; a warm wake reads at ~0.1x)")
+    write_x = RATIO_W5M if s["bucket"] == "5m" else RATIO_W1H
+    print("(a cold re-cache bills ~%gx base input on this session's %s cache; "
+          "a warm wake reads at ~%gx)"
+          % (write_x, s["bucket"] or "1h-assumed", RATIO_READ))
     if price is not None:
-        print("at $%g/MTok base input: the cold re-caches cost ~$%.2f more than "
-              "warm reads of the same tokens would have; cache reads billed ~$%.2f"
-              % (price["in"], summary["cold_extra_usd"], summary["cache_read_usd"]))
-        print("output tokens at $%g/MTok: ~$%.2f -- output is never cached; "
+        print(price_note(price))
+        print("the cold re-caches cost ~$%.2f more than warm reads of the same "
+              "tokens would have; cache reads billed ~$%.2f"
+              % (summary["cold_extra_usd"], summary["cache_read_usd"]))
+        print("output tokens at $%s/MTok: ~$%.2f -- output is never cached; "
               "cache warmth doesn't change this part of the bill"
-              % (price["out"], summary["output_usd"]))
-        print(premium_line(s["avoidable_cold_tokens"] * PREMIUM_X * price["in"] / 1e6))
+              % (rate(price["out"]), summary["output_usd"]))
+        print(premium_line(premium_usd(s, price["in"])))
 
 
 def print_all(root, price, as_json):
@@ -462,19 +710,26 @@ def print_all(root, price, as_json):
         for d, src in (("verdicts", s["verdicts"]), ("causes", s["causes"])):
             for k, n in src.items():
                 total[d][k] = total[d].get(k, 0) + n
+    price_map = derive_price_map() if price is not None else {}
     if price is not None:
-        total["price_in_per_mtok"] = price["in"]
-        total["price_out_per_mtok"] = price["out"]
+        total["price_in_per_mtok"] = round(price["in"], 4)
+        total["price_out_per_mtok"] = round(price["out"], 4)
+        total["price_source"] = price["source"]
+        # summed per session: sessions differ in TTL bucket and, when the
+        # price is derived, in project rate -- one multiplication over the
+        # grand total would silently average both away
         total["avoidable_premium_usd"] = round(
-            total["avoidable_cold_tokens"] * PREMIUM_X * price["in"] / 1e6, 2)
+            sum(premium_usd(s, session_price_in(s, price, price_map))
+                for s in sessions), 2)
 
     if as_json:
         out = []
         for s in sessions:
             o = dict(s, start=s["start"].isoformat())
             if price is not None:
-                o["avoidable_premium_usd"] = round(
-                    s["avoidable_cold_tokens"] * PREMIUM_X * price["in"] / 1e6, 2)
+                pin = session_price_in(s, price, price_map)
+                o["price_in_per_mtok"] = round(pin, 4)
+                o["avoidable_premium_usd"] = round(premium_usd(s, pin), 2)
             out.append(o)
         print(json.dumps({"root": root, "ttl_min": TTL_MIN,
                           "sessions": out, "total": total}, indent=1))
@@ -523,7 +778,7 @@ def print_all(root, price, as_json):
             "{:,}".format(s["avoidable_cold_tokens"]),
             pct(s["avoidable_cold_tokens"], total_avoid) if total_avoid else "-")
         if price is not None:
-            prem = s["avoidable_cold_tokens"] * PREMIUM_X * price["in"] / 1e6
+            prem = premium_usd(s, session_price_in(s, price, price_map))
             # pad before painting: ANSI is zero-width on screen, not to %9s
             line += "  " + paint("%9s" % ("$%.2f" % prem),
                                  RED if prem > 1 else DIM)
@@ -540,25 +795,31 @@ def print_all(root, price, as_json):
     print("avoidable cold = tokens re-cached cold, excluding each session's "
           "unavoidable first write")
     if price is not None:
+        used = sorted({s["premium_x"] for s in sessions})
+        mults = " and ".join("%gx" % m for m in used)
         print("premium = estimated avoidable premium of those re-caches vs warm "
-              "reads (%.1fx base input $%g/MTok);" % (PREMIUM_X, price["in"]))
+              "reads (%s base input, per session's own cache bucket);" % mults)
         print("an estimate from recorded token counts, not billing data")
+        print(price_note(price))
+        if price["source"] == "derived" and len(price_map) > 1:
+            print("each project's sessions are priced at its own derived rate")
         print("input-side only: the %s output tokens across these sessions "
-              "bill at $%g/MTok warm or cold"
-              % ("{:,}".format(total["tokens_output"]), price["out"]))
+              "bill at $%s/MTok warm or cold"
+              % ("{:,}".format(total["tokens_output"]), rate(price["out"])))
         print()
         line = premium_line(total["avoidable_premium_usd"])
         if len(sessions) > 5:
             # concentration: is the leak a few bad sessions or everywhere?
-            top_tok = sum(s["avoidable_cold_tokens"] for s in sessions[:5])
-            rest_tok = total["avoidable_cold_tokens"] - top_tok
+            top = sum(premium_usd(s, session_price_in(s, price, price_map))
+                      for s in sessions[:5])
             line += "  (top 5 sessions: $%.2f, other %d: $%.2f)" % (
-                top_tok * PREMIUM_X * price["in"] / 1e6, len(sessions) - 5,
-                rest_tok * PREMIUM_X * price["in"] / 1e6)
+                top, len(sessions) - 5,
+                total["avoidable_premium_usd"] - top)
         print(line)
     else:
-        print("pass --price <base input $/MTok, bare --price = $%g> for an "
-              "estimated avoidable premium in dollars" % PRICE_IN_DEFAULT)
+        print("pass --price for an estimated avoidable premium in dollars "
+              "(bare --price derives your rate from Claude Code's own cost "
+              "record; --price N overrides it)")
 
 
 def fmt_when(t, now):
@@ -678,6 +939,7 @@ def take_price(args, *flags):
 
 
 def main():
+    global TTL_MIN, TTL_FORCED
     args = sys.argv[1:]
     # without this, --help is read as a transcript path and dies with
     # "no transcript found at '--help'" -- and --json stays undiscoverable
@@ -689,16 +951,23 @@ def main():
     p_out, out_given = take_price(args, "--price-out")
     price = None
     if in_given or out_given:
-        pin = PRICE_IN_DEFAULT if p_in is None else p_in
-        price = {"in": pin,
-                 "out": pin * PRICE_OUT_RATIO if p_out is None else p_out}
+        price = resolve_price(p_in, p_out, os.getcwd())
+    if "--cold-at" in args:
+        args = [a for a in args if a != "--cold-at"]
+        if ttl is not None:
+            TTL_MIN, TTL_FORCED = ttl, True
+        path = find_transcript(args[0] if args else None)
+        got = cold_at(path)
+        if got is None:
+            sys.exit("warmline-audit: no API turns with usage in %s" % path)
+        print("%d %s %g %s" % (int(got[0]), got[1], got[2], path))
+        return
     as_json = "--json" in args
     args = [a for a in args if a != "--json"]
     do_all = "--all" in args
     do_live = "--live" in args
     args = [a for a in args if a not in ("--all", "--live")]
     if ttl is not None:
-        global TTL_MIN, TTL_FORCED
         TTL_MIN = ttl
         TTL_FORCED = True
 

@@ -20,7 +20,7 @@
 **warmline 把快取狀態直接放到你的狀態列上，並給你工具去查看它在歷史上的表現。**
 
 ```text
-Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 78%
 ```
 
 不靠猜測，也不靠計時推論。從 v2.1.251 起，Claude Code 會把它自己的 `prompt_cache`
@@ -44,6 +44,12 @@ warmline audit
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 ```
 
+用 Homebrew 也可以：
+
+```sh
+brew install Miguel-Barroso/warmline/warmline && warmline setup
+```
+
 接著：
 
 | 指令 | 作用 |
@@ -53,9 +59,12 @@ curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main
 | `warmline audit --all` | 本機所有工作階段，排序呈現 |
 | `warmline watch` | 所有工作階段的溫度，即時顯示，直到 ctrl-c |
 
-只需要 `python3` 與 `bash`，沒有別的依賴。
+只需要 `python3` 與 `bash`，沒有別的依賴。沒有 `curl` 也行：`wget -qO- <同一個 URL> | bash`
+效果一樣，安裝器自己下載檔案時也會用它找得到的那一個。formula 刻意只管到 `PATH` 為止——
+套件管理器不該背著你改寫 `settings.json`，那一半交給 `warmline setup`；`brew upgrade`
+之後重新跑一次。
 
-[安裝細節、參數、鎖定發行版、更新、Windows →](docs/INSTALL.md)（英文）
+[安裝細節、參數、鎖定發行版、套件管理器、Windows →](docs/INSTALL.md)（英文）
 
 ## 為什麼是 warmline
 
@@ -100,23 +109,28 @@ curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main
 ## 觀測：狀態列
 
 ```
-Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 78%
 ```
 
 | 欄位 | 意義 |
 |---|---|
-| `ctx 64% (127k)` | 脈絡視窗使用率——超過 80% 轉黃，自動壓縮會從那裡開始改寫前綴 |
-| `cache HOT (cold ~11:58)` | 快取的前綴是熱的，將在所示時間離開它的 TTL；過期前 15 分鐘內文字不變，只轉黃 |
+| `ctx 64% (127k)` | 脈絡視窗使用率——距離自動壓縮真正觸發的門檻（`視窗 - 33000` token）不足 10k 時轉黃 |
+| `cache HOT (127k, cold ~11:58)` | 快取的前綴是熱的，若冷掉需要重寫 127k token，並將在所示時間離開它的 TTL；過期前 15 分鐘內文字不變，只轉黃 |
 | `cache HOT 5m` | 同上，但走的是 5 分鐘 TTL——用量額度、API key、雲端供應商。1 小時是常態，因此不標註 |
 | `cache COLD` | 前綴已在 TTL 之外；下一輪會把它重新快取 |
 | `cache off` | 提示快取被關閉，或這個供應商／閘道從不回報快取 token。這裡等再久都不會變熱 |
 | `cache ?` | 沒有快取資料——v2.1.251 之前的 Claude Code，或本工作階段第一次 API 回應之前 |
+| `5h 78%` / `7d 91%` | 最接近上限的方案額度視窗，低於 50% 不顯示，轉黃後附上重置時刻。API key 與雲端供應商沒有方案額度，因此不會出現 |
 
 **warmline 不會靠測量 Claude Code 回覆得多快來猜快取是不是熱的。** 上面每一個判定
 都是 Claude Code 交給狀態列的欄位：狀態來自 `prompt_cache.warm`，分桶來自 `ttl`，
-時刻來自 `expires_at`。warmline 只負責排版與上色。它過去確實靠兩輪之間的間隔推論，
-那套機制已經移除了。`COLD`、`off` 與 `?` 是刻意分開的：「快取過期了」「根本沒有在做快取」
-「warmline 看不到」是三件不同的事，把它們揉成一件，正是一個快取儀表開始說謊的起點。
+時刻來自 `expires_at`，重建規模來自 `recache_tokens_if_cold`，方案額度來自
+`rate_limits`。warmline 只負責排版與上色。它過去確實靠兩輪之間的間隔推論，
+那套機制已經移除了。真正能據以決策的是兩個數字：**`(127k)` 是冷掉要付的代價**——
+下一次快取寫入的大小，它把「值不值得保溫」從感覺變成數字；**`5h 78%`** 才是訂閱
+使用者真正會用完的東西——中途打斷工作的不是美元，而是方案額度。`COLD`、`off` 與
+`?` 是刻意分開的：「快取過期了」「根本沒有在做快取」「warmline 看不到」是三件不同的
+事，把它們揉成一件，正是一個快取儀表開始說謊的起點。
 
 過期時間始終是絕對的牆上時鐘，而不是倒數計時——凍住的倒數計時是*錯的*，凍住的時鐘
 仍然是*真的*。從 `HOT` 到 `COLD` 的切換由 Claude Code 自己在過期的那一刻重繪狀態列
@@ -147,7 +161,8 @@ Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
 `warmline audit` 依據 Claude Code 為每個已記錄 API 請求寫下的用量欄位評分——不像
 狀態列，它沒有慢一輪的問題。`--all` 則對本機所有工作階段做同樣的事並排序。（它執行
 的是已安裝的 `warmline-audit` 命令；兩種寫法都有效，已經寫好的腳本繼續可用。）以下
-是某台機器 8 週歷史的真實輸出：
+是某台機器 8 週歷史的真實輸出，為了讓範例穩定而一律按 `--price 3` 計價——不帶數值的
+`--price` 會按專案求解你真實的單價：
 
 ```
 $ warmline-audit --all --price 3
@@ -187,9 +202,14 @@ TTL——它按工作階段從各自的快取分桶紀錄中自動偵測。）
 從來看不到、也無法看到 Anthropic 實際向你收取多少。報告最後一行標為
 `estimated avoidable premium`，其中的「avoidable（可避免）」僅指*排除每個工作階段
 無可避免的第一次快取寫入之後*的部分：它統計到的一些情況在實務上並不可預防，例如
-筆電休眠期間發生的 TTL 過期。輸入與輸出按不同單價分開計算，因為 Claude 就是這樣
-計費的——`--price` 是模型的基礎**輸入**價（$/MTok，所有快取經濟都在這一側）；輸出
-token 從不進快取，因此稽核把它單獨列為一行，而不是假裝保溫能省下它。
+筆電休眠期間發生的 TTL 過期。
+
+**warmline 不附帶價目表。** 寫死的價格會過時，而且在你從 Sonnet 換到 Opus 的那一刻
+就是錯的。不帶數值的 `--price` 會直接求解你實際支付的基礎輸入單價：用 Claude Code
+自己為該專案上一次工作階段記下的費用，配合每個 Claude 價格級距共有的倍率（輸出為
+基礎輸入的 5 倍，1 小時快取寫入 2 倍，5 分鐘寫入 1.25 倍，熱讀取 0.1 倍）。`--all`
+會用各專案自己的單價分別計價，每份報告都會寫明數字的來源；`--price N` 仍可覆寫。
+輸出 token 從不進快取，因此稽核把它單獨列為一行，而不是假裝保溫能省下它。
 
 稽核工具評判的是過去，而 **`warmline watch`** 呈現的是現在：所有工作階段溫度的即時
 檢視，持續重新繪製直到 ctrl-c。桌面應用程式的工作階段也會出現在其中——它們雖然
@@ -209,9 +229,19 @@ warmline keep-warm status    # ON／OFF／INCONSISTENT（結束碼 0／1／2）
 ```
 
 它**不是常駐程式**——沒有 cron、沒有背景行程，也不會在執行中的 Claude Code 工作
-階段之外送出任何請求。當背景任務已經免費把快取維持溫熱時它會跳過，脈絡很小時也
-跳過，工作一恢復就停止，並在大約 10 小時後放棄。每次 ping 都是一次針對你自己方案的
-一般計費請求：它用幾次便宜的讀取換掉一次昂貴的重建，不繞過任何限制。
+階段之外送出任何請求。當背景任務已經免費把快取維持溫熱時它會跳過，代價很小時也
+跳過，走 5 分鐘快取時同樣跳過——那需要每小時約 12 次 ping，比它能省下的 1.15 倍
+重建還貴。工作一恢復就停止，並在大約 10 小時後放棄。每次 ping 都是一次針對你自己
+方案的一般計費請求：它用幾次便宜的讀取換掉一次昂貴的重建，不繞過任何限制。
+
+更好的是，只要這台機器看得到那份等待，就根本不必預約 ping：
+
+```sh
+warmline wait-for --pidfile /tmp/job.pid --until-cold
+```
+
+它會在任務結束**或**快取即將過期時返回，以先到者為準。期限讀自本工作階段自己的
+紀錄，所以 12 分鐘就結束的任務一次 ping 也不用送。
 
 [它是什麼、不是什麼、`wait-for`、免睡眠模式、限制與條款討論 →](docs/KEEP-WARM.md)（英文）
 

@@ -51,10 +51,17 @@ and after it survives untouched.
 
 A short instruction block ([`keep-warm.md`](../keep-warm.md), installed to
 `~/.claude/warmline-keep-warm.md`) that your agent follows during active
-sessions. When it starts background work expected to exceed ~45 minutes while
-context is substantial, it arranges for something to re-enter the session
+sessions. When it starts background work expected to exceed ~45 minutes and the
+cache is worth keeping, it arranges for something to re-enter the session
 ~50 minutes out; on wake, it re-arms if the work is still running, otherwise
 continues normally — and the results land against a hot cache.
+
+**"Worth keeping" is now a number, not a feeling.** The trigger used to be
+"context above roughly 30% used", a proxy for a quantity Claude Code hands the
+statusline directly: the tokens a rebuild would re-cache, shown beside `HOT` as
+[the stake](STATUSLINE.md#the-stake). The policy arms at roughly 50k and up.
+Percentage was always the wrong unit for it — 30% of a 1M window is 300k tokens
+and 30% of a 200k window is 60k, and only one of those is worth a wakeup.
 
 The policy names no particular scheduler. It states the requirement — some
 mechanism must re-enter the session inside one TTL, and must be removable
@@ -68,14 +75,29 @@ Each ping costs ~0.1× your context in cache-read quota versus ~2× for the cold
 re-write, so it pays for itself for idle stretches up to roughly 10–12 hours
 *if* you return.
 
+### Why the 5-minute cache is never worth pinging
+
+That arithmetic is a property of the 1-hour bucket, and it inverts on the short
+one. On `ephemeral_5m` a write bills 1.25× base input against 0.1× for a read,
+so going cold costs **1.15×** — and holding it warm takes a ping every ~4
+minutes, or **~12 an hour**, each billing 0.1×. Break-even is 11.5 pings: past
+one hour of waiting, keeping a 5-minute cache warm costs more than letting it
+die. Since a wait under an hour isn't worth arming a wakeup for in the first
+place, there is no window where it pays, and the policy skips it outright.
+
+The statusline says which bucket you are on — [`cache HOT
+5m`](STATUSLINE.md#the-ttl-badge) is the short one — and
+[`warmline audit`](AUDIT.md) prices each session at its own bucket's multiplier.
+
 ## What it is NOT
 
 - **Not a daemon.** No background process, no cron, no requests outside a
   running Claude Code session. When Claude Code isn't running, nothing runs.
 - **Not always-on.** It deliberately *skips* when local background tasks are
   already in flight (their notifications keep the cache warm for free — see
-  [what we measured](MEASUREMENTS.md)), and skips small contexts, where going
-  cold is cheap.
+  [what we measured](MEASUREMENTS.md)), when the stake is small, when the
+  window is about to be auto-compacted anyway, and on the **5-minute cache**,
+  where the arithmetic never works out (below).
 - **Not persistent past the wait.** Wakeups are deleted the moment work
   resumes, and a single wait gives up after ~12 reschedules (~10 hours) — past
   that the pings cost more than the rebuild they prevent.
@@ -108,6 +130,8 @@ warmline wait-for --pid 4242
 warmline wait-for --pidfile /tmp/backup.pid
 warmline wait-for --file /tmp/backup.done            # done when it appears
 warmline wait-for --log /tmp/backup.log --until 'transfer complete'
+warmline wait-for --pid 4242 --until-cold            # ...or the cache deadline
+warmline wait-for --until-cold                       # deadline only, no target
 ```
 
 It polls every 30s (`-n`), prints a heartbeat every 50 minutes (`--every`,
@@ -116,6 +140,33 @@ inside the TTL, `0` to stay silent), and gives up after 10 hours
 means the watched job ended, `1` timed out, `2` bad usage **or a target that
 never appeared**: a pidfile that stays empty is a launch bug, and you want to
 hear about it in the first five minutes, not at hour ten.
+
+### `--until-cold`: wake on the deadline, not on a timer
+
+A scheduled ping has to guess the interval before the wait starts. `--until-cold`
+reads the deadline instead: it asks `warmline-audit --cold-at` — the tail of this
+session's own transcript, its real bucket, its real last turn — and returns two
+minutes (`--margin`) before the cache would expire, with exit code **3**. That
+is the agent's signal to re-arm and end the turn.
+
+It recomputes on every poll, so a wait that happens to see a turn go by has its
+deadline pushed out for free: the cache it was protecting just got warm again,
+and the ping it would have sent is never sent. On a 5-minute session it fires at
+5 minutes rather than at a 50-minute schedule the session was never on.
+
+Paired with a target it returns on **whichever comes first**, which is the whole
+point: a job that finishes at minute 12 exits `0` and costs no ping at all,
+where a 50-minute schedule would have fired regardless.
+
+```sh
+warmline wait-for --pidfile /tmp/job.pid --until-cold
+#   exit 0 -> the job ended; continue
+#   exit 3 -> the cache is about to expire; re-arm and end the turn
+#   exit 1 -> --timeout; exit 2 -> bad usage, or no expiry to read
+```
+
+Exit 2 covers "there is no transcript to read a deadline from", checked *before*
+the wait rather than discovered at a deadline that never arrives.
 
 ### The `&` trap
 
@@ -169,7 +220,9 @@ does nothing about that, so here is the honest picture.
 **What it is.** Claude Code compacts on its own when the context window
 fills. In that session it fired three times at 167–169k input tokens — about
 **84%** of a 200k window, consistent with a threshold set a fixed distance
-below the window. Compaction rewrites the prefix, so the next turn re-caches
+below the window — that distance is
+[33,000 tokens](MEASUREMENTS.md#where-auto-compact-actually-fires), so 167,000
+is exactly where it should have fired. Compaction rewrites the prefix, so the next turn re-caches
 from the divergence: a `PARTIAL` in [`warmline audit`](AUDIT.md), attributed
 to `auto-compact`.
 
@@ -177,13 +230,18 @@ to `auto-compact`.
 
 - **Don't start a keep-warm wait near the threshold.** This is the only
   advice in the policy block, because it's the only one an agent can act on
-  mid-session: past ~80% the prefix is about to be rewritten anyway, so the
-  pings buy nothing. Compact first, deliberately, then wait — a compaction
-  you choose while the cache is *cold or about to die* is nearly free, which
-  is the same argument the README makes for `/compact` after `COLD(ttl?)`.
-- **See it coming.** The statusline paints `ctx` yellow past 80%
-  (`WARMLINE_CTX_WARN_PCT`). That's a handful of turns of warning, not a lot
-  — but auto-compact is otherwise entirely silent until it happens.
+  mid-session: inside the last ~33k tokens the prefix is about to be rewritten
+  anyway, so the pings buy nothing. Compact first, deliberately, then wait — a
+  compaction you choose while the cache is *cold or about to die* is nearly
+  free, which is the same argument the README makes for `/compact` after
+  `COLD(ttl?)`.
+- **See it coming.** The statusline paints `ctx` yellow within 10k tokens of
+  the real threshold — `context_window_size − 33000`, which is
+  [where compaction actually fires](MEASUREMENTS.md#where-auto-compact-actually-fires):
+  167k of a 200k window, 967k of a 1M one. That's a handful of turns of
+  warning, not a lot, but auto-compact is otherwise entirely silent until it
+  happens. The line stays quiet when auto-compact is switched off, since then
+  there is nothing to warn about.
 - **Turn it off, if you accept the trade.** Auto-compaction is a setting, not
   a law: `autoCompactEnabled: false` in `~/.claude/settings.json`, or
   `DISABLE_AUTO_COMPACT=1` in the environment. Then nothing rewrites your

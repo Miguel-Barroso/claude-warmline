@@ -4,6 +4,133 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.2.0] — 2026-09-02
+
+Warmline measured warmth accurately and then priced it with a number it made up.
+This release removes the last invented figure: **no price sheet ships with
+warmline any more**, the auditor solves your real rate from Claude Code's own
+cost accounting, and the statusline stops showing only *state* and starts showing
+*stake* — what a rebuild would cost, and how close the plan limit that actually
+interrupts a subscription user is. Verified against Claude Code 2.1.252.
+
+### Fixed
+- **The 5-minute cache was billed as if it were the 1-hour one.** Every report
+  applied a flat 1.9× premium — the 1h write/read spread. On the 5m bucket the
+  spread is **1.15×**, so warmline overstated those sessions by ~65%. The
+  multiplier is now per session, keyed on the bucket already accumulated from the
+  transcript (1.9 for 1h, 1.15 for 5m, 1.9 when unknown), reported in the premium
+  line and exposed as `premium_x` / `cache_bucket` in `--json`. **This moves
+  published numbers downward**: a 5m session audited under 2.1.0 drops ~39%. The
+  old figure was wrong; the new one is not a change of policy.
+- **`ctx` warned at an invented 80%.** Auto-compact fires at
+  `window − min(max_output, 20000) − 13000`, and every current model has
+  `max_output ≥ 20000`, so the reserve is a flat 33k: 167,000 of a 200k window
+  (83.5%), 967,000 of 1M (96.7%). A 1M-window session was painted yellow with
+  800k of headroom left. The warning now tracks the real threshold, fires within
+  10k of it, and **stays silent when auto-compact is off** —
+  `DISABLE_AUTO_COMPACT` / `DISABLE_COMPACT` in the environment, or
+  `autoCompactEnabled: false` in `settings.json`. `WARMLINE_CTX_WARN_PCT` still
+  overrides; its default is now `auto`.
+
+### Added
+- **The stake, on the cache field**: `cache HOT (127k, cold ~11:58)`. The token
+  count is `prompt_cache.recache_tokens_if_cold` — the size of the next cache
+  write if this prefix dies — which the payload has carried all along and
+  warmline ignored as "retrospective". It isn't: it is the only forward-looking
+  number in the object, and it turns "is keeping this warm worth it?" from a
+  feeling into arithmetic. Rendered inline, so the line gains no segment; omitted
+  below 1000 tokens.
+- **Plan limits**: `5h 78%`, or `7d 91%` — whichever window is nearer its cap,
+  from `rate_limits`. Hidden below 50%, plain to 80%, yellow to 95%, red above,
+  with the reset time `(14:20)` from `resets_at` once yellow. Dollars are not what interrupts a
+  subscription user mid-task; this is. Absent for API keys, Bedrock and Vertex,
+  where Claude Code sends no `rate_limits` and warmline shows nothing.
+  `WARMLINE_NO_QUOTA` suppresses it.
+- **Derived pricing — `warmline-audit --price` with no number.** Claude Code
+  writes its own cost accounting to `~/.claude.json` (`lastCost` beside the token
+  totals, per project). Every pricing tier in the shipped catalog bills the same
+  multiples of its input price — output 5×, 1h cache write 2×, 5m write 1.25×,
+  cache read 0.1× — so that solves for the effective input $/MTok exactly, with
+  no price table at all, and it re-derives itself each session: switch from
+  Sonnet to Opus and the number follows you. Across 11 projects on the
+  development machine it lands between $1.99 and $4.86, with two pure-Sonnet
+  projects at $3.00 and a Haiku-heavy one at $1.99 — the arithmetic checking
+  itself against the published tiers.
+- **`--all` prices each project at its own derived rate**, which is what makes a
+  mixed Opus/Sonnet history honest, and every report names where its number came
+  from (`derived` / `flag` / `assumed`, also in `--json` as `price_source`).
+- **`warmline-audit --cold-at`** prints the epoch second and clock time this
+  session's cache is due to expire — one line, for scripts.
+- **`warmline setup`** — the wiring half of `install.sh` as its own command:
+  installs the statusline, wires `settings.json` (same backup, same refusal to
+  replace a foreign statusline without `--force`, same `refreshInterval`, same
+  keep-warm block refresh), and `--remove` takes it all back out. It exists so a
+  package manager can own its prefix and nothing else: **no formula should edit
+  your `~/.claude/settings.json`**. Finds its data files beside the command or
+  in `../share/warmline`, following symlinks; `WARMLINE_SHARE_DIR` overrides.
+- **Homebrew**: `brew install Miguel-Barroso/warmline/warmline`. The formula
+  lives in [`packaging/homebrew/warmline.rb`](packaging/homebrew/warmline.rb) and
+  is published to the [`Miguel-Barroso/homebrew-warmline`](https://github.com/Miguel-Barroso/homebrew-warmline)
+  tap rather than homebrew-core — core wants a
+  notability this project hasn't earned and would gate every release on its
+  review cadence. `brew install …/warmline && warmline setup`, and `brew test`
+  runs the real setup against a scratch `CLAUDE_CONFIG_DIR`, so it proves the
+  prefix layout resolves without touching the tester's own config. Built,
+  installed, tested and `brew style`-clean from a local tap before shipping.
+  [`packaging/README.md`](packaging/README.md) has the release checklist.
+- **`install.sh` downloads with curl *or* wget**, whichever is on the machine,
+  and the front page offers both one-liners. Minimal Linux images ship one or
+  the other; until now a wget-only box could fetch the installer and then watch
+  it fail on its own first download.
+- **`warmline wait-for --until-cold`** returns when the cache deadline is near
+  (detected TTL minus a 2-minute margin) as well as when the target finishes,
+  whichever comes first: exit 0 for the target, 3 for the deadline, 2 for
+  misuse. A job that ends at minute 12 now costs zero pings instead of one every
+  50 minutes, and the wait self-terminates instead of relying on the agent to
+  count re-arms. Usable alone, with no target, as a plain "wake me before it goes
+  cold".
+
+### Changed
+- **The keep-warm policy triggers on stake, not on context percentage.** "Context
+  above roughly 30%" was a proxy for a quantity now printed on the statusline, and
+  a bad one at 1M windows. It reads the cache field's token figure instead
+  (~50k+). New skip clause: **5-minute-TTL sessions are never worth pinging** —
+  holding one warm needs ~12 pings an hour against a 1.15× premium, and
+  break-even is ~11.5. The auto-compact clause now points at the real 33k
+  reserve, and `wait-for --until-cold` is preferred over a scheduled ping
+  wherever the wait is locally observable. 441 words, up from 440: the two new
+  rules were paid for by tightening, not by growth. **If you already have keep-warm
+  on**, upgrading rewrites the block in your `CLAUDE.md` in place (verified on a
+  v2.1.0 → v2.2.0 upgrade, with the rest of the file untouched) — unless you
+  edited it, in which case it is left alone and the console tells you the wording
+  moved on. `warmline keep-warm status` shows which case you are in.
+- **`--price N` still wins**, and the hardcoded $3 survives only as an
+  explicitly labelled `ASSUMED (Sonnet tier)` fallback when no ledger is
+  readable. Rates print as `$15`, not `$15.00`, and `$4.17`, not `$4.166667`.
+
+### Documentation
+- [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) gains the seven-tier ratio table,
+  the `window − 33000` derivation, and the price-derivation method with the
+  11-project spread. The eight-week audit is re-run at derived per-project rates:
+  130 sessions, ~$63.
+- [docs/INSTALL.md](docs/INSTALL.md) gains a package-manager section, the wget
+  one-liner, and a config table caught up with this release (`WARMLINE_NO_QUOTA`,
+  `WARMLINE_SHARE_DIR`, `WARMLINE_CTX_WARN_PCT` now `auto`).
+- [docs/STATUSLINE.md](docs/STATUSLINE.md), [docs/AUDIT.md](docs/AUDIT.md) and
+  [docs/KEEP-WARM.md](docs/KEEP-WARM.md) cover the stake, plan limits, the new
+  `ctx` behaviour, price provenance, the premium correction and `--until-cold`.
+  README and the Japanese, 繁體中文 and 简体中文 translations mirror all of it.
+- Tests: 83 → 98, 0 failed. The suite is now hermetic with respect to pricing —
+  a synthetic `.claude.json` whose arithmetic solves to round rates, plus a
+  no-ledger case that pins the `ASSUMED` label.
+
+### Explicitly not added
+- **"Keep-warm saved you $X".** Keep-warm state is not recoverable per session —
+  `~/.claude/CLAUDE.md` lives in the system prompt, which Claude Code never
+  serialises (checked across 372 transcripts). Any savings figure would be
+  inference dressed as measurement, which is what 2.0.0 removed. An honest
+  exposure number is the same answer without the invention.
+
 ## [2.1.0] — 2026-09-01
 
 The first release whose own install command names it. Everything here is the

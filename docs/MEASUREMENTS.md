@@ -84,11 +84,83 @@ run attributes 19% of the cold-cause events to compaction and leaves **39%
 unattributed** — a residual bucket the transcript gave no proof for, not a
 named cause. The leak is rarely where you expect it.
 
+Re-run today with derived pricing — `warmline audit --all --price`, each
+project at its own solved rate and each session at its own cache bucket — the
+130 sessions still on disk total **~$63**. The method changed more than the
+history did: a single assumed $3 replaced by real per-project rates, and 1.9×
+replaced by 1.15× wherever a session ran on the 5-minute bucket.
+
+## Every price tier bills the same multiples
+
+The pricing catalog shipped inside Claude Code 2.1.252 carries seven tiers —
+`tier_2_10`, `tier_3_15`, `tier_5_25`, `tier_10_50`, `tier_15_75`, `haiku_35`,
+`haiku_45`. Every one of them is the same shape:
+
+| Billed item | Multiple of that tier's base input price |
+|---|---|
+| output | **5×** |
+| 1-hour cache write | **2×** |
+| 5-minute cache write | **1.25×** |
+| cache read | **0.1×** |
+| web search | flat $0.01 per request, every tier |
+
+That identity is what lets warmline price a cache without knowing which model
+ran. Two consequences it now acts on:
+
+- **The avoidable premium of going cold is `write − read`:** **1.9×** base input
+  on the 1-hour bucket, **1.15×** on the 5-minute one. Up to v2.1.0 the auditor
+  applied 1.9× to everything, which overstated a 5-minute session by ~65%; it
+  now uses the bucket each session actually recorded.
+- **Warm reads are cheap in the same proportion everywhere.** A ping costs 0.1×
+  input whatever you run; the rebuild it prevents costs 2× on the long bucket.
+
+## Where auto-compact actually fires
+
+Claude Code reserves `min(max_output, 20000) + 13000` tokens at the top of the
+window for the compaction it triggers itself. Every current model's `max_output`
+is at least 20000, so the reserve is a flat **33000 tokens** and the threshold is
+`context_window_size − 33000`:
+
+| Window | Compacts at | As a percentage |
+|---|---|---|
+| 200k | 167,000 | 83.5% |
+| 1M | 967,000 | 96.7% |
+
+The field measurement that produced warmline's old 80% warning (compaction seen
+firing at 167–169k of a 200k window) was reading exactly this line, one window
+size at a time. The statusline now computes it instead: same warning in a 200k
+window, silence in a 1M one where 86% is still 100k of headroom.
+
+## Your own price, without a price sheet
+
+Claude Code writes its own cost accounting to `~/.claude.json`: each
+`projects[<dir>]` entry records `lastCost` beside the token counts that produced
+it. With the multiples above, that solves for the base input price of whatever
+you actually ran:
+
+```
+p_in = (lastCost − 0.01 × web_requests)
+       ÷ (input + 5×output + 2×cache_write + 0.1×cache_read) × 1e6
+```
+
+Across the 11 projects with a cost record on the development machine, the solved
+rates run **$1.99 to $4.86/MTok**. Three of them are the arithmetic checking
+itself: two pure-Sonnet projects come out at **$3.00 and $2.998** — the
+`tier_3_15` list price — and one Haiku-heavy project at **$1.99**, landing on
+`tier_2_10`. The rest sit between tiers because those sessions mixed models,
+which is the honest answer for a mixed session and the one a baked price table
+cannot give.
+
+This is why warmline ships no price sheet. A table would go stale, and it would
+misprice the moment you switched from Sonnet to Opus. `warmline audit --price`
+re-solves per project, per run, and prints where the number came from.
+
 ## Measure your own
 
 ```sh
-warmline audit --all --price 3     # your machine, your model's base input price
-warmline audit --price 3           # this session, turn by turn
+warmline audit --all --price       # your machine, at your own solved rate
+warmline audit --price             # this session, turn by turn
+warmline audit --price 3           # ...or override the base input rate
 warmline audit --price 3 --price-out 15   # output priced explicitly
                                           # (omitted, it defaults to 5x input)
 ```

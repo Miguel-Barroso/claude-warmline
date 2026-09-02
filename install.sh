@@ -5,6 +5,7 @@ set -euo pipefail
 #
 #   ./install.sh                     # from a checkout
 #   curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
+#   wget -qO-  https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/TAG/install.sh | bash -s -- --ref TAG
 #
 # Installs, updates, uninstalls. Post-install control lives in the
@@ -46,8 +47,9 @@ Post-install control lives in the warmline command (warmline --help).
 Installs the statusline to $CLAUDE_DIR, the warmline and
 warmline-audit commands to $BIN_DIR (override: WARMLINE_BIN_DIR).
 
-Piped through curl, flags go after 'bash -s --':
+Piped through curl or wget, flags go after 'bash -s --':
   curl -fsSL $REPO/main/install.sh | bash -s -- --keep-warm
+  wget -qO-  $REPO/main/install.sh | bash -s -- --keep-warm
 
 A pinned install names the tag twice -- once for this script, once for the
 files it fetches (WARMLINE_REF=TAG does the same as --ref):
@@ -130,8 +132,17 @@ mkdir -p "$CLAUDE_DIR" "$BIN_DIR"
 # when piped through curl | bash. A pinned ref always goes to the network:
 # the checkout you happen to be standing in is not the tag you asked for.
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+# curl if it's there, wget if it isn't: whichever fetched this script is on the
+# machine, and neither is guaranteed -- minimal Linux images ship one or the other
+download() { # url dest
+  if command -v curl >/dev/null; then curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null; then wget -qO "$2" "$1"
+  else echo "claude-warmline needs curl or wget on PATH to download files" >&2; exit 1
+  fi
+}
 if [ "$PINNED" = 1 ]; then
-  command -v curl >/dev/null || { echo "installing a pinned ref needs curl on PATH" >&2; exit 1; }
+  command -v curl >/dev/null || command -v wget >/dev/null || {
+    echo "installing a pinned ref needs curl or wget on PATH" >&2; exit 1; }
   echo "installing claude-warmline from $REF"
 fi
 fetch() { # repo-file dest
@@ -141,7 +152,7 @@ fetch() { # repo-file dest
     # download beside the target, not onto it: a bad ref (or a dropped
     # connection) must not take out the copy already installed
     tmp="$(mktemp)"
-    curl -fsSL "$REPO_RAW/$1" -o "$tmp" || {
+    download "$REPO_RAW/$1" "$tmp" || {
       rm -f "$tmp"
       echo "could not fetch $1 from $REF -- is that a real tag or branch?" >&2
       exit 1

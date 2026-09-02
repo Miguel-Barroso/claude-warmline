@@ -24,6 +24,8 @@ claude-warmline: cache-aware statusline, session auditor, keep-warm policy.
 The installer (install.sh) installs and updates; this command controls.
 
   warmline status              what is installed and enabled right now
+  warmline setup               wire the statusline into Claude Code (what
+                               install.sh does; run it after brew or a package)
   warmline watch [-n SECS]     live warmth view of every session, refreshed
                                every 10s (or SECS) until ctrl-c
   warmline awake [CMD...]      no-sleep mode: run 'claude' (or CMD) with
@@ -97,8 +99,10 @@ policy_body() {
     cat "$POLICY"
   elif [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/keep-warm.md" ]; then
     cat "$SELF_DIR/keep-warm.md"
-  else
+  elif command -v curl >/dev/null; then
     curl -fsSL "$REPO_RAW/keep-warm.md"
+  else
+    wget -qO- "$REPO_RAW/keep-warm.md"
   fi
 }
 
@@ -182,6 +186,164 @@ find_audit() {
   fi
 }
 
+# Where statusline.py and keep-warm.md live. install.sh puts them in the config
+# dir itself; a package manager puts the CLI on PATH and the data files beside
+# it (prefix/share/warmline), which is what this resolves. Symlinks are followed
+# because `brew link` puts one in prefix/bin pointing into the Cellar.
+share_dir() {
+  local p="${BASH_SOURCE[0]:-$0}" d n=0
+  while [ -L "$p" ] && [ "$n" -lt 16 ]; do
+    n=$((n + 1))
+    d="$(cd "$(dirname "$p")" && pwd)"
+    p="$(readlink "$p")"
+    case "$p" in /*) ;; *) p="$d/$p" ;; esac
+  done
+  d="$(cd "$(dirname "$p")" 2>/dev/null && pwd || true)"
+  for c in "${WARMLINE_SHARE_DIR:-}" "$d" "$d/../share/warmline"; do
+    [ -n "$c" ] && [ -f "$c/statusline.py" ] && { (cd "$c" && pwd); return 0; }
+  done
+  return 1
+}
+
+setup_usage() {
+  cat <<EOF
+warmline setup: wire the statusline into Claude Code.
+
+  warmline setup            install the statusline and policy text, wire settings.json
+  warmline setup --force    with install: replace a statusLine that isn't warmline's
+  warmline setup --remove   unwire it and remove the files this command installed
+
+install.sh does this as part of installing. Run it yourself after a package
+manager (brew, a distro package) has put the commands on PATH but left
+$CLAUDE_DIR alone -- packages don't get to edit your Claude Code config.
+
+Removing the keep-warm block is separate: warmline keep-warm off.
+EOF
+}
+
+cmd_setup() {
+  local force=0 remove=0 src
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1 ;;
+      --remove|--uninstall) remove=1 ;;
+      --help|-h) setup_usage; return 0 ;;
+      *) echo "warmline setup: unknown flag '$1' (see warmline setup --help)" >&2; return 2 ;;
+    esac
+    shift
+  done
+  if [ "$remove" = 1 ] && [ "$force" = 1 ]; then
+    echo "warmline setup: --remove and --force don't go together" >&2; return 2
+  fi
+
+  if [ "$remove" = 1 ]; then
+    if [ -f "$SETTINGS" ]; then
+      DEST="$DEST" python3 - "$SETTINGS" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(0)
+sl = d.get("statusLine") or {}
+if os.environ["DEST"] in str(sl.get("command", "")):
+    del d["statusLine"]
+    with open(path, "w") as f:
+        json.dump(d, f, indent=2)
+        f.write("\n")
+    print(f"removed statusLine from {path}")
+PY
+    fi
+    rm -f "$DEST" "$POLICY"
+    echo "warmline setup removed (the commands themselves are your package manager's)"
+    [ "$(kw_state)" = on ] && echo "note: keep-warm is still ON -- 'warmline keep-warm off' removes that block"
+    return 0
+  fi
+
+  src="$(share_dir)" || {
+    echo "warmline: can't find statusline.py next to this command" >&2
+    echo "(looked beside it and in ../share/warmline; set WARMLINE_SHARE_DIR" >&2
+    echo "to the directory holding statusline.py and keep-warm.md)" >&2
+    return 1
+  }
+  mkdir -p "$CLAUDE_DIR"
+  cp "$src/statusline.py" "$DEST"; chmod +x "$DEST"
+  echo "installed $DEST"
+  local prev=""
+  if [ -f "$src/keep-warm.md" ]; then
+    if [ -f "$POLICY" ]; then prev="$(mktemp)"; cp "$POLICY" "$prev"; fi
+    cp "$src/keep-warm.md" "$POLICY"
+    echo "installed $POLICY"
+    # the block already in CLAUDE.md is what the agent reads, so refreshing only
+    # $POLICY would leave every session on the previous release's wording
+    if [ -f "$CLAUDE_MD" ]; then
+      MB="$MARK_BEGIN" ME="$MARK_END" PREV="$prev" \
+        python3 - "$CLAUDE_MD" "$POLICY" <<'PY'
+import os, re, sys
+md, policy = sys.argv[1], sys.argv[2]
+mb, me = os.environ["MB"], os.environ["ME"]
+text = open(md).read()
+if mb not in text or me not in text:
+    sys.exit(0)
+head, rest = text.split(mb, 1)
+body, tail = rest.split(me, 1)
+new = open(policy).read()
+norm = lambda s: re.sub(r"\s+", " ", s).strip()
+if norm(body) == norm(new):
+    sys.exit(0)
+prev = os.environ.get("PREV") or ""
+prev = open(prev).read() if prev and os.path.exists(prev) else None
+if prev is not None and norm(body) == norm(prev):
+    open(md, "w").write(head + mb + "\n" + new.rstrip() + "\n" + me + tail)
+    print(f"refreshed the keep-warm block in {md} (policy updated)")
+else:
+    print(f"note: the keep-warm block in {md} differs from the policy just")
+    print("installed and does not match the one it replaced, so it looks")
+    print("hand-edited -- left untouched. To adopt the new wording, run:")
+    print("  warmline keep-warm off && warmline keep-warm on")
+PY
+    fi
+    [ -n "$prev" ] && rm -f "$prev"
+  fi
+
+  DEST="$DEST" FORCE="$force" python3 - "$SETTINGS" <<'PY'
+import json, os, shutil, sys
+path, dest = sys.argv[1], os.environ["DEST"]
+force = os.environ["FORCE"] == "1"
+d = {}
+if os.path.exists(path):
+    with open(path) as f:
+        d = json.load(f)
+    shutil.copyfile(path, path + ".warmline-bak")
+sl = d.get("statusLine")
+if sl and dest not in str(sl.get("command", "")) and not force:
+    print(f"settings.json already has a statusLine: {sl.get('command')!r}")
+    print("re-run with --force to replace it (backup: settings.json.warmline-bak)")
+    sys.exit(1)
+new = dict(sl) if isinstance(sl, dict) and dest in str(sl.get("command", "")) else {}
+new.update({"type": "command", "command": dest})
+refresh = os.environ.get("WARMLINE_REFRESH_SEC")
+if refresh is not None:
+    try:
+        refresh = int(float(refresh))
+    except ValueError:
+        sys.exit(f"WARMLINE_REFRESH_SEC must be a number, got {refresh!r}")
+    if refresh > 0:
+        new["refreshInterval"] = refresh
+    else:
+        new.pop("refreshInterval", None)
+else:
+    new.setdefault("refreshInterval", 60)
+d["statusLine"] = new
+with open(path, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+r = new.get("refreshInterval")
+how = f"self-refreshes every {r}s while idle" if r else "event-driven only"
+print(f"statusLine wired in {path}  ({how})")
+PY
+}
+
 cmd_status() {
   local wired=none settings_ttl="" refresh="" sl_line kw_line audit_line ttl_line refresh_line="" audit_path
   if [ -f "$SETTINGS" ]; then
@@ -204,11 +366,11 @@ PY
   if [ -f "$DEST" ] && [ "$wired" = warmline ]; then
     sl_line="ON   $DEST"
   elif [ "$wired" = foreign ] && [ -f "$DEST" ]; then
-    sl_line="OFF  ($DEST installed, but settings.json runs a different statusline; install.sh --force replaces it)"
+    sl_line="OFF  ($DEST installed, but settings.json runs a different statusline; 'warmline setup --force' replaces it)"
   elif [ "$wired" = warmline ]; then
-    sl_line="OFF  (wired in settings.json but $DEST is missing; re-run install.sh)"
+    sl_line="OFF  (wired in settings.json but $DEST is missing; run 'warmline setup')"
   else
-    sl_line="OFF  (install: install.sh)"
+    sl_line="OFF  (wire it: warmline setup)"
   fi
   case "$(kw_state)" in
     on)  kw_line="ON   (details: warmline keep-warm status)" ;;
@@ -219,7 +381,7 @@ PY
   if [ -n "$audit_path" ]; then
     audit_line="ON   $audit_path"
   else
-    audit_line="OFF  (install: install.sh)"
+    audit_line="OFF  (install: install.sh, or brew install warmline)"
   fi
   if [ -n "${WARMLINE_TTL_MIN:-}" ]; then
     ttl_line="${WARMLINE_TTL_MIN}m (WARMLINE_TTL_MIN)"
@@ -349,19 +511,32 @@ harness background task, watching a worker you detached beforehand.
   warmline wait-for --pidfile /tmp/backup.pid
   warmline wait-for --file /tmp/backup.done       # done when it appears
   warmline wait-for --log /tmp/backup.log --until 'transfer complete'
+  warmline wait-for --pid 4242 --until-cold       # ...or the cache deadline
 
   -n SECS         poll every SECS (default 30)
+  --until-cold    also return just before this session's prompt cache
+                  expires, so the wake lands inside the TTL. Usable alone,
+                  with no target at all
+  --margin MIN    how far ahead of expiry --until-cold returns (default 2)
   --every MIN     heartbeat line every MIN minutes (default 50 -- inside the
                   cache TTL); 0 waits silently until the end
   --timeout MIN   give up after MIN minutes (default 600); 0 waits forever
 
 Exit 0 the watched job ended, 1 timed out, 2 bad usage or a target that
-never appeared.
+never appeared, 3 the cache deadline came first (re-arm and end the turn).
 
 Why not just background the worker: a background task that runs
 'nohup ... &' returns immediately -- the harness reports it completed with
 exit 0 while the real work runs on, detached, with nothing left to notify
 you. Detach the worker deliberately, then watch it with this.
+
+Why --until-cold beats a timed ping: it fires on the session's real expiry,
+read from its own transcript, so a 5-minute cache isn't pinged on an hourly
+schedule and an hourly one isn't pinged early for nothing. Paired with a
+target it returns on whichever comes first, so a job that ends at minute 12
+costs no ping at all -- and every turn that happens meanwhile pushes the
+deadline out on its own, because the cache it was waiting on just got warm
+again.
 EOF
 }
 
@@ -371,7 +546,7 @@ wf_elapsed() { # seconds -> 7m / 1h23m
 }
 
 cmd_wait_for() {
-  local interval=30 every=50 timeout=600
+  local interval=30 every=50 timeout=600 margin=2 until_cold=0
   # seconds per --every/--timeout minute; only the tests move it, so the
   # heartbeat, the timeout and the settle window are exercised for real
   local min="${WARMLINE_WAITFOR_MIN_SEC:-60}"
@@ -380,7 +555,8 @@ cmd_wait_for() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --help|-h|help) wait_for_usage; exit 0 ;;
-      --pid|--pidfile|--file|--log|--until|-n|--every|--timeout)
+      --until-cold) until_cold=1; shift ;;
+      --pid|--pidfile|--file|--log|--until|-n|--every|--timeout|--margin)
         [ $# -ge 2 ] || { echo "warmline: $1 needs a value" >&2; exit 2; }
         case "$1" in
           --pid) pid="$2" ;;
@@ -391,6 +567,7 @@ cmd_wait_for() {
           -n) interval="$2" ;;
           --every) every="$2" ;;
           --timeout) timeout="$2" ;;
+          --margin) margin="$2" ;;
         esac
         shift 2 ;;
       *) echo "warmline: unknown wait-for argument '$1' (see warmline wait-for --help)" >&2; exit 2 ;;
@@ -398,7 +575,7 @@ cmd_wait_for() {
   done
 
   local pair
-  for pair in "-n:$interval" "--every:$every" "--timeout:$timeout"; do
+  for pair in "-n:$interval" "--every:$every" "--timeout:$timeout" "--margin:$margin"; do
     case "${pair#*:}" in
       ''|*[!0-9]*) echo "warmline: ${pair%%:*} needs a whole number" >&2; exit 2 ;;
     esac
@@ -419,11 +596,33 @@ cmd_wait_for() {
   [ -n "$pidfile" ] && targets=$((targets + 1))
   [ -n "$file" ] && targets=$((targets + 1))
   [ -n "$log" ] && targets=$((targets + 1))
-  if [ "$targets" -ne 1 ]; then
+  if [ "$targets" -gt 1 ] || { [ "$targets" -eq 0 ] && [ "$until_cold" = 0 ]; }; then
     echo "warmline: wait-for needs exactly one of --pid / --pidfile / --file / --log" >&2
-    echo "(see warmline wait-for --help)" >&2
+    echo "(or --until-cold on its own, to wait only for the cache deadline)" >&2
     exit 2
   fi
+
+  # the deadline is read from this session's own transcript, so an unreadable
+  # one is a setup error worth failing on now rather than at expiry
+  local audit_path=""
+  if [ "$until_cold" = 1 ]; then
+    audit_path="$(find_audit)"
+    if [ -z "$audit_path" ] || ! "$audit_path" --cold-at >/dev/null 2>&1; then
+      echo "warmline: --until-cold can't read this session's cache expiry" >&2
+      echo "(needs warmline-audit and a transcript for the current project)" >&2
+      exit 2
+    fi
+  fi
+
+  # epoch second to return at: expiry minus the margin. Recomputed each poll,
+  # because any turn in the meantime re-warms the cache and moves it out.
+  wf_deadline() {
+    local line epoch
+    line="$("$audit_path" --cold-at 2>/dev/null)" || return 1
+    epoch="${line%% *}"
+    case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+    echo $(( epoch - margin * min ))
+  }
 
   # a target that never materializes is a launch bug, not a long wait: say so
   # in minutes rather than letting the agent block until the timeout
@@ -431,7 +630,8 @@ cmd_wait_for() {
   if [ -n "$pidfile" ]; then desc="pidfile $pidfile"; guard_what="pidfile $pidfile holds no pid"
   elif [ -n "$log" ]; then desc="'$until_pat' in $log"; guard_what="log file $log never appeared"
   elif [ -n "$file" ]; then desc="$file"; ready=1
-  else desc="pid $pid"; ready=1; fi
+  elif [ -n "$pid" ]; then desc="pid $pid"; ready=1
+  else ready=1; fi   # --until-cold alone: the deadline is the only target
 
   # a zombie still answers kill -0, and a worker left un-detached by its
   # launcher is exactly the case that zombies -- so ask ps for the state
@@ -464,26 +664,30 @@ cmd_wait_for() {
     fi
   }
 
-  local start now elapsed next_beat=$((every * min))
+  local start now elapsed deadline next_beat=$((every * min))
   start=$(date +%s)
   while :; do
-    if wf_done; then
+    if [ "$targets" -gt 0 ] && wf_done; then
       now=$(date +%s)
       echo "warmline wait-for: $desc finished after $(wf_elapsed $((now - start)))"
       return 0
     fi
     now=$(date +%s); elapsed=$((now - start))
+    if [ "$until_cold" = 1 ] && deadline="$(wf_deadline)" && [ "$now" -ge "$deadline" ]; then
+      echo "warmline wait-for: cache deadline reached after $(wf_elapsed "$elapsed")${desc:+ (still waiting on $desc)}"
+      return 3
+    fi
     if [ -n "$guard_what" ] && [ "$ready" = 0 ] && [ "$elapsed" -ge "$settle" ]; then
       echo "warmline wait-for: $guard_what after $(wf_elapsed "$elapsed")." >&2
       echo "the worker probably never started -- check how it was launched." >&2
       return 2
     fi
     if [ "$timeout" -gt 0 ] && [ "$elapsed" -ge $((timeout * min)) ]; then
-      echo "warmline wait-for: gave up on $desc after $(wf_elapsed "$elapsed")" >&2
+      echo "warmline wait-for: gave up on ${desc:-the cache deadline} after $(wf_elapsed "$elapsed")" >&2
       return 1
     fi
     if [ "$every" -gt 0 ] && [ "$elapsed" -ge "$next_beat" ]; then
-      echo "warmline wait-for: still waiting on $desc ($(wf_elapsed "$elapsed"))"
+      echo "warmline wait-for: still waiting on ${desc:-the cache deadline} ($(wf_elapsed "$elapsed"))"
       next_beat=$((next_beat + every * min))
     fi
     sleep "$interval"
@@ -494,6 +698,7 @@ command -v python3 >/dev/null || { echo "warmline needs python3 on PATH" >&2; ex
 
 case "${1:-}" in
   status) cmd_status ;;
+  setup) shift; cmd_setup "$@" ;;
   watch) shift; cmd_watch "$@" ;;
   awake) shift; cmd_awake "$@" ;;
   wait-for) shift; cmd_wait_for "$@" ;;

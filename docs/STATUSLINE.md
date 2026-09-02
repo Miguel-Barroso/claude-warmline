@@ -5,7 +5,7 @@
 One line, rendered by Claude Code every time it repaints:
 
 ```
-Fable 5 | claude-warmline | ctx 43% (168k) | cache HOT (cold ~13:04)
+Fable 5 | claude-warmline | ctx 43% (86k) | cache HOT (127k, cold ~13:04) | 5h 78%
 ```
 
 Since v2.1.251 Claude Code puts the prompt cache's real state on the
@@ -19,11 +19,13 @@ truth; this line owns the presentation.
 
 | Field | Meaning |
 |---|---|
-| `ctx 43% (168k)` | context-window utilization and input tokens in the conversation |
-| `cache HOT (cold ~13:04)` | the cached prefix is warm and leaves its TTL at the wall-clock time shown (green) |
-| `cache HOT (cold ~13:04)` | *within 15 minutes of that time* — identical text, yellow |
-| `cache HOT 5m (cold ~13:04)` | as above, on the 5-minute TTL (see [the TTL badge](#the-ttl-badge)) |
-| `cache HOT` | warm, but this response carried no expiry timestamp |
+| `ctx 43% (86k)` | context-window utilization and input tokens in the conversation |
+| `cache HOT (127k, cold ~13:04)` | the cached prefix is warm, rebuilding it would re-cache 127k tokens, and it leaves its TTL at the wall-clock time shown (green) |
+| `cache HOT (127k, cold ~13:04)` | *within 15 minutes of that time* — identical text, yellow |
+| `cache HOT 5m (127k, cold ~13:04)` | as above, on the 5-minute TTL (see [the TTL badge](#the-ttl-badge)) |
+| `cache HOT (127k)` | warm with a known stake, but this response carried no expiry timestamp |
+| `cache HOT` | warm; no expiry and no rebuild size in this response |
+| `5h 78%` / `7d 91%` | share of the plan window nearest its cap, with `(HH:MM)` reset once it's yellow (see [plan limits](#plan-limits)) |
 | `cache COLD` | the prefix is outside its TTL; the next turn re-caches it (red) |
 | `cache off` | `caching_observed` is false — prompt caching is off, or this provider or gateway never reports cache tokens (dim) |
 | `cache ?` | no `prompt_cache` object: Claude Code before v2.1.251, or before the session's first API response (dim) |
@@ -35,14 +37,60 @@ happening"* means nothing here will ever warm up; *"warmline can't see"* means
 don't trust the field at all. Guessing between them is how a cache gauge
 starts lying, and a confidently wrong verdict is worse than an honest `?`.
 
-`ctx` turns yellow past 80% (`WARMLINE_CTX_WARN_PCT`), because
-[auto-compaction](KEEP-WARM.md#auto-compact-the-one-you-dont-choose) — measured
-firing around 84% of the window — rewrites the prefix without being asked and
-takes the cache with it. It is the only warning you get, and the only thing
-worth doing about it (compact deliberately, or don't start a wait you can't
-keep) has to happen before the threshold, not after.
+`ctx` turns yellow within 10k tokens of the threshold
+[auto-compaction](KEEP-WARM.md#auto-compact-the-one-you-dont-choose) actually
+fires at, because compaction rewrites the prefix without being asked and takes
+the cache with it. That threshold is not a percentage: Claude Code reserves
+`min(max_output, 20000) + 13000` tokens at the top of the window, and every
+current model's `max_output` clears 20000, so it is **the window minus 33000** —
+167k of a 200k window (83.5%), 967k of a 1M one (96.7%). warmline computes it
+from the `context_window_size` in the payload, which is why the same 86% is a
+warning in the small window and silence in the large one.
+
+It stays silent when auto-compaction cannot fire — `DISABLE_AUTO_COMPACT` or
+`DISABLE_COMPACT` in the environment, `autoCompactEnabled: false` in settings —
+and when the payload carries no window to compute from, since a warning nobody
+can act on is just noise. `WARMLINE_CTX_WARN_PCT=N` replaces the whole rule with
+a flat percentage, and `0` disables it.
 
 The model name and directory come straight from Claude Code's own payload.
+
+## The stake
+
+The number beside `HOT` is `prompt_cache.recache_tokens_if_cold`: how many
+tokens the next turn would have to re-cache if the prefix went cold, straight
+from Claude Code. It is the one figure that says whether keeping this cache
+warm is worth doing anything about — a 12k prefix is not worth a wakeup, and a
+480k one is worth arming a poller for. Everything else on the line describes
+*state*; this describes *stake*.
+
+It rides inside the cache field's parentheses rather than taking a segment of
+its own, so the line stays the same width, and it is omitted below 1000 tokens
+(nothing to keep) or when Claude Code doesn't send it.
+
+To turn it into money, [`warmline audit --price`](AUDIT.md) prices the same
+quantity at the rate solved from your own cost record: a cold re-cache bills 2×
+base input on the 1-hour bucket against 0.1× for a warm read, so the avoidable
+premium is 1.9× — 127k tokens at $3/MTok is about $0.72 per rebuild.
+
+## Plan limits
+
+`5h 78%` is `rate_limits.five_hour.used_percentage`, handed to the statusline by
+Claude Code. For a subscription the felt currency is not dollars, it is the
+window: nothing costs anything until the 5-hour or 7-day limit lands mid-task.
+warmline shows whichever window is nearest its cap.
+
+| Share used | Rendering |
+|---|---|
+| under 50% | hidden — there is nothing to plan around yet |
+| 50–79% | plain `5h 62%` |
+| 80–94% | yellow `5h 91% (14:20)` — the reset time joins once it matters |
+| 95%+ | red `7d 96% (23:20)` |
+
+The field is absent entirely when the payload carries no `rate_limits`, which is
+the case on an API key, Bedrock and Vertex — no plan window exists there, and a
+`0%` would be an invention. `spend_limit` (gateway deployments) is treated as a
+third window on the same rule. `WARMLINE_NO_QUOTA=1` drops the field.
 
 ## Why a clock and not a countdown
 
@@ -194,9 +242,11 @@ yellow is "act now", red is "already cold", dim is informational. Set
 |---|---|---|
 | `WARMLINE_REFRESH_SEC` | `60` | install-time: the `refreshInterval` written to `settings.json`; `0` writes none |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, never show the keep-warm field |
-| `WARMLINE_CTX_WARN_PCT` | `80` | context-window percentage at which `ctx` turns yellow (auto-compact warning); `0` or less disables |
+| `WARMLINE_NO_QUOTA` | unset | if set, never show the plan-limit field |
+| `WARMLINE_CTX_WARN_PCT` | unset (auto) | a flat percentage at which `ctx` turns yellow, replacing the computed auto-compact threshold; `0` or less disables the warning |
 | `WARMLINE_NO_COLOR` / `NO_COLOR` | unset | plain output, no ANSI |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | config dir; its `CLAUDE.md` holds the keep-warm block |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | config dir; its `CLAUDE.md` holds the keep-warm block and its `settings.json` says whether auto-compact is on |
+| `DISABLE_AUTO_COMPACT` / `DISABLE_COMPACT` | unset | Claude Code's own switches; when either is set, `ctx` never turns yellow |
 
 Set them in the environment Claude Code starts from, or in the `env` block of
 `~/.claude/settings.json`.

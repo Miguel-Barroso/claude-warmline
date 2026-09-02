@@ -24,7 +24,7 @@ you wanted results, and nothing in the session tells you so.
 tools to see what it has been doing historically.**
 
 ```text
-Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 78%
 ```
 
 No guessing, and no timing-based inference. Since v2.1.251 Claude Code hands
@@ -48,6 +48,12 @@ it, and `--all` ranks every session on this machine.
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 ```
 
+or with Homebrew:
+
+```sh
+brew install Miguel-Barroso/warmline/warmline && warmline setup
+```
+
 Then:
 
 | Command | What it does |
@@ -57,9 +63,13 @@ Then:
 | `warmline audit --all` | every session on this machine, ranked |
 | `warmline watch` | every session's warmth, live, until ctrl-c |
 
-Needs `python3` and `bash`, nothing else.
+Needs `python3` and `bash`, nothing else. No `curl`? `wget -qO- <same URL> | bash`
+works the same way, and the installer downloads with whichever one it finds. The
+formula deliberately stops at your `PATH` — no package should rewrite your
+`settings.json` behind your back, so `warmline setup` is that half, and you re-run
+it after `brew upgrade`.
 
-[Install details, flags, pinning a release, updating, Windows →](docs/INSTALL.md)
+[Install details, flags, pinning a release, package managers, Windows →](docs/INSTALL.md)
 
 ## Why warmline
 
@@ -109,14 +119,15 @@ project. The fourth is opt-in, off by default, and deliberately bounded — see
 ## Observe: the statusline
 
 ```
-Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 78%
 ```
 
 | Field | Meaning |
 |---|---|
-| `ctx 64% (127k)` | context-window utilization — yellow past 80%, where auto-compaction starts rewriting the prefix |
-| `cache HOT (cold ~11:58)` | the cached prefix is warm and leaves its TTL at the time shown; yellow within 15 minutes of it |
+| `ctx 64% (127k)` | context-window utilization — yellow within 10k tokens of the threshold auto-compaction actually fires at (`window - 33000`) |
+| `cache HOT (127k, cold ~11:58)` | the cached prefix is warm, a rebuild would re-cache 127k tokens, and it leaves its TTL at the time shown; yellow within 15 minutes of it |
 | `cache HOT 5m` | as above, on the 5-minute TTL — usage credits, an API key, a cloud provider. The 1-hour case is the norm and goes unlabelled |
+| `5h 78%` / `7d 91%` | the plan window nearest its cap, hidden below 50%, with its reset time once it turns yellow. Absent on API keys and cloud providers, which have no plan window |
 | `cache COLD` | the prefix is outside its TTL; the next turn re-caches it |
 | `cache off` | prompt caching is off, or this provider or gateway never reports cache tokens. Nothing here will warm up |
 | `cache ?` | no cache data — Claude Code before v2.1.251, or before the session's first API response |
@@ -125,8 +136,15 @@ Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
 long Claude Code takes to answer.** Every verdict above is a field Claude Code
 handed the statusline: `prompt_cache.warm` for the state, `caching_observed` for
 whether caching is happening at all, `ttl` for the bucket, `expires_at` for the
-clock. Warmline formats and colors them. It used to infer all of this from the
+clock, `recache_tokens_if_cold` for the stake, `rate_limits` for the plan
+window. Warmline formats and colors them. It used to infer all of this from the
 gap between turns, and that machinery is gone.
+
+The two numbers that decide anything are the stake and the quota. **`(127k)` is
+what a rebuild would cost you** — the size of the next cache write if this
+prefix goes cold, which is what makes "worth keeping warm" a number rather than
+a feeling. **`5h 78%`** is the currency a subscription actually runs out of:
+plan windows, not dollars, are what stop work mid-task.
 
 `COLD`, `off` and `?` are kept distinct on purpose: "the cache expired",
 "caching isn't happening here" and "warmline can't see" are three different
@@ -161,7 +179,9 @@ A single `HOT` on your statusline is useful. Seeing that your sessions went cold
 fields Claude Code wrote for it — no one-turn lag, unlike the statusline. `--all`
 does the same across every session on this machine and ranks them. (It runs the
 installed `warmline-audit`; both spellings work, and scripts pinned to the
-hyphenated one keep working.) Real output from 8 weeks of history:
+hyphenated one keep working.) Real output from 8 weeks of history, priced at a
+flat `--price 3` for a stable example — a bare `--price` solves your real rate
+instead, per project:
 
 ```
 $ warmline-audit --all --price 3
@@ -208,10 +228,17 @@ transcripts. They are not billing data** — warmline never sees, and cannot see
 what Anthropic actually billed you. The closing line is labeled `estimated
 avoidable premium`, where "avoidable" means only *after each session's
 unavoidable first cache write*: some of what it counts was never preventable,
-such as a TTL expiry while the laptop was asleep. `--price` is your model's base
-**input** $/MTok, where all cache economics live; output tokens are never cached,
-so the audit prices them on their own line rather than pretending warmth could
-save them.
+such as a TTL expiry while the laptop was asleep.
+
+**Warmline ships no price sheet.** A baked-in table would go stale, and it
+would be wrong the moment you switched from Sonnet to Opus. A bare `--price`
+solves for the base input rate you are actually paying, from the cost Claude
+Code recorded for your last session in that project, using the multiples every
+Claude pricing tier shares (output 5× base input, a 1-hour cache write 2×, a
+5-minute write 1.25×, a warm read 0.1×). `--all` prices each project at its own
+solved rate, every report prints where the number came from, and `--price N`
+still overrides. Output tokens are never cached, so the audit prices them on
+their own line rather than pretending warmth could save them.
 
 Where the audit grades the past, **`warmline watch`** shows the present: every
 session's warmth, live, until ctrl-c. Desktop-app sessions appear too — they
@@ -232,9 +259,22 @@ warmline keep-warm status    # ON / OFF / INCONSISTENT (exit 0 / 1 / 2)
 
 It is **not a daemon** — no cron, no process, nothing outside a running Claude
 Code session. It skips when background tasks are already keeping the cache warm
-for free, skips small contexts, stops the moment work resumes, and gives up
-after ~10 hours. Each ping is an ordinary billed request against your own plan:
-it trades one expensive rebuild for a few cheap reads, and bypasses nothing.
+for free, when the stake is small, and on the 5-minute cache, where ~12 pings an
+hour would cost more than the 1.15× rebuild they prevent. It stops the moment
+work resumes, and gives up after ~10 hours. Each ping is an ordinary billed
+request against your own plan: it trades one expensive rebuild for a few cheap
+reads, and bypasses nothing.
+
+Better still, when the wait is something this machine can watch, don't schedule
+a ping at all:
+
+```sh
+warmline wait-for --pidfile /tmp/job.pid --until-cold
+```
+
+returns when the job ends **or** just before the cache expires, whichever comes
+first — read from this session's own transcript, so a job that finishes at
+minute 12 costs no ping at all.
 
 [What it is and isn't, `wait-for`, no-sleep mode, limits, terms →](docs/KEEP-WARM.md)
 

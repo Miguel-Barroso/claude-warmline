@@ -20,7 +20,7 @@
 **warmline 把缓存状态直接放到你的状态栏上，并给你工具去查看它在历史上的表现。**
 
 ```text
-Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 78%
 ```
 
 不靠猜测，也不靠计时推断。从 v2.1.251 起，Claude Code 会把它自己的 `prompt_cache`
@@ -44,6 +44,12 @@ warmline audit
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 ```
 
+用 Homebrew 也可以：
+
+```sh
+brew install Miguel-Barroso/warmline/warmline && warmline setup
+```
+
 然后：
 
 | 命令 | 作用 |
@@ -53,9 +59,12 @@ curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main
 | `warmline audit --all` | 本机所有会话，排序呈现 |
 | `warmline watch` | 所有会话的热度，实时显示，直到 ctrl-c |
 
-只需要 `python3` 和 `bash`，没有别的依赖。
+只需要 `python3` 和 `bash`，没有别的依赖。没有 `curl` 也行：`wget -qO- <同一个 URL> | bash`
+效果一样，安装器自己下载文件时也会用它找得到的那一个。formula 有意只管到 `PATH` 为止——
+包管理器不该背着你改写 `settings.json`，那一半交给 `warmline setup`；`brew upgrade`
+之后重新跑一次。
 
-[安装细节、参数、锁定发行版、更新、Windows →](docs/INSTALL.md)（英文）
+[安装细节、参数、锁定发行版、包管理器、Windows →](docs/INSTALL.md)（英文）
 
 ## 为什么是 warmline
 
@@ -100,23 +109,28 @@ curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main
 ## 观察：状态栏
 
 ```
-Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
+Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 78%
 ```
 
 | 字段 | 含义 |
 |---|---|
-| `ctx 64% (127k)` | 上下文窗口占用率——超过 80% 变黄，自动压缩会从那里开始改写前缀 |
-| `cache HOT (cold ~11:58)` | 缓存的前缀是热的，将在所示时刻离开它的 TTL；过期前 15 分钟内文字不变，只转黄 |
+| `ctx 64% (127k)` | 上下文窗口占用率——距离自动压缩真正触发的阈值（`窗口 - 33000` token）不足 10k 时变黄 |
+| `cache HOT (127k, cold ~11:58)` | 缓存的前缀是热的，若变冷需要重写 127k token，并将在所示时刻离开它的 TTL；过期前 15 分钟内文字不变，只转黄 |
 | `cache HOT 5m` | 同上，但走的是 5 分钟 TTL——按量计费额度、API key、云端供应商。1 小时是常态，因此不标注 |
 | `cache COLD` | 前缀已在 TTL 之外；下一轮会把它重新缓存 |
 | `cache off` | 提示缓存被关闭，或这个供应商/网关从不报告缓存 token。这里等多久都不会变热 |
 | `cache ?` | 没有缓存数据——v2.1.251 之前的 Claude Code，或本会话第一次 API 响应之前 |
+| `5h 78%` / `7d 91%` | 最接近上限的套餐额度窗口，低于 50% 不显示，转黄后附上重置时间。API key 与云端供应商没有套餐额度，因此不会出现 |
 
 **warmline 不会通过测量 Claude Code 回复得多快来猜缓存是不是热的。** 上面每一个判定
 都是 Claude Code 交给状态栏的字段：状态来自 `prompt_cache.warm`，分桶来自 `ttl`，
-时刻来自 `expires_at`。warmline 只负责排版和上色。它过去确实靠两轮之间的间隔来推断，
-那套机制已经删掉了。`COLD`、`off` 和 `?` 是刻意分开的：“缓存过期了”“根本没有在做缓存”
-“warmline 看不到”是三件不同的事，把它们揉成一件，正是一个缓存仪表开始说谎的起点。
+时刻来自 `expires_at`，重建规模来自 `recache_tokens_if_cold`，套餐额度来自
+`rate_limits`。warmline 只负责排版和上色。它过去确实靠两轮之间的间隔来推断，
+那套机制已经删掉了。真正能据以决策的是两个数字：**`(127k)` 是变冷要付的代价**——
+下一次缓存写入的大小，它把“值不值得保温”从感觉变成数字；**`5h 78%`** 才是订阅用户
+真正会用完的东西——中途打断工作的不是美元，而是套餐额度。`COLD`、`off` 和 `?` 是
+刻意分开的：“缓存过期了”“根本没有在做缓存”“warmline 看不到”是三件不同的事，把它们
+揉成一件，正是一个缓存仪表开始说谎的起点。
 
 过期时间始终是绝对的墙上时钟，而不是倒计时——冻住的倒计时是*错的*，冻住的时钟仍然
 是*真的*。从 `HOT` 到 `COLD` 的切换由 Claude Code 自己在过期的那一刻重绘状态栏完成；
@@ -147,7 +161,8 @@ Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (cold ~11:58)
 `warmline audit` 依据 Claude Code 为每个已记录 API 请求写下的用量字段来评分——不像
 状态栏，它没有一轮的滞后。`--all` 则对本机所有会话做同样的事并排序。（它运行的是已
 安装的 `warmline-audit` 命令；两种写法都有效，已经写好的脚本继续可用。）以下是某台
-机器 8 周历史的真实输出：
+机器 8 周历史的真实输出，为了让示例稳定而统一按 `--price 3` 计价——不带数值的
+`--price` 会按项目求解你真实的单价：
 
 ```
 $ warmline-audit --all --price 3
@@ -187,9 +202,14 @@ estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
 warmline 从来看不到、也无法看到 Anthropic 实际向你收取了多少。报告最后一行标为
 `estimated avoidable premium`，其中的“avoidable（可避免）”仅指*排除每个会话无法
 避免的首次缓存写入之后*的部分：它统计到的一些情况在实践中并不可预防，例如笔记本
-休眠期间发生的 TTL 过期。输入与输出按不同单价分开计算，因为 Claude 就是这样计费的
-——`--price` 是模型的基础**输入**价（$/MTok，所有缓存经济都在这一侧）；输出 token
-从不进缓存，因此审计把它单列一行，而不是假装保温能省下它。
+休眠期间发生的 TTL 过期。
+
+**warmline 不附带价目表。** 写死的价格会过时，而且在你从 Sonnet 换到 Opus 的那一刻
+就是错的。不带数值的 `--price` 会直接求解你实际支付的基础输入单价：用 Claude Code
+自己为该项目上一次会话记录的费用，配合每个 Claude 价格档共有的倍率（输出为基础输入
+的 5 倍，1 小时缓存写入 2 倍，5 分钟写入 1.25 倍，热读取 0.1 倍）。`--all` 会用各
+项目自己的单价分别计价，每份报告都会写明数字的来源；`--price N` 仍可覆盖。输出
+token 从不进缓存，因此审计把它单列一行，而不是假装保温能省下它。
 
 审计评判的是过去，而 **`warmline watch`** 展示的是现在：所有会话热度的实时视图，
 持续重新渲染直到 ctrl-c。桌面应用的会话也会出现在其中——它们虽然无法渲染状态栏，
@@ -209,9 +229,19 @@ warmline keep-warm status    # ON / OFF / INCONSISTENT（退出码 0 / 1 / 2）
 ```
 
 它**不是守护进程**——没有 cron、没有常驻进程，也不会在运行中的 Claude Code 会话
-之外发出任何请求。当后台任务已经免费让缓存保持热度时它会跳过，上下文很小时也跳过，
+之外发出任何请求。当后台任务已经免费让缓存保持热度时它会跳过，代价很小时也跳过，
+走 5 分钟缓存时同样跳过——那需要每小时约 12 次 ping，比它能省下的 1.15 倍重建还贵。
 工作一恢复就停止，并在大约 10 小时后放弃。每次 ping 都是一次针对你自己套餐的普通
 计费请求：它用几次廉价读取换掉一次昂贵重建，不绕过任何限制。
+
+更好的是，只要这台机器能看到那份等待，就根本不必预约 ping：
+
+```sh
+warmline wait-for --pidfile /tmp/job.pid --until-cold
+```
+
+它会在任务结束**或**缓存即将过期时返回，以先到者为准。期限读自本会话自己的记录，
+所以 12 分钟就结束的任务一次 ping 也不用发。
 
 [它是什么、不是什么、`wait-for`、免睡眠模式、限制与条款讨论 →](docs/KEEP-WARM.md)（英文）
 
