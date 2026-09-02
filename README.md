@@ -48,10 +48,10 @@ it, and `--all` ranks every session on this machine.
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 ```
 
-or with Homebrew:
+or with Homebrew, on macOS:
 
 ```sh
-brew install Miguel-Barroso/warmline/warmline && warmline setup
+brew install Miguel-Barroso/warmline/warmline
 ```
 
 Then:
@@ -64,10 +64,9 @@ Then:
 | `warmline watch` | every session's warmth, live, until ctrl-c |
 
 Needs `python3` and `bash`, nothing else. No `curl`? `wget -qO- <same URL> | bash`
-works the same way, and the installer downloads with whichever one it finds. The
-formula deliberately stops at your `PATH` — no package should rewrite your
-`settings.json` behind your back, so `warmline setup` is that half, and you re-run
-it after `brew upgrade`.
+works the same way, and the installer downloads with whichever one it finds.
+Whichever route you take it is one command: `brew install` wires the statusline
+too, `brew upgrade` re-wires it, and `brew uninstall` unwires it again.
 
 [Install details, flags, pinning a release, package managers, Windows →](docs/INSTALL.md)
 

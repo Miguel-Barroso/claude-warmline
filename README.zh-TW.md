@@ -44,10 +44,10 @@ warmline audit
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 ```
 
-用 Homebrew 也可以：
+在 macOS 上用 Homebrew 也可以：
 
 ```sh
-brew install Miguel-Barroso/warmline/warmline && warmline setup
+brew install Miguel-Barroso/warmline/warmline
 ```
 
 接著：
@@ -60,9 +60,8 @@ brew install Miguel-Barroso/warmline/warmline && warmline setup
 | `warmline watch` | 所有工作階段的溫度，即時顯示，直到 ctrl-c |
 
 只需要 `python3` 與 `bash`，沒有別的依賴。沒有 `curl` 也行：`wget -qO- <同一個 URL> | bash`
-效果一樣，安裝器自己下載檔案時也會用它找得到的那一個。formula 刻意只管到 `PATH` 為止——
-套件管理器不該背著你改寫 `settings.json`，那一半交給 `warmline setup`；`brew upgrade`
-之後重新跑一次。
+效果一樣，安裝器自己下載檔案時也會用它找得到的那一個。無論走哪條路都只有一條指令：
+`brew install` 連狀態列一起接好，`brew upgrade` 會換到新版本，`brew uninstall` 會拆掉。
 
 [安裝細節、參數、鎖定發行版、套件管理器、Windows →](docs/INSTALL.md)（英文）
 

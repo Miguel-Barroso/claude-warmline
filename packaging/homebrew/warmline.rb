@@ -1,53 +1,48 @@
-class Warmline < Formula
+cask "warmline" do
+  version "2.2.1"
+  sha256 "REPLACE_WITH_SHA256_OF_THE_TAGGED_TARBALL"
+
+  url "https://github.com/Miguel-Barroso/claude-warmline/archive/refs/tags/v#{version}.tar.gz"
+  name "claude-warmline"
   desc "Make Claude Code's prompt cache state visible: statusline, auditor, keep-warm"
   homepage "https://github.com/Miguel-Barroso/claude-warmline"
-  url "https://github.com/Miguel-Barroso/claude-warmline/archive/refs/tags/v2.2.0.tar.gz"
-  sha256 "d954a2ecc7f06551a6cdc577aac994aeb25c50b3443e480a969f1d4a290c7ba7"
-  license "MIT"
-  head "https://github.com/Miguel-Barroso/claude-warmline.git", branch: "main"
 
-  # No build step and no bundled runtime: two bash scripts and one python
-  # script, all `#!/usr/bin/env`. python3 is required at runtime and both
-  # commands say so plainly if it is missing, which is better than dragging a
-  # 60 MB python keg in for scripts that run on the one already on the machine.
-
-  def install
-    bin.install "warmline", "warmline-audit"
-    # the statusline and the policy text are data, not commands: `warmline
-    # setup` copies them into the Claude Code config dir, which is the one
-    # place a package must never write to on its own
-    pkgshare.install "statusline.py", "keep-warm.md"
-    doc.install "README.md", "CHANGELOG.md", "LICENSE"
-    doc.install Dir["docs/*.md"]
+  livecheck do
+    url "https://github.com/Miguel-Barroso/claude-warmline.git"
+    strategy :git
+    regex(/^v?(\d+(?:\.\d+)+)$/i)
   end
 
-  def caveats
-    <<~EOS
-      The commands are installed, but nothing is wired into Claude Code yet.
-      A formula does not edit ~/.claude/settings.json behind your back:
+  # No build step and no bundled runtime: two bash scripts and one python script,
+  # all `#!/usr/bin/env`. python3 is required at runtime and both commands say so
+  # plainly if it is missing, which is better than dragging a 60 MB python in for
+  # scripts that run on the one already on the machine.
+  binary "claude-warmline-#{version}/warmline"
+  binary "claude-warmline-#{version}/warmline-audit"
 
-        warmline setup            # installs the statusline and wires settings.json
-        warmline status           # confirm
-        warmline keep-warm on     # optional, off by default
-
-      Re-run `warmline setup` after `brew upgrade warmline` to pick up a new
-      statusline. To unwire without uninstalling: `warmline setup --remove`.
-    EOS
+  # A cask, not a formula, for one reason: this is the only way `brew install`
+  # can leave you with a working statusline. A formula's post_install runs under
+  # a sandbox that denies reading $HOME at all, so it cannot wire
+  # ~/.claude/settings.json -- the user would have to run `warmline setup` by
+  # hand, and again after every upgrade. Cask flight blocks are not sandboxed.
+  # `setup` still refuses to replace someone else's statusline without --force,
+  # so this installs warmline; it does not silently take over.
+  postflight do
+    system_command "#{staged_path}/claude-warmline-#{version}/warmline",
+                   args: ["setup"], must_succeed: false, print_stdout: true
   end
 
-  test do
-    # setup must not touch the real config dir during `brew test`
-    ENV["CLAUDE_CONFIG_DIR"] = testpath/"claude"
-    assert_match "claude-warmline", shell_output("#{bin}/warmline --help")
-    system bin/"warmline", "setup"
-    assert_path_exists testpath/"claude/warmline-statusline.py"
-    assert_match "warmline-statusline.py", (testpath/"claude/settings.json").read
-    payload = <<~JSON
-      {"model": {"display_name": "Opus 5"},
-       "workspace": {"current_dir": "#{testpath}"},
-       "prompt_cache": {"warm": true, "caching_observed": true, "ttl": "1h"}}
-    JSON
-    assert_match "cache HOT",
-      pipe_output("python3 #{testpath}/claude/warmline-statusline.py", payload, 0)
+  # Runs *before* the artifacts are removed, so the command still exists to undo
+  # its own wiring. On upgrade both blocks fire -- unwire, then wire the new
+  # version -- which is what keeps an upgraded statusline from going stale.
+  uninstall_preflight do
+    system_command "#{staged_path}/claude-warmline-#{version}/warmline",
+                   args: ["setup", "--remove"], must_succeed: false, print_stdout: true
   end
+
+  caveats <<~CAVEATS
+    warmline is already wired into Claude Code -- `warmline status` shows what is on,
+    and uninstalling unwires it again. Keeping the prompt cache warm through long
+    waits is opt-in and stays off until you run `warmline keep-warm on`.
+  CAVEATS
 end

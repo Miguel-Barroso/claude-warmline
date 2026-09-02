@@ -13,11 +13,10 @@ finds, for its own downloads too):
 wget -qO- https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 ```
 
-or with Homebrew, from this project's tap:
+or with Homebrew on macOS, from this project's tap:
 
 ```sh
 brew install Miguel-Barroso/warmline/warmline
-warmline setup
 ```
 
 or from a checkout:
@@ -29,8 +28,9 @@ cd claude-warmline
 ```
 
 Requires `python3` (standard library only) and `bash`. Nothing else, and
-nothing phones home. The Homebrew path is two commands rather than one on
-purpose — [see below](#from-a-package-manager).
+nothing phones home. Every one of these is a single command that leaves you with
+a working statusline — including Homebrew, which is a cask rather than a formula
+precisely so that it can be ([why](#from-a-package-manager)).
 
 ## Installing a specific release
 
@@ -56,10 +56,33 @@ all. Releases before v2.1.0 predate the flag; pin those with the checkout form.
 
 ## From a package manager
 
-A package manager owns its prefix and nothing else. It can put `warmline` and
-`warmline-audit` on your `PATH` and the data files in `share/warmline`, but it
-must not reach into `~/.claude` and rewrite your `settings.json` — so that half
-is a command you run:
+A package manager puts commands on your `PATH`. Installing warmline also means
+putting a `statusLine` entry in `~/.claude/settings.json` — and if that is left
+to you, it is a step to remember at install time and to *re*member after every
+upgrade, or your statusline quietly stays on the old version. So it isn't left to
+you:
+
+```sh
+brew install   Miguel-Barroso/warmline/warmline   # installs and wires, one command
+brew upgrade   warmline                           # re-wires at the new version
+brew uninstall warmline                           # unwires, then removes
+```
+
+The first command taps `Miguel-Barroso/homebrew-warmline` on its own; you never
+run `brew tap`. **macOS only** — Homebrew on Linux has no cask support, so use
+the installer there, which is also one command.
+
+That "cask" is the whole reason this works. A Homebrew *formula* — the normal
+choice for a CLI tool, and what this was for a day — runs its `post_install` hook
+in a sandbox that denies reading `$HOME` at all, so it cannot wire anything and
+you would be back to typing a second command after every install and upgrade. A
+cask's flight blocks aren't sandboxed. [`packaging/README.md`](../packaging/README.md)
+has the evidence and the release checklist;
+[`packaging/homebrew/warmline.rb`](../packaging/homebrew/warmline.rb) is the
+cask's source of truth, copied into the tap on each release.
+
+Nothing is done behind your back. The wiring is the same `warmline setup` you can
+run yourself, and it is what any other packaging format should call:
 
 ```sh
 warmline setup            # installs the statusline, wires settings.json
@@ -67,27 +90,18 @@ warmline setup --force    # replace a statusLine that isn't warmline's
 warmline setup --remove   # unwire it and take back the files it installed
 ```
 
-`setup` is exactly the wiring half of `install.sh`: same backup, same refusal to
-replace a foreign statusline without `--force`, same `refreshInterval`, same
-keep-warm block refresh. It finds `statusline.py` and `keep-warm.md` beside the
-command or in `../share/warmline`, following symlinks (which is how a Homebrew
-`bin` symlink into the Cellar resolves); `WARMLINE_SHARE_DIR` overrides. Re-run
-it after upgrading the package, and `warmline status` confirms the result.
+`setup` is exactly the wiring half of `install.sh`: same backup of
+`settings.json`, same refusal to replace a foreign statusline without `--force`,
+same `refreshInterval`, same keep-warm block refresh — and it prints every file
+it touches. It finds `statusline.py` and `keep-warm.md` beside the command or in
+`../share/warmline`, following symlinks (which is how a Homebrew `bin` symlink
+into the Caskroom resolves); `WARMLINE_SHARE_DIR` overrides. `warmline status`
+confirms the result at any time.
 
-Homebrew is the one that exists today:
-
-```sh
-brew install Miguel-Barroso/warmline/warmline   # taps Miguel-Barroso/homebrew-warmline
-brew upgrade warmline && warmline setup         # later
-```
-
-`brew uninstall warmline` takes the commands away; run `warmline setup --remove`
-**first** if you want the Claude Code side unwired too, since after the uninstall
-there is no command left to do it. The formula's source of truth is
-[`packaging/homebrew/warmline.rb`](../packaging/homebrew/warmline.rb) in this
-repo, copied into the tap on each release —
-[`packaging/README.md`](../packaging/README.md) covers how it is built and
-tested, and what a distro package would need to do.
+One thing an uninstall deliberately leaves alone: if you turned keep-warm on, the
+block in your `CLAUDE.md` stays, and the console says so. Removing text from a
+file you also write in is not something an uninstaller should decide —
+`warmline keep-warm off` does it when you want it.
 
 ## What lands where
 

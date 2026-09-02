@@ -4,6 +4,44 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.2.1] — 2026-09-02
+
+Packaging and documentation only — no change to the statusline, the auditor, the
+installer or the policy. `brew install` is one command again.
+
+### Changed
+- **Homebrew ships a cask, not a formula.** v2.2.0 shipped a formula, which left
+  `brew install` doing half a job: it put the commands on your `PATH` and then
+  told you to run `warmline setup` yourself — again after every `brew upgrade`,
+  or the statusline silently stayed on the old version. A formula cannot do
+  better. Its `post_install` hook runs under a sandbox whose rules include
+  `deny_read_home`, so it cannot read `~/.claude`, let alone wire it; a probe
+  formula writing to the real home produced `Warning: The post-install step did
+  not complete successfully` and no file. Cask flight blocks are not sandboxed,
+  so the cask's `postflight` runs `warmline setup` and its `uninstall_preflight`
+  runs `warmline setup --remove` — *pre*flight, because the command has to still
+  exist to undo its own wiring. Now:
+  ```sh
+  brew install   Miguel-Barroso/warmline/warmline   # installs and wires
+  brew upgrade   warmline                           # re-wires at the new version
+  brew uninstall warmline                           # unwires, then removes
+  ```
+  Nothing is done behind your back: it is the same `warmline setup`, it prints
+  every file it touches, it backs up `settings.json`, and it still refuses to
+  replace a statusline that isn't warmline's without `--force`. An uninstall
+  leaves a keep-warm block in your `CLAUDE.md` alone and says so — removing text
+  from a file you also write in is not an uninstaller's decision.
+- **The cost, stated plainly: casks are macOS-only.** Homebrew on Linux has no
+  cask support and will say so. Use the installer there — it is one command and
+  does both halves itself, which is why this trade costs nothing the installer
+  doesn't already cover.
+
+### Documentation
+- [`packaging/README.md`](packaging/README.md) rewritten around who wires Claude
+  Code and why a formula can't, with the sandbox evidence and the cask release
+  checklist. [docs/INSTALL.md](docs/INSTALL.md) and all four READMEs carry the
+  one-command form.
+
 ## [2.2.0] — 2026-09-02
 
 Warmline measured warmth accurately and then priced it with a number it made up.

@@ -47,10 +47,10 @@ warmline audit
 curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
 ```
 
-Homebrew なら:
+macOS で Homebrew なら:
 
 ```sh
-brew install Miguel-Barroso/warmline/warmline && warmline setup
+brew install Miguel-Barroso/warmline/warmline
 ```
 
 その後:
@@ -63,10 +63,9 @@ brew install Miguel-Barroso/warmline/warmline && warmline setup
 | `warmline watch` | 全セッションの温度を、ライブで、ctrl-c まで |
 
 依存は `python3` と `bash` だけです。`curl` がなければ `wget -qO- <同じ URL> | bash`
-でも同じように動き、インストーラ自身のダウンロードも見つかった方を使います。formula
-はあえて `PATH` までで止まります——パッケージが勝手に `settings.json` を書き換えるべき
-ではないからで、その半分が `warmline setup` です。`brew upgrade` のあとに実行し直して
-ください。
+でも同じように動き、インストーラ自身のダウンロードも見つかった方を使います。どの経路でも
+コマンドは 1 つです——`brew install` はステータスラインの配線までやり、`brew upgrade`
+は新しい版に張り替え、`brew uninstall` は配線を外します。
 
 [インストールの詳細・フラグ・リリースの固定・パッケージマネージャ・Windows →](docs/INSTALL.md)(英語)
 
