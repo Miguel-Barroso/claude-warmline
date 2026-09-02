@@ -1248,7 +1248,13 @@ wl keep-warm off >/dev/null && wl keep-warm on >/dev/null   # back to a clean bl
 # the list is tested against what a release actually shipped (needs the tags,
 # i.e. a full clone). "ScheduleWakeup" appears only in that old wording.
 V16_POLICY="$SCRATCH/policy-v1.6.0.md"
-git show v1.6.0:keep-warm.md > "$V16_POLICY"
+# a shallow clone (CI without full history) or a source tarball has no tags to
+# show; skip rather than die, so the suite still runs everywhere it used to
+if ! git show v1.6.0:keep-warm.md > "$V16_POLICY" 2>/dev/null; then
+  rm -f "$V16_POLICY"
+  echo "skip ins-refresh-historical: v1.6.0 not in git history (shallow clone or tarball)"
+fi
+if [ -s "$V16_POLICY" ]; then
 python3 - "$IROOT/CLAUDE.md" "$MB" "$ME" "$V16_POLICY" <<'PY'
 import sys
 md, mb, me, pol = sys.argv[1:5]
@@ -1265,6 +1271,7 @@ if [[ "$out" == *"refreshed the keep-warm block"* ]] \
   echo "ok   ins-refresh-historical: a skipped-releases block is brought up to date"; pass=$((pass + 1))
 else
   echo "FAIL ins-refresh-historical:"; echo "$out"; fail=$((fail + 1))
+fi
 fi
 
 # --uninstall removes everything warmline added, keeps the user's own text.
@@ -1339,6 +1346,13 @@ fi
 # setup's refresh recognizes historical wording too. --remove above deleted
 # $POLICY, so there is no prev snapshot to match either: only the hash list
 # can tell this v1.6.0 block from a hand edit.
+if [ ! -s "$V16_POLICY" ]; then
+  echo "skip setup-refresh-historical: v1.6.0 not in git history (shallow clone or tarball)"
+  # the case below asserts this line survives setup's rewrite; the skipped
+  # case is what would have written it
+  python3 -c 'import sys; p = sys.argv[1]; s = open(p).read(); open(p, "w").write("my setup rules\n" + s)' "$SROOT/CLAUDE.md"
+fi
+if [ -s "$V16_POLICY" ]; then
 python3 - "$SROOT/CLAUDE.md" "$MB" "$ME" "$V16_POLICY" <<'PY'
 import sys
 md, mb, me, pol = sys.argv[1:5]
@@ -1355,6 +1369,7 @@ if [[ "$out" == *"refreshed the keep-warm block"* ]] \
   echo "ok   setup-refresh-historical: old official wording refreshed in place"; pass=$((pass + 1))
 else
   echo "FAIL setup-refresh-historical:"; echo "$out"; fail=$((fail + 1))
+fi
 fi
 
 # ...while text matching no release -- current, previous, or historical -- is
