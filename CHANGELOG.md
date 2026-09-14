@@ -4,6 +4,25 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.4.1] — 2026-09-14
+
+A same-day fix to the uninstall that shipped hours earlier, found by running it
+against a real `brew install` rather than a fixture.
+
+### Fixed
+- **`warmline uninstall` under Homebrew now names `brew uninstall warmline`.**
+  The cask unpacks the release tarball whole, so a Caskroom copy has
+  `install.sh` and `statusline.py` sitting beside it and matched the "this is a
+  checkout" test first. The file was kept either way — the safe half was never
+  in question — but it was explained as a checkout and the one command that
+  finishes the job went unsaid. The package-manager path is the stronger signal
+  and is now checked first.
+
+### Tests
+- A 115th case, a Caskroom copy with the whole tarball beside it. The existing
+  fixture was a `Cellar/…/bin` holding the two commands alone, which is why the
+  suite couldn't have caught this; it now mirrors what Homebrew really unpacks.
+
 ## [2.4.0] — 2026-09-14
 
 Two rough edges either side of an install: the `PATH` note that told you to go

@@ -455,13 +455,18 @@ cmd_uninstall() {
   real="$(self_path)"
   dir="$(dirname "$real")"
   bin_dir="${WARMLINE_BIN_DIR:-$HOME/.local/bin}"
-  if [ -f "$dir/install.sh" ] && [ -f "$dir/statusline.py" ]; then
-    echo "kept $dir/warmline -- that is the checkout you ran this from"
-  elif pkg_managed "$real"; then
+  # Package manager first, and the order is the whole point: the cask unpacks
+  # the release tarball whole, so a Caskroom copy has install.sh and
+  # statusline.py beside it and looks exactly like a checkout. The path is the
+  # stronger signal, and only this branch names the command that finishes the
+  # job.
+  if pkg_managed "$real"; then
     echo "kept $real -- a package manager owns that copy"
     case "$real" in
       */Cellar/*|*/Caskroom/*) echo "  remove it with: brew uninstall warmline" ;;
     esac
+  elif [ -f "$dir/install.sh" ] && [ -f "$dir/statusline.py" ]; then
+    echo "kept $dir/warmline -- that is the checkout you ran this from"
   else
     dirs+=("$dir")
   fi

@@ -1736,6 +1736,24 @@ else
   echo "FAIL cli-uninstall-keeps:"; echo "$cout"; echo "$bout"; echo "$aout"; fail=$((fail + 1))
 fi
 
+# A cask copy looks exactly like a checkout: Homebrew unpacks the whole release
+# tarball, install.sh and statusline.py included, into the Caskroom. So the
+# package-manager test has to come first, or the checkout branch answers and
+# swallows the one line that tells you how to finish the job. Found against a
+# real `brew install`, not here -- the Cellar fixture above holds bin/ alone.
+CASKD="$SCRATCH/Caskroom/warmline/9.9/claude-warmline-9.9"; mkdir -p "$CASKD"
+cp warmline warmline-audit install.sh statusline.py "$CASKD/"
+kout=$(env HOME="$UHOME" CLAUDE_CONFIG_DIR="$UROOT" WARMLINE_BIN_DIR="$NOBIN" \
+       "$CASKD/warmline" uninstall)
+if [[ "$kout" == *"a package manager owns that copy"* \
+   && "$kout" == *"brew uninstall warmline"* \
+   && "$kout" != *"checkout you ran this from"* ]] \
+   && [ -x "$CASKD/warmline" ] && [ -x "$CASKD/warmline-audit" ]; then
+  echo "ok   cli-uninstall-cask: a Caskroom copy is brew's, tarball beside it or not"; pass=$((pass + 1))
+else
+  echo "FAIL cli-uninstall-cask:"; echo "$kout"; fail=$((fail + 1))
+fi
+
 # ---- packaging: the Homebrew cask's brew-setup shim ----
 # The cask runs this instead of `warmline setup` because Homebrew's install-step
 # sandbox points $HOME at a throwaway directory: follow $HOME and you wire a
