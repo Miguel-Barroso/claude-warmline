@@ -23,6 +23,10 @@ CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 STATE_DIR="$CLAUDE_DIR/warmline-state"
 MARK_BEGIN="<!-- >>> claude-warmline keep-warm >>> -->"
 MARK_END="<!-- <<< claude-warmline keep-warm <<< -->"
+# Same two strings in the warmline command, which is what removes this block
+# again -- keep the spellings identical.
+PATH_BEGIN="# >>> claude-warmline PATH >>>"
+PATH_END="# <<< claude-warmline PATH <<<"
 
 # Which commit's files to install. Unpinned this is main's tip; a release page
 # pins its own tag, so "install v2.0.0" and "install main" stay two different
@@ -41,11 +45,18 @@ Post-install control lives in the warmline command (warmline --help).
   ./install.sh --keep-warm  install/update, then turn the keep-warm policy ON
   ./install.sh --force      with install: replace a foreign statusLine
   ./install.sh --ref TAG    install that tag or branch instead of main's tip
+  ./install.sh --path       put the bin dir on your PATH without asking
+  ./install.sh --no-path    never offer to; just print the line to add
   ./install.sh --uninstall  remove everything this installer added
   ./install.sh --help       this text
 
 Installs the statusline to $CLAUDE_DIR, the warmline and
 warmline-audit commands to $BIN_DIR (override: WARMLINE_BIN_DIR).
+
+If that bin dir isn't on your PATH, the installer offers to add it to your
+shell startup file, in a marked block 'warmline uninstall' takes back out.
+With no terminal to ask on -- a script, a pipeline -- it prints the line
+instead, so nothing ever waits on an answer that can't come.
 
 Piped through curl or wget, flags go after 'bash -s --':
   curl -fsSL $REPO/main/install.sh | bash -s -- --keep-warm
@@ -57,11 +68,13 @@ files it fetches (WARMLINE_REF=TAG does the same as --ref):
 EOF
 }
 
-KEEP_WARM=0 FORCE=0 MODE=install NMODES=0 REF_FLAG=0
+KEEP_WARM=0 FORCE=0 MODE=install NMODES=0 REF_FLAG=0 PATH_MODE=ask PATH_FLAG=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep-warm) KEEP_WARM=1 ;;
     --force) FORCE=1 ;;
+    --path) PATH_MODE=yes; PATH_FLAG=1 ;;
+    --no-path) PATH_MODE=no; PATH_FLAG=1 ;;
     --ref)
       shift
       [ $# -gt 0 ] || { echo "--ref needs a tag or branch (see --help)" >&2; exit 2; }
@@ -73,7 +86,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-if [ "$NMODES" -gt 1 ] || { [ "$MODE" != install ] && [ $((KEEP_WARM + FORCE + REF_FLAG)) -gt 0 ]; }; then
+if [ "$NMODES" -gt 1 ] || { [ "$MODE" != install ] && [ $((KEEP_WARM + FORCE + REF_FLAG + PATH_FLAG)) -gt 0 ]; }; then
   echo "--uninstall and --help each work alone (see --help)" >&2
   exit 2
 fi
@@ -90,6 +103,154 @@ if [ "$MODE" = help ]; then
 fi
 
 command -v python3 >/dev/null || { echo "claude-warmline needs python3 on PATH" >&2; exit 1; }
+
+# ---- PATH ------------------------------------------------------------------
+# A command in a directory the shell doesn't search is a half-install. This
+# used to print the export line and leave it with you; it now offers to add it,
+# in a marked block that comes out again on uninstall.
+
+# Write one, read all: the shell that installs isn't always the shell that
+# runs, and is even less often the one that uninstalls.
+RC_FILES=("$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bash_login"
+          "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv")
+
+path_line() {
+  # $HOME rather than its value: the line outlives a home directory that moves
+  if [ "$BIN_DIR" = "$HOME/.local/bin" ]; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"'
+  else
+    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
+  fi
+}
+
+# The file a new interactive shell of this kind really reads. zsh reads .zshrc
+# for every interactive shell; bash reads .bashrc on Linux, but on macOS
+# terminals open login shells, which read .bash_profile and never .bashrc.
+# Any other shell gets the line printed rather than an edit we can't test.
+shell_rc() {
+  local sh="${SHELL:-}"
+  case "${sh##*/}" in
+    zsh)  echo "$HOME/.zshrc" ;;
+    bash) if [ "$(uname -s)" = Darwin ]; then echo "$HOME/.bash_profile"
+          else echo "$HOME/.bashrc"; fi ;;
+  esac
+}
+
+# Debian and Ubuntu ship a ~/.profile that adds ~/.local/bin *if the directory
+# exists* -- which it did not when this shell started, and does now. Appending
+# our own line there would be a duplicate that outlives this install; the true
+# answer is "open a new terminal". Prints the file that already handles it.
+path_already_set() {
+  local f
+  local -a pats=(-e "$BIN_DIR")
+  if [ "$BIN_DIR" = "$HOME/.local/bin" ]; then
+    # both spellings literally, because these are grep patterns for what
+    # someone else's startup file says, not paths for this script to use
+    # shellcheck disable=SC2088
+    pats+=(-e '$HOME/.local/bin' -e '~/.local/bin')
+  fi
+  for f in "${RC_FILES[@]}"; do
+    [ -f "$f" ] || continue
+    if grep -qF "${pats[@]}" "$f" 2>/dev/null; then echo "$f"; return 0; fi
+  done
+  return 1
+}
+
+# Which file holds our own block, if any. Checked before the search above,
+# which would otherwise match the line we wrote last time and explain it as
+# someone else's.
+path_block_file() {
+  local f
+  for f in "${RC_FILES[@]}"; do
+    [ -f "$f" ] || continue
+    if grep -qF "$PATH_BEGIN" "$f" 2>/dev/null; then echo "$f"; return 0; fi
+  done
+  return 1
+}
+
+path_manual() { # rc-file, possibly empty
+  echo "add this line to ${1:-your shell startup file} yourself:"
+  printf '  %s\n' "$(path_line)"
+  echo "(or re-run the installer with --path and it does it for you)"
+}
+
+path_append() { # rc-file
+  # path_offer catches this first; the guard stays because appending a second
+  # PATH line to someone's startup file is not a mistake worth making twice
+  if grep -qF "$PATH_BEGIN" "$1" 2>/dev/null; then
+    echo "$1 already has warmline's PATH line"
+    return 0
+  fi
+  printf '\n%s\n%s\n%s\n' "$PATH_BEGIN" "$(path_line)" "$PATH_END" >> "$1" || return 1
+  echo "added to $1 -- open a new terminal and 'warmline' resolves."
+  echo "for the shell you are in now:  $(path_line)"
+}
+
+path_offer() {
+  local rc found ans
+  echo
+  echo "note: $BIN_DIR is not on your PATH, so 'warmline' won't resolve yet."
+  if found="$(path_block_file)"; then
+    echo "$found already has warmline's PATH line, from an earlier install --"
+    echo "open a new terminal, or for the shell you are in now:"
+    printf '  %s\n' "$(path_line)"
+    return 0
+  fi
+  if found="$(path_already_set)"; then
+    echo "$found already adds it at login -- that line is conditional on the"
+    echo "directory existing, which it now does. Open a new terminal and the"
+    echo "command is there. For the shell you are in now:"
+    printf '  %s\n' "$(path_line)"
+    return 0
+  fi
+  rc="$(shell_rc)"
+  if [ "$PATH_MODE" = no ] || [ -z "$rc" ]; then
+    path_manual "$rc"
+    return 0
+  fi
+  if [ "$PATH_MODE" = yes ]; then
+    touch "$rc" 2>/dev/null || true
+    path_append "$rc" || path_manual "$rc"
+    return 0
+  fi
+  # Ask -- but only with a terminal to ask on. Piped into bash, stdin is this
+  # script, so reading the answer from it would eat the rest of the install;
+  # the question and the answer both go to /dev/tty, which also keeps the
+  # prompt visible when the output is redirected to a log.
+  if (exec 3<>/dev/tty) 2>/dev/null; then
+    ans=""
+    printf 'add it to %s? [Y/n] ' "$rc" > /dev/tty
+    read -r ans < /dev/tty || ans=n
+    case "$ans" in
+      ""|[Yy]|[Yy][Ee][Ss])
+        touch "$rc" 2>/dev/null || true
+        path_append "$rc" || path_manual "$rc" ;;
+      *) path_manual "$rc" ;;
+    esac
+  else
+    path_manual "$rc"
+  fi
+}
+
+# Same block, same markers, as the warmline command's path_block_remove.
+path_block_remove() {
+  local f
+  for f in "${RC_FILES[@]}"; do
+    [ -f "$f" ] || continue
+    grep -qF "$PATH_BEGIN" "$f" 2>/dev/null || continue
+    MB="$PATH_BEGIN" ME="$PATH_END" python3 - "$f" <<'PY'
+import os, sys
+path = sys.argv[1]
+text = open(path).read()
+mb, me = os.environ["MB"], os.environ["ME"]
+if mb in text and me in text:
+    head, rest = text.split(mb, 1)
+    _, tail = rest.split(me, 1)
+    open(path, "w").write(head.rstrip("\n") + "\n" + tail.lstrip("\n"))
+PY
+    echo "removed the PATH line from $f"
+  done
+}
 
 if [ "$MODE" = uninstall ]; then
   if [ -f "$SETTINGS" ]; then
@@ -122,6 +283,7 @@ if mb in text and me in text:
     print(f"removed keep-warm block from {path}")
 PY
   fi
+  path_block_remove
   echo "claude-warmline uninstalled."
   exit 0
 fi
@@ -285,8 +447,5 @@ echo "  warmline status         # what's on right now"
 echo "  warmline keep-warm on   # optional: keep the cache warm through long waits"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) echo
-     echo "note: $BIN_DIR is not on your PATH, so 'warmline' won't resolve yet."
-     echo "add this line to your ~/.zshrc or ~/.bashrc (we never edit those for you):"
-     printf '  export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
+  *) path_offer ;;
 esac

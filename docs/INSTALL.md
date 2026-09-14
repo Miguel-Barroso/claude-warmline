@@ -130,10 +130,42 @@ Claude Code usually picks the statusline up within seconds — restart the
 session if it doesn't.
 
 Override the destinations with `CLAUDE_CONFIG_DIR` (config dir) and
-`WARMLINE_BIN_DIR` (commands). If `~/.local/bin` isn't on your `PATH`, the
-installer says so and prints the exact line to add
-(`export PATH="$HOME/.local/bin:$PATH"`) — it never edits your shell startup
-files itself.
+`WARMLINE_BIN_DIR` (commands).
+
+## PATH
+
+A command in a directory your shell doesn't search is a half-install, so if
+`~/.local/bin` isn't on your `PATH`, the installer offers to fix it:
+
+```
+note: /home/you/.local/bin is not on your PATH, so 'warmline' won't resolve yet.
+add it to /home/you/.bashrc? [Y/n]
+```
+
+Yes appends one marked block — the `export PATH="$HOME/.local/bin:$PATH"` line
+between two `claude-warmline PATH` comments — to the file your shell really
+reads: `~/.zshrc` for zsh, `~/.bashrc` for bash on Linux, `~/.bash_profile` for
+bash on macOS, where terminals open login shells. Any other shell gets the line
+printed rather than an edit this project can't test. `warmline uninstall` takes
+the block back out, and a second install recognizes its own line instead of
+adding another.
+
+It asks at most once, and often not at all:
+
+- **Debian and Ubuntu** already ship a `~/.profile` that adds `~/.local/bin`
+  *if the directory exists* — which it didn't when your shell started and does
+  by the time the installer finishes. Appending our own line there would be a
+  duplicate that outlives the install, so the installer names the file that
+  already handles it and stops. Open a new terminal and `warmline` is there.
+- **With no terminal to ask on** — `curl | bash` inside a script, a CI job, a
+  Dockerfile — it prints the line instead of waiting for an answer that can't
+  come. Nothing blocks, ever.
+- `--path` adds it without asking and `--no-path` neither asks nor edits, for
+  automation where a question would be a hang.
+
+The question goes to `/dev/tty` rather than standard input, because under
+`curl | bash` standard input *is* the installer: reading an answer from there
+would swallow the rest of the install.
 
 ## Installer flags
 
@@ -142,6 +174,8 @@ files itself.
 | `--keep-warm` | install-time shorthand for [`warmline keep-warm on`](KEEP-WARM.md) |
 | `--force` | replace an existing non-warmline statusline |
 | `--ref TAG` | install that tag or branch instead of main's tip ([above](#installing-a-specific-release)) |
+| `--path` | put the bin dir on your `PATH` without asking ([above](#path)) |
+| `--no-path` | never offer to; print the line to add and edit nothing |
 | `--uninstall` | remove everything the installer added, including the policy block |
 | `--help` | usage |
 
@@ -182,12 +216,21 @@ your CLAUDE.md is untouched. See
 ## Uninstalling
 
 ```sh
-./install.sh --uninstall
+warmline uninstall          # or, from a checkout: ./install.sh --uninstall
 ```
 
 Removes the statusline and its wiring, both commands, the policy file, the
-state directory, and the keep-warm block from your CLAUDE.md — leaving the rest
-of that file untouched.
+state directory, the `PATH` line if you let the installer add one, and the
+keep-warm block from your CLAUDE.md — leaving the rest of that file untouched.
+The two forms do the same work; `warmline uninstall` just doesn't need the
+installer to still be lying around, which after a `curl | bash` it isn't.
+
+Two copies it will not delete, and says so rather than skipping quietly: one a
+package manager installed (under Homebrew, `brew uninstall warmline` is the
+command that does it — deleting the files behind brew's back would leave brew
+believing warmline is still there), and a checkout's own `./warmline`, which is
+source rather than an install. A checkout can still uninstall the copy in
+`~/.local/bin`: that is what `./warmline uninstall` does.
 
 ## Configuration
 
@@ -275,7 +318,11 @@ survive every operation and a clean-install check that the `warmline` command
 actually lands; `warmline awake` against a stub inhibitor — the exact
 `caffeinate -is` invocation, the default `claude` command, and the wrapped
 command's exit propagating straight through (the no-sleep cleanup-on-`/exit`
-guarantee, held by construction); and `warmline setup` against a synthetic
+guarantee, held by construction); the `PATH` offer against a fake `HOME` — the
+marked block written once and not twice, a stock Debian `~/.profile` recognized
+rather than duplicated, `--no-path` editing nothing — and `warmline uninstall`
+removing every piece while refusing to delete a checkout's files or a package
+manager's copy; and `warmline setup` against a synthetic
 prefix (`bin/` + `share/warmline`, reached through a symlink), covering the
 force/refusal contract, `--remove`, and a missing source tree. Pricing is
 hermetic: the suite ships a synthetic `.claude.json` whose arithmetic solves to

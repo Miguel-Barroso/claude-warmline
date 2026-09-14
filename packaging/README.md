@@ -193,3 +193,10 @@ description, because a wiring step the user doesn't know about is worse than one
 they do. The curl/wget installer ([`install.sh`](../install.sh)) stays the
 primary path and does both halves itself, because it is the one that can't rely
 on a package manager being there at all.
+
+`warmline uninstall` is safe to ship alongside any of this. It unwires
+everything and removes what the installer installed, but a command it finds
+under `/usr`, `/opt`, a Cellar or a Caskroom is reported and left alone —
+deleting a package's files behind its back would leave the package manager
+believing warmline is still installed, which is a worse state than an extra
+command to run.

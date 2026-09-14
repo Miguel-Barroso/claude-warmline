@@ -4,6 +4,47 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.4.0] — 2026-09-14
+
+Two rough edges either side of an install: the `PATH` note that told you to go
+fix it yourself, and an uninstall that needed the installer you no longer had.
+
+### Added
+- **The installer offers to put the bin dir on your `PATH`.** It used to print
+  `export PATH=…` and leave the rest to you — a second step, and the kind the
+  user is most likely to skip, leaving `warmline: command not found` as the
+  first impression. It now asks, and on yes appends one marked block to the file
+  your shell actually reads (`~/.zshrc`, `~/.bashrc`, or `~/.bash_profile` for
+  bash on macOS, where terminals open login shells). `warmline uninstall` takes
+  it out again, and a reinstall recognizes its own line rather than adding a
+  second. Unknown shells still get the line printed, not an edit that can't be
+  tested.
+  - It doesn't ask when the answer is already known: **Debian and Ubuntu ship a
+    `~/.profile` that adds `~/.local/bin` when that directory exists**, which it
+    now does — the installer names that file and stops, because appending a
+    duplicate would outlive the install.
+  - It doesn't ask when nobody can answer: with no terminal — `curl | bash` in a
+    script, CI, a Dockerfile — it prints the line and exits. The question goes to
+    `/dev/tty` rather than standard input, because under `curl | bash` standard
+    input *is* the installer.
+  - `--path` and `--no-path` decide it without a prompt, for automation.
+- **`warmline uninstall`**, doing everything `./install.sh --uninstall` does —
+  statusline, wiring, policy file, state directory, keep-warm block, both
+  commands — plus the `PATH` block, and without needing the installer still on
+  disk, which after a `curl | bash` it isn't. `warmline --uninstall` is accepted
+  too. It declines to delete two kinds of copy and says which: a package
+  manager's (under Homebrew that's `brew uninstall warmline`'s job — deleting
+  them behind brew's back would leave brew believing warmline is installed) and
+  a checkout's own files.
+
+### Tests
+- Six cases, all against a fake `HOME` so none can reach a real `~/.zshrc`: the
+  block written once and not twice, a stock Debian `~/.profile` recognized
+  instead of duplicated, `--no-path` editing nothing, a full `warmline
+  uninstall`, and the checkout and package-manager copies being reported rather
+  than removed. The interactive prompt itself was driven through a real pty on
+  Debian and macOS — accepted, declined, and with no tty at all.
+
 ## [2.3.2] — 2026-09-14
 
 Packaging only: the cask moves off Homebrew's deprecated flight blocks. Nothing

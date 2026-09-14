@@ -14,8 +14,14 @@ DEST="$CLAUDE_DIR/warmline-statusline.py"
 SETTINGS="$CLAUDE_DIR/settings.json"
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 POLICY="$CLAUDE_DIR/warmline-keep-warm.md"
+STATE_DIR="$CLAUDE_DIR/warmline-state"
 MARK_BEGIN="<!-- >>> claude-warmline keep-warm >>> -->"
 MARK_END="<!-- <<< claude-warmline keep-warm <<< -->"
+# install.sh writes this block when you let it put the bin dir on PATH; taking
+# it back out is this command's job, so the markers live in both files -- keep
+# the two spellings identical.
+PATH_BEGIN="# >>> claude-warmline PATH >>>"
+PATH_END="# <<< claude-warmline PATH <<<"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 
 usage() {
@@ -36,6 +42,8 @@ The installer (install.sh) installs and updates; this command controls.
   warmline keep-warm off       turn it OFF -- removes only warmline's block
   warmline keep-warm status    detailed state; exit 0=ON  1=OFF  2=INCONSISTENT
   warmline audit [args...]     run warmline-audit (grades past sessions)
+  warmline uninstall           remove warmline from this machine: files,
+                               wiring, keep-warm block, PATH line
   warmline --help              this text
 
 Config dir: $CLAUDE_DIR  (override with CLAUDE_CONFIG_DIR)
@@ -186,11 +194,10 @@ find_audit() {
   fi
 }
 
-# Where statusline.py and keep-warm.md live. install.sh puts them in the config
-# dir itself; a package manager puts the CLI on PATH and the data files beside
-# it (prefix/share/warmline), which is what this resolves. Symlinks are followed
-# because `brew link` puts one in prefix/bin pointing into the Cellar.
-share_dir() {
+# This command's own file, absolute, with symlinks followed -- `brew link` puts
+# one in prefix/bin pointing into the Cellar, and both of the callers below care
+# about where it really landed rather than how it was reached.
+self_path() {
   local p="${BASH_SOURCE[0]:-$0}" d n=0
   while [ -L "$p" ] && [ "$n" -lt 16 ]; do
     n=$((n + 1))
@@ -199,10 +206,43 @@ share_dir() {
     case "$p" in /*) ;; *) p="$d/$p" ;; esac
   done
   d="$(cd "$(dirname "$p")" 2>/dev/null && pwd || true)"
+  echo "${d:-.}/$(basename "$p")"
+}
+
+# Where statusline.py and keep-warm.md live. install.sh puts them in the config
+# dir itself; a package manager puts the CLI on PATH and the data files beside
+# it (prefix/share/warmline), which is what this resolves.
+share_dir() {
+  local d
+  d="$(dirname "$(self_path)")"
   for c in "${WARMLINE_SHARE_DIR:-}" "$d" "$d/../share/warmline"; do
     [ -n "$c" ] && [ -f "$c/statusline.py" ] && { (cd "$c" && pwd); return 0; }
   done
   return 1
+}
+
+# The undo half of setup: the statusLine entry, but only when it is warmline's,
+# and the two files setup installed. `warmline uninstall` starts here and goes
+# on to the things setup never touched.
+setup_remove() {
+  if [ -f "$SETTINGS" ]; then
+    DEST="$DEST" python3 - "$SETTINGS" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(0)
+sl = d.get("statusLine") or {}
+if os.environ["DEST"] in str(sl.get("command", "")):
+    del d["statusLine"]
+    with open(path, "w") as f:
+        json.dump(d, f, indent=2)
+        f.write("\n")
+    print(f"removed statusLine from {path}")
+PY
+  fi
+  rm -f "$DEST" "$POLICY"
 }
 
 setup_usage() {
@@ -237,24 +277,7 @@ cmd_setup() {
   fi
 
   if [ "$remove" = 1 ]; then
-    if [ -f "$SETTINGS" ]; then
-      DEST="$DEST" python3 - "$SETTINGS" <<'PY'
-import json, os, sys
-path = sys.argv[1]
-try:
-    d = json.load(open(path))
-except Exception:
-    sys.exit(0)
-sl = d.get("statusLine") or {}
-if os.environ["DEST"] in str(sl.get("command", "")):
-    del d["statusLine"]
-    with open(path, "w") as f:
-        json.dump(d, f, indent=2)
-        f.write("\n")
-    print(f"removed statusLine from {path}")
-PY
-    fi
-    rm -f "$DEST" "$POLICY"
+    setup_remove
     echo "warmline setup removed (the commands themselves are your package manager's)"
     [ "$(kw_state)" = on ] && echo "note: keep-warm is still ON -- 'warmline keep-warm off' removes that block"
     return 0
@@ -356,6 +379,103 @@ r = new.get("refreshInterval")
 how = f"self-refreshes every {r}s while idle" if r else "event-driven only"
 print(f"statusLine wired in {path}  ({how})")
 PY
+}
+
+uninstall_usage() {
+  cat <<EOF
+warmline uninstall: take claude-warmline back off this machine. Removes
+the statusline and its wiring, the policy file, the keep-warm block from
+$CLAUDE_MD,
+the PATH line install.sh added to your shell startup file, and both
+commands. Everything ./install.sh --uninstall removes, without needing
+the installer.
+
+  warmline uninstall           remove it all
+  warmline uninstall --help    this text
+
+Two kinds of commands are never deleted: a package manager's (under
+Homebrew this unwires everything, then 'brew uninstall warmline' takes
+the rest) and a checkout's own files. Both are reported rather than
+silently skipped.
+EOF
+}
+
+# Copies a package manager put there. Deleting those behind its back leaves it
+# believing warmline is still installed, so refusing is the safe direction --
+# and a custom WARMLINE_BIN_DIR under /opt being reported instead of removed is
+# a far smaller surprise than the reverse.
+pkg_managed() {
+  case "$1" in
+    */Cellar/*|*/Caskroom/*|/usr/*|/opt/*|/nix/store/*|/snap/*) return 0 ;;
+  esac
+  return 1
+}
+
+# The block install.sh appends when you accept its offer to fix PATH. It only
+# ever writes one file, but which one depends on the shell that ran it, so look
+# in every startup file rather than guess the same way twice.
+path_block_remove() {
+  local f
+  for f in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bash_login" \
+           "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.zshenv"; do
+    [ -f "$f" ] || continue
+    grep -qF "$PATH_BEGIN" "$f" 2>/dev/null || continue
+    MB="$PATH_BEGIN" ME="$PATH_END" python3 - "$f" <<'PY'
+import os, sys
+path = sys.argv[1]
+text = open(path).read()
+mb, me = os.environ["MB"], os.environ["ME"]
+if mb in text and me in text:
+    head, rest = text.split(mb, 1)
+    _, tail = rest.split(me, 1)
+    open(path, "w").write(head.rstrip("\n") + "\n" + tail.lstrip("\n"))
+PY
+    echo "removed the PATH line from $f"
+  done
+}
+
+cmd_uninstall() {
+  case "${1:-}" in
+    "") ;;
+    --help|-h|help) uninstall_usage; return 0 ;;
+    *) echo "warmline uninstall: unknown flag '$1' (see warmline uninstall --help)" >&2
+       return 2 ;;
+  esac
+
+  setup_remove
+  rm -rf "$STATE_DIR"
+  [ "$(kw_state)" = off ] || kw_off
+  path_block_remove
+
+  # Then the commands themselves. The copy running this is one candidate; the
+  # installer's bin dir is the other, because a checkout's ./warmline can be
+  # asked to uninstall the copy in ~/.local/bin and should do it.
+  local real dir bin_dir f d
+  local -a dirs=()
+  real="$(self_path)"
+  dir="$(dirname "$real")"
+  bin_dir="${WARMLINE_BIN_DIR:-$HOME/.local/bin}"
+  if [ -f "$dir/install.sh" ] && [ -f "$dir/statusline.py" ]; then
+    echo "kept $dir/warmline -- that is the checkout you ran this from"
+  elif pkg_managed "$real"; then
+    echo "kept $real -- a package manager owns that copy"
+    case "$real" in
+      */Cellar/*|*/Caskroom/*) echo "  remove it with: brew uninstall warmline" ;;
+    esac
+  else
+    dirs+=("$dir")
+  fi
+  if [ "$bin_dir" != "$dir" ] && [ -f "$bin_dir/warmline" ]; then
+    dirs+=("$bin_dir")
+  fi
+  for d in "${dirs[@]}"; do
+    for f in "$d/warmline" "$d/warmline-audit"; do
+      [ -e "$f" ] || continue
+      rm -f "$f" && echo "removed $f"
+    done
+  done
+
+  echo "claude-warmline uninstalled."
 }
 
 cmd_status() {
@@ -733,6 +853,7 @@ case "${1:-}" in
       *) echo "warmline: unknown keep-warm action '${2}' (see warmline keep-warm --help)" >&2; exit 2 ;;
     esac ;;
   audit) shift; cmd_audit "$@" ;;
+  uninstall|--uninstall) shift; cmd_uninstall "$@" ;;
   ""|--help|-h|help) usage ;;
   *) echo "warmline: unknown command '${1}' (see warmline --help)" >&2; exit 2 ;;
 esac

@@ -832,7 +832,16 @@ IBIN="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH" "$IROOT" "$IBIN"' EXIT
 MB='<!-- >>> claude-warmline keep-warm >>> -->'
 ME='<!-- <<< claude-warmline keep-warm <<< -->'
-inst() { CLAUDE_CONFIG_DIR="$IROOT" WARMLINE_BIN_DIR="$IBIN" ./install.sh "$@"; }
+# --no-path on every install, so no case below can prompt on a real terminal or
+# write to the developer's own ~/.zshrc. The offer gets its own fake HOME and
+# its own cases further down. --uninstall and --help take no other flag, by
+# design, so they are the exceptions.
+inst() {
+  local guard=(--no-path)
+  case " $* " in *" --uninstall "*|*" --help "*) guard=() ;; esac
+  # first, not last: a trailing --no-path would be eaten as --ref's value
+  CLAUDE_CONFIG_DIR="$IROOT" WARMLINE_BIN_DIR="$IBIN" ./install.sh "${guard[@]}" "$@"
+}
 wl()   { CLAUDE_CONFIG_DIR="$IROOT" "$IBIN/warmline" "$@"; }
 
 # The checkout CLI before any install: everything OFF, read-only, keep-warm
@@ -1605,6 +1614,126 @@ if [[ "$out" == *"1 sessions under $CLAUDE_CONFIG_DIR/projects"* ]] \
   echo "ok   audit-config-dir: --all honors CLAUDE_CONFIG_DIR"; pass=$((pass + 1))
 else
   echo "FAIL audit-config-dir:"; echo "$out" | head -3; fail=$((fail + 1))
+fi
+
+# ---- the PATH offer, and `warmline uninstall` ----
+# These two edit shell startup files and delete commands, so every case runs
+# against a fake HOME under $SCRATCH. Nothing here can reach the real ~/.zshrc,
+# and --path/--no-path are always passed: a case that stopped to ask a question
+# would hang the suite on a terminal and pass silently in CI.
+PB='# >>> claude-warmline PATH >>>'
+PH="$SCRATCH/path-home"; mkdir -p "$PH"
+printf '# my zshrc\nalias ll="ls -l"\n' > "$PH/.zshrc"
+pinst() { # $1 = the shell to pretend to be; the rest are installer flags
+  local sh="$1"; shift
+  env HOME="$PH" SHELL="$sh" CLAUDE_CONFIG_DIR="$PH/.claude" ./install.sh "$@"
+}
+
+# --path: the block lands in the file zsh actually reads, the line is written
+# $HOME-relative so it survives a home that moves, and a second install adds a
+# second copy of nothing.
+out=$(pinst /bin/zsh --path)
+out2=$(pinst /bin/zsh --path)
+if [[ "$out" == *"not on your PATH"* && "$out" == *"added to $PH/.zshrc"* \
+   && "$out2" == *"already has warmline's PATH line, from an earlier install"* \
+   && "$(grep -cF "$PB" "$PH/.zshrc")" == 1 ]] \
+   && grep -qF 'export PATH="$HOME/.local/bin:$PATH"' "$PH/.zshrc" \
+   && grep -q 'alias ll' "$PH/.zshrc"; then
+  echo "ok   ins-path-add: one marked block in .zshrc, idempotent, rc kept"; pass=$((pass + 1))
+else
+  echo "FAIL ins-path-add:"; echo "$out"; echo "$out2"; cat "$PH/.zshrc"; fail=$((fail + 1))
+fi
+
+# --uninstall takes the block back out and leaves the rest of the file alone.
+out=$(pinst /bin/zsh --uninstall)
+if [[ "$out" == *"removed the PATH line from $PH/.zshrc"* ]] \
+   && ! grep -qF "$PB" "$PH/.zshrc" && grep -q 'alias ll' "$PH/.zshrc"; then
+  echo "ok   ins-path-remove: block gone from .zshrc, the user's lines intact"; pass=$((pass + 1))
+else
+  echo "FAIL ins-path-remove:"; echo "$out"; cat "$PH/.zshrc"; fail=$((fail + 1))
+fi
+
+# --no-path is the old behavior: print the line, touch nothing. macOS bash
+# reads .bash_profile (terminals open login shells), Linux bash reads .bashrc;
+# the note names whichever this machine's bash would.
+PBH="$SCRATCH/bash-home"; mkdir -p "$PBH"
+out=$(env HOME="$PBH" SHELL=/bin/bash CLAUDE_CONFIG_DIR="$PBH/.claude" \
+      ./install.sh --no-path)
+rcname=.bashrc; [ "$(uname -s)" = Darwin ] && rcname=.bash_profile
+if [[ "$out" == *"add this line to $PBH/$rcname yourself"* \
+   && "$out" == *'export PATH="$HOME/.local/bin:$PATH"'* \
+   && "$out" == *"--path"* ]] && [ ! -e "$PBH/$rcname" ]; then
+  echo "ok   ins-path-no: prints the line for this shell, edits nothing"; pass=$((pass + 1))
+else
+  echo "FAIL ins-path-no:"; echo "$out"; ls -a "$PBH"; fail=$((fail + 1))
+fi
+
+# Debian and Ubuntu already ship the line, guarded on the directory existing --
+# which it does now, one second after we created it. Appending our own would be
+# a duplicate forever, so this case must be recognized and reported, not fixed.
+# It also has to short-circuit *before* the prompt: no flag is passed here, and
+# the suite must not stop to ask.
+PDH="$SCRATCH/debian-home"; mkdir -p "$PDH"
+cat > "$PDH/.profile" <<'EOF'
+# ~/.profile: executed by the command interpreter for login shells.
+if [ -d "$HOME/.local/bin" ] ; then
+    PATH="$HOME/.local/bin:$PATH"
+fi
+EOF
+out=$(env HOME="$PDH" SHELL=/bin/bash CLAUDE_CONFIG_DIR="$PDH/.claude" \
+      ./install.sh </dev/null)
+if [[ "$out" == *"$PDH/.profile already adds it at login"* \
+   && "$out" == *"Open a new terminal"* ]] \
+   && ! grep -qF "$PB" "$PDH/.profile" && [ ! -e "$PDH/.bashrc" ]; then
+  echo "ok   ins-path-debian: stock ~/.profile recognized, not duplicated"; pass=$((pass + 1))
+else
+  echo "FAIL ins-path-debian:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# `warmline uninstall` is install.sh --uninstall without the installer: same
+# files, same wiring, same block -- plus the PATH line, and both commands. It
+# deletes the script it is running from, which is why the last line matters:
+# an unlinked file keeps its open descriptor, so bash reads on to the end.
+UROOT="$SCRATCH/u-cfg"; UBIN="$SCRATCH/u-bin"; UHOME="$SCRATCH/u-home"
+mkdir -p "$UHOME"; printf '# my zshrc\n' > "$UHOME/.zshrc"
+env HOME="$UHOME" SHELL=/bin/zsh CLAUDE_CONFIG_DIR="$UROOT" WARMLINE_BIN_DIR="$UBIN" \
+  ./install.sh --keep-warm --path >/dev/null
+printf 'my own rules\n' >> "$UROOT/CLAUDE.md"
+uout=$(env HOME="$UHOME" CLAUDE_CONFIG_DIR="$UROOT" WARMLINE_BIN_DIR="$UBIN" \
+       "$UBIN/warmline" uninstall)
+if [[ "$uout" == *"claude-warmline uninstalled."* \
+   && "$uout" == *"removed $UBIN/warmline"* \
+   && "$uout" == *"removed the PATH line from $UHOME/.zshrc"* ]] \
+   && [[ ! -e "$UROOT/warmline-statusline.py" && ! -e "$UROOT/warmline-keep-warm.md" \
+   && ! -e "$UBIN/warmline" && ! -e "$UBIN/warmline-audit" ]] \
+   && ! grep -q statusLine "$UROOT/settings.json" \
+   && ! grep -qF "$MB" "$UROOT/CLAUDE.md" && grep -q 'my own rules' "$UROOT/CLAUDE.md" \
+   && ! grep -qF "$PB" "$UHOME/.zshrc" && grep -q 'my zshrc' "$UHOME/.zshrc"; then
+  echo "ok   cli-uninstall: files, wiring, block, PATH line and both commands"; pass=$((pass + 1))
+else
+  echo "FAIL cli-uninstall:"; echo "$uout"; ls -a "$UROOT" "$UBIN"; fail=$((fail + 1))
+fi
+
+# Two copies it must never delete: a checkout's own files (that is the source
+# tree, not an install) and a package manager's (deleting those behind brew's
+# back leaves brew believing warmline is still installed). Both are reported.
+NOBIN="$SCRATCH/u-nobin"
+cout=$(env HOME="$UHOME" CLAUDE_CONFIG_DIR="$UROOT" WARMLINE_BIN_DIR="$NOBIN" \
+       ./warmline uninstall)
+CELL="$SCRATCH/Cellar/warmline/9.9/bin"; mkdir -p "$CELL"
+cp warmline warmline-audit "$CELL/"
+bout=$(env HOME="$UHOME" CLAUDE_CONFIG_DIR="$UROOT" WARMLINE_BIN_DIR="$NOBIN" \
+       "$CELL/warmline" uninstall)
+aout=$(CLAUDE_CONFIG_DIR="$UROOT" ./warmline --uninstall --help)
+if [[ "$cout" == *"that is the checkout you ran this from"* \
+   && "$bout" == *"a package manager owns that copy"* \
+   && "$bout" == *"brew uninstall warmline"* \
+   && "$aout" == *"warmline uninstall:"* ]] \
+   && [ -x ./warmline ] && [ -x ./warmline-audit ] \
+   && [ -x "$CELL/warmline" ] && [ -x "$CELL/warmline-audit" ]; then
+  echo "ok   cli-uninstall-keeps: checkout and package copies reported, not deleted"; pass=$((pass + 1))
+else
+  echo "FAIL cli-uninstall-keeps:"; echo "$cout"; echo "$bout"; echo "$aout"; fail=$((fail + 1))
 fi
 
 # ---- packaging: the Homebrew cask's brew-setup shim ----
