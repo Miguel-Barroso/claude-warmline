@@ -1607,6 +1607,31 @@ else
   echo "FAIL audit-config-dir:"; echo "$out" | head -3; fail=$((fail + 1))
 fi
 
+# ---- packaging: the Homebrew cask's brew-setup shim ----
+# The cask runs this instead of `warmline setup` because Homebrew's install-step
+# sandbox points $HOME at a throwaway directory: follow $HOME and you wire a
+# settings.json that is deleted seconds later, and say "installed". So stand the
+# shim up in the layout it expects -- the command two directories above it --
+# with a stub in place of `warmline`, and check where it aims.
+BSROOT="$SCRATCH/brew-setup"
+mkdir -p "$BSROOT/packaging/homebrew"
+cp packaging/homebrew/brew-setup "$BSROOT/packaging/homebrew/"
+printf '#!/bin/sh\necho "cfg=[$CLAUDE_CONFIG_DIR] args=[$*]"\n' > "$BSROOT/warmline"
+chmod +x "$BSROOT/warmline" "$BSROOT/packaging/homebrew/brew-setup"
+BSHIM="$BSROOT/packaging/homebrew/brew-setup"
+BSHOME="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+# -u before any NAME=value: env stops reading options at the first operand
+bs1=$(env -u CLAUDE_CONFIG_DIR "HOME=$BSROOT/not-a-home" "$BSHIM" 2>&1) || true
+# an explicit config dir still wins, so a hand run can aim it anywhere
+bs2=$(env "HOME=$BSROOT/not-a-home" "CLAUDE_CONFIG_DIR=$BSROOT/cfg" "$BSHIM" --remove 2>&1) || true
+if [ "$bs1" = "cfg=[$BSHOME/.claude] args=[setup]" ] \
+   && [ "$bs2" = "cfg=[$BSROOT/cfg] args=[setup --remove]" ]; then
+  echo "ok   brew-setup: asks the account for home, not \$HOME, and forwards flags"
+  pass=$((pass + 1))
+else
+  echo "FAIL brew-setup:"; printf '%s\n' "$bs1" "$bs2"; fail=$((fail + 1))
+fi
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

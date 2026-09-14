@@ -21,23 +21,31 @@ cask "warmline" do
   binary "claude-warmline-#{version}/warmline-audit"
 
   # A cask, not a formula, for one reason: this is the only way `brew install`
-  # can leave you with a working statusline. A formula's post_install runs under
-  # a sandbox that denies reading $HOME at all, so it cannot wire
+  # can leave you with a working statusline. A formula's post-install hook is
+  # sandboxed with no way to declare an exception, so it cannot wire
   # ~/.claude/settings.json -- the user would have to run `warmline setup` by
-  # hand, and again after every upgrade. Cask flight blocks are not sandboxed.
-  # `setup` still refuses to replace someone else's statusline without --force,
-  # so this installs warmline; it does not silently take over.
-  postflight do
-    system_command "#{staged_path}/claude-warmline-#{version}/warmline",
-                   args: ["setup"], must_succeed: false, print_stdout: true
+  # hand, and again after every upgrade. Cask install steps are sandboxed too,
+  # but `writable_paths` below names the one directory this touches, and
+  # Homebrew grants read and write there. `setup` still refuses to replace a
+  # statusLine that isn't warmline's without --force, so this installs warmline;
+  # it does not silently take over.
+  #
+  # brew-setup is a thin wrapper around `warmline setup`: inside the sandbox
+  # $HOME is a throwaway directory, so it resolves the account's real home from
+  # the password database before wiring anything. See its comment for why.
+  postflight_steps do
+    run "claude-warmline-#{version}/packaging/homebrew/brew-setup", base: :staged_path,
+        must_succeed: false, print_stdout: true,
+        writable_paths: [".claude"], writable_base: :home
   end
 
   # Runs *before* the artifacts are removed, so the command still exists to undo
-  # its own wiring. On upgrade both blocks fire -- unwire, then wire the new
+  # its own wiring. On upgrade both stanzas fire -- unwire, then wire the new
   # version -- which is what keeps an upgraded statusline from going stale.
-  uninstall_preflight do
-    system_command "#{staged_path}/claude-warmline-#{version}/warmline",
-                   args: ["setup", "--remove"], must_succeed: false, print_stdout: true
+  uninstall_preflight_steps do
+    run "claude-warmline-#{version}/packaging/homebrew/brew-setup", base: :staged_path,
+        args: ["--remove"], must_succeed: false, print_stdout: true,
+        writable_paths: [".claude"], writable_base: :home
   end
 
   caveats <<~CAVEATS

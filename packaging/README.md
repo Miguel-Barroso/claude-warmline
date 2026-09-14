@@ -55,7 +55,7 @@ here. No submodule, no fork, no artifact to upload.
 ### Why a cask and not a formula
 
 warmline is a CLI tool, so a formula is the obvious choice — and it was one, for
-a day. A formula cannot finish the job. Its `post_install` hook runs under a
+a day. A formula cannot finish the job. Its post-install hook runs under a
 sandbox whose rules include `deny_read_home` ([`Library/Homebrew/sandbox.rb`,
 `add_install_hook_rules`](https://github.com/Homebrew/brew/blob/main/Library/Homebrew/sandbox.rb)),
 so a formula cannot so much as read `~/.claude`, let alone wire it. Verified, not
@@ -65,13 +65,43 @@ assumed: a probe formula whose `post_install` wrote to the real home produced
 Warning: The post-install step did not complete successfully
 ```
 
-and no file. That leaves formula users typing `warmline setup` after every
-install and every upgrade, which is exactly the failure mode above.
+and no file. Homebrew 7's declarative `post_install_steps` doesn't change that —
+[`formula_installer.rb`](https://github.com/Homebrew/brew/blob/main/Library/Homebrew/formula_installer.rb)
+builds the post-install sandbox without consulting the steps, so a formula has
+nowhere to declare an exception even if it wants one. That leaves formula users
+typing `warmline setup` after every install and every upgrade, which is exactly
+the failure mode above.
 
-Cask flight blocks are not sandboxed. `postflight` runs `warmline setup` and
-`uninstall_preflight` runs `warmline setup --remove` — *pre*flight, because it
-has to happen while the command still exists. On upgrade both fire in turn, so
+Casks get the exception. `postflight_steps` runs `warmline setup` and
+`uninstall_preflight_steps` runs `warmline setup --remove` — *pre*flight, because
+it has to happen while the command still exists. On upgrade both fire in turn, so
 the statusline is unwired and rewired at the new version rather than left stale.
+
+Those steps are sandboxed too — the legacy `postflight` blocks weren't, and are
+deprecated as of Homebrew 7 — but a `run` step may name the paths it needs:
+
+```ruby
+writable_paths: [".claude"], writable_base: :home
+```
+
+and [`cask/artifact/install_steps.rb`](https://github.com/Homebrew/brew/blob/main/Library/Homebrew/cask/artifact/install_steps.rb)
+grants both read and write there. One directory, declared in the cask, auditable
+by anyone reading it — which is a better bargain than the unsandboxed block it
+replaces.
+
+### Why the cask calls `brew-setup` and not `warmline setup`
+
+The sandbox points `$HOME` at a throwaway directory, deliberately, so that a
+command cannot go wandering through the real home. It grants the declared path
+without telling the command where that path is, so `warmline setup` would compute
+`$HOME/.claude`, wire a `settings.json` in a directory deleted seconds later, and
+report success. Silently doing nothing is the worst of the available outcomes.
+
+[`homebrew/brew-setup`](homebrew/brew-setup) is the answer, and all of it:
+resolve the account's home from the password database (`getpwuid`, which the
+sandbox does allow), export it as `CLAUDE_CONFIG_DIR`, `exec warmline setup`.
+Outside a sandbox it returns the same answer `$HOME` would, so it is also just a
+slower way of running `warmline setup` by hand.
 
 The cost is real and worth stating: **casks are macOS-only**. Homebrew on Linux
 has no cask support, so `brew install` there fails with a clear message and the
@@ -79,6 +109,35 @@ has no cask support, so `brew install` there fails with a clear message and the
 on Linux anyway, doing both halves itself. Trading a two-step brew install on
 Linux for a one-step brew install on macOS costs nothing that the installer
 doesn't already cover.
+
+### Getting into an official tap
+
+The cask is written to Homebrew's rules so that it *could* be submitted, but the
+honest position is that neither official repository would take it today, for two
+separate reasons.
+
+**`homebrew/cask` doesn't want it.**
+[Acceptable Casks](https://docs.brew.sh/Acceptable-Casks#appropriate-package-type)
+is explicit: casks distribute pre-built files published by the upstream
+developer, and "open-source command-line-only software normally belongs in
+`homebrew/core` as a formula built from source". warmline is open-source, CLI
+only, and ships as a source tarball. Being unsuitable for core does not make it
+suitable for cask — that document says so in the next sentence.
+
+**`homebrew/core` would take the package type, but not this package.** Not yet:
+[the acceptance
+policy](https://docs.brew.sh/Package-Acceptance-Policy#notability) asks for 30
+forks, 30 watchers or 75 stars — 90/90/225 when the author submits their own
+project — and a repository at least 30 days old. And a core formula still could
+not wire the statusline, per the section above, so core acceptance would trade a
+one-command install for a two-command one.
+
+So the tap is not a waiting room; it is the right home for now. What would change
+the picture, in order: the notability thresholds, and a way for a formula to
+declare a writable path in its post-install sandbox the way a cask already can.
+The second is an upstream feature request, not something this repository can fix,
+and it is worth filing before any submission — the cask exists only because that
+gap does.
 
 ### Per release
 
@@ -104,9 +163,20 @@ brew uninstall Miguel-Barroso/warmline/warmline  # and unwires it
 ```
 
 There is no `brew test` for a cask, so the install/uninstall pair *is* the test —
-and unlike a formula's sandboxed test, it touches your real config, because that
-is the thing being tested. `warmline status` before and after tells you whether
-it did the right thing.
+and it touches your real config, because that is the thing being tested.
+`warmline status` before and after tells you whether it did the right thing.
+Snapshot `~/.claude/settings.json` first; `./install.sh` from the checkout puts
+everything back.
+
+Do not skip it because `style` and `audit` were green. Both read the cask; only
+the install runs it, and everything that can go wrong here — a sandbox denial, a
+`$HOME` that isn't yours, a path that resolves inside the staged tarball instead
+of your home — goes wrong silently, with an exit status of 0 and a cheerful 🍺.
+
+A tap is not trusted by default ([since Homebrew
+6.0.0](https://docs.brew.sh/Tap-Trust)), but installing by fully qualified name —
+which is the only form this README ever gives out — trusts that one cask and
+proceeds. Nothing extra to run, and nothing extra to tell users.
 
 The cask declares no dependencies. warmline needs `python3` at runtime and both
 commands say so plainly when it is missing; pulling a 60 MB python in to run

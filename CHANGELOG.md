@@ -4,6 +4,39 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.3.2] — 2026-09-14
+
+Packaging only: the cask moves off Homebrew's deprecated flight blocks. Nothing
+about warmline itself changes, and a `curl | bash` install is unaffected.
+
+### Fixed
+- **`brew install` no longer prints two deprecation warnings.** Homebrew 7
+  deprecated `postflight` and `uninstall_preflight` in favour of the declarative
+  `postflight_steps` / `uninstall_preflight_steps`, and warned about it on every
+  install. The cask now uses the new stanzas.
+- **Installing from the cask still wires `~/.claude` — and now says so under a
+  sandbox.** The new stanzas, unlike the blocks they replace, run sandboxed with
+  `$HOME` pointed at a throwaway directory. A straight translation would have
+  wired a `settings.json` in a temporary directory, reported success, and left
+  the statusline off. The cask declares the one path it touches
+  (`writable_paths: [".claude"], writable_base: :home`, which Homebrew grants
+  read and write on), and a new
+  [`packaging/homebrew/brew-setup`](packaging/homebrew/brew-setup) resolves the
+  account's real home from the password database before calling `warmline
+  setup`. Verified by installing and uninstalling the cask for real, not by
+  reading the rules.
+
+### Documentation
+- [`packaging/README.md`](packaging/README.md): why the cask calls a shim, what
+  the install-step sandbox does and doesn't allow, and a new section on what it
+  would actually take for this to become an official Homebrew package — the
+  short version being that `homebrew/cask` doesn't accept CLI-only open-source
+  software and `homebrew/core` can't wire a statusline.
+
+### Tests
+- 107 → 108: `brew-setup` resolves the account's home rather than following a
+  `$HOME` that lies, and forwards its flags.
+
 ## [2.3.1] — 2026-09-14
 
 A bare `warmline-audit` meant "whatever session the shell is standing in",

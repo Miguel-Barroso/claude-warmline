@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# `warmline setup`, for the Homebrew cask to call. Nothing else needs this.
+#
+# Cask install steps run sandboxed, with $HOME pointed at a throwaway directory
+# on purpose, so that a command cannot go wandering through the real home. The
+# cask declares the one path it does touch -- `writable_paths: [".claude"],
+# writable_base: :home` -- and Homebrew grants read and write there. What it
+# does not do is tell the command *where* that grant landed: $HOME still points
+# at the throwaway. Left alone, `warmline setup` would wire a settings.json in a
+# directory that is deleted seconds later, and report success.
+#
+# So ask the account, not the environment: getpwuid(2) returns the real home
+# inside the sandbox, and the same answer outside it, where this is just a
+# slower way of reading $HOME.
+set -euo pipefail
+
+home=""
+for probe in \
+  'python3 -c "import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)"' \
+  'eval echo "~$(id -un)"'
+do
+  home="$(eval "$probe" 2>/dev/null || true)"
+  case "$home" in
+    /*) [ -d "$home" ] && break ;;
+  esac
+  home=""
+done
+
+if [ -z "$home" ]; then
+  echo "warmline: can't tell which home directory to wire" >&2
+  echo "(the account's home is unreadable and \$HOME is Homebrew's sandbox copy)" >&2
+  exit 1
+fi
+
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$home/.claude}"
+exec "$(cd "$(dirname "$0")/../.." && pwd)/warmline" setup "$@"
