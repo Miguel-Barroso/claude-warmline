@@ -59,7 +59,7 @@ Then:
 | Command | What it does |
 |---|---|
 | `warmline status` | what's installed and on |
-| `warmline audit` | this project's latest session, turn by turn |
+| `warmline audit` | this session, turn by turn |
 | `warmline audit --all` | every session on this machine, ranked |
 | `warmline watch` | every session's warmth, live, until ctrl-c |
 

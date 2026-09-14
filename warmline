@@ -621,9 +621,17 @@ cmd_wait_for() {
   local audit_path=""
   if [ "$until_cold" = 1 ]; then
     audit_path="$(find_audit)"
-    if [ -z "$audit_path" ] || ! "$audit_path" --cold-at >/dev/null 2>&1; then
+    if [ -z "$audit_path" ]; then
+      echo "warmline: --until-cold needs warmline-audit, which isn't installed" >&2
+      echo "(it ships beside warmline: re-run install.sh, or brew install warmline)" >&2
+      exit 2
+    fi
+    # pass the auditor's own reason through: "no transcript for this session"
+    # and "nothing readable where you're standing" send you to different places
+    local why=""
+    if ! why="$("$audit_path" --cold-at 2>&1 >/dev/null)"; then
       echo "warmline: --until-cold can't read this session's cache expiry" >&2
-      echo "(needs warmline-audit and a transcript for the current project)" >&2
+      [ -n "$why" ] && printf '%s\n' "${why#warmline-audit: }" >&2
       exit 2
     fi
   fi

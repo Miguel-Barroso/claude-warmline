@@ -4,7 +4,8 @@
 
 ```sh
 warmline audit --help               # every flag, including the ones below
-warmline audit                      # latest session of the current project
+warmline audit                      # this session, from inside one; else the
+                                    # latest session of the current project
 warmline audit path/to/session.jsonl
 warmline audit --json               # the same report, machine-readable
 warmline audit --ttl 5              # force a TTL instead of detecting it
@@ -35,6 +36,17 @@ Transcripts are read from `$CLAUDE_CONFIG_DIR/projects` (default
 `~/.claude/projects`) — where every local front end of the Claude Code engine
 records them, so desktop-app sessions are graded alongside terminal ones.
 See [where warmline works](SURFACES.md).
+
+**Which session "no argument" means.** Run from inside a Claude Code session,
+it means *that* session, identified by `$CLAUDE_CODE_SESSION_ID`. A transcript
+stays filed under the project the session was launched in, so the shell's
+working directory can't be what decides — one `cd` into a subdirectory and it
+names no project at all, or worse, somebody else's. Outside a session (an
+ordinary terminal, or a build that doesn't export the id) the current project's
+latest transcript is used instead. A set id is never *fallen back from*: if
+this session has no transcript on disk, the audit says so rather than answering
+with an unrelated one — a wrong `--cold-at` deadline looks exactly like a right
+one.
 
 Unlike the statusline (which lags one turn by construction), the audit is
 authoritative: it grades every recorded API request.

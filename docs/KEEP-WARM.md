@@ -149,6 +149,12 @@ session's own transcript, its real bucket, its real last turn — and returns tw
 minutes (`--margin`) before the cache would expire, with exit code **3**. That
 is the agent's signal to re-arm and end the turn.
 
+"This session" is resolved by `$CLAUDE_CODE_SESSION_ID`, not by the shell's
+working directory, so it works from any subdirectory a turn has `cd`'d into —
+and where no transcript answers to that id, it refuses rather than timing the
+wake off some other session's deadline. See
+[which session "no argument" means](AUDIT.md).
+
 It recomputes on every poll, so a wait that happens to see a turn go by has its
 deadline pushed out for free: the cache it was protecting just got warm again,
 and the ping it would have sent is never sent. On a 5-minute session it fires at

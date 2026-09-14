@@ -12,7 +12,9 @@ the statusline live:
 
 Usage:
     warmline-audit --help             # this text
-    warmline-audit                    # latest session of the current project
+    warmline-audit                    # this session, when run from inside one
+                                      # (CLAUDE_CODE_SESSION_ID); otherwise the
+                                      # latest session of the current project
     warmline-audit TRANSCRIPT.jsonl   # a specific session
     warmline-audit --json             # the same report as JSON on stdout --
                                       # never colored, never bar-charted, and
@@ -34,13 +36,12 @@ Usage:
     warmline-audit --live             # which sessions are warm RIGHT NOW,
                                       # and when each goes cold (this is
                                       # what `warmline watch` re-renders)
-    warmline-audit --cold-at          # one machine-readable line for the
-                                      # current session: expiry epoch, cache
-                                      # bucket, ttl minutes, transcript --
-                                      # read from the file's tail, so a
-                                      # poller can ask every few seconds
-                                      # (this is what `wait-for --until-cold`
-                                      # asks)
+    warmline-audit --cold-at          # one machine-readable line for this
+                                      # session: expiry epoch, cache bucket,
+                                      # ttl minutes, transcript -- read from
+                                      # the file's tail, so a poller can ask
+                                      # every few seconds (this is what
+                                      # `wait-for --until-cold` asks)
 
 Input and output tokens bill at different rates, so they are priced
 separately: all cache economics (reads, writes, the avoidable premium)
@@ -94,6 +95,14 @@ and their transcripts live in separate nested files that --all skips.
 Transcripts are read from $CLAUDE_CONFIG_DIR/projects (default
 ~/.claude/projects) -- where every local front end of the Claude Code
 engine records them, terminal CLI and desktop app alike.
+
+With no path argument, the session is identified by $CLAUDE_CODE_SESSION_ID
+and not by the working directory: a session's transcript stays filed under
+the project it was launched in however far its shell later cd's away. When
+that variable is unset (older builds, or a human at an ordinary terminal)
+the cwd's project is used instead -- but never as a fallback *from* a set
+id, because answering a deadline question with an unrelated session's
+expiry is worse than answering nothing.
 
 Reports are colorized and decorated with small bar charts when stdout is
 a terminal; piped/CI output stays plain, and --json never decorates.
@@ -582,11 +591,42 @@ def premium_usd(s, price_in, key="avoidable_cold_tokens"):
     return s[key] * s["premium_x"] * price_in / 1e6
 
 
+def session_transcript():
+    """This session's own transcript, found by id rather than by location.
+
+    Claude Code exports CLAUDE_CODE_SESSION_ID to every subprocess it spawns
+    and files the transcript as <project>/<id>.jsonl, where <project> is the
+    directory the session was launched in. That is not the shell's cwd the
+    moment any turn runs `cd` -- so identity, not location, resolves it.
+    Returns None when the variable is unset (older builds, or a human running
+    the auditor from an ordinary terminal).
+    """
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if not sid or os.sep in sid or "/" in sid or sid.startswith("."):
+        return None
+    # one level deep only: subagent transcripts live under <session>/subagents/
+    # and run on their own prefix, so they must never answer for this one
+    hits = glob.glob(os.path.join(PROJECTS_DIR, "*", glob.escape(sid) + ".jsonl"))
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
 def find_transcript(path):
-    """Resolve the argument (or cwd) to a transcript file."""
+    """Resolve the argument (or this session) to a transcript file."""
     if path and os.path.isfile(path):
         return path
     if not path:
+        own = session_transcript()
+        if own:
+            return own
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+        if sid:
+            # inside a Claude Code session whose transcript isn't on disk.
+            # The cwd fallback below would answer with whatever *other*
+            # session the shell happens to be standing in -- for --cold-at,
+            # a plausible-looking wrong deadline. Refuse instead.
+            sys.exit("warmline-audit: no transcript for this session (%s) "
+                     "under %s\n(pass a session .jsonl to audit another one)"
+                     % (sid, PROJECTS_DIR))
         slug = re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
         path = os.path.join(PROJECTS_DIR, slug)
     if os.path.isdir(path):

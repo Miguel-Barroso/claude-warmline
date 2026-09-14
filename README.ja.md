@@ -58,7 +58,7 @@ brew install Miguel-Barroso/warmline/warmline
 | コマンド | 内容 |
 |---|---|
 | `warmline status` | 何がインストールされ、有効か |
-| `warmline audit` | このプロジェクトの直近セッションを、ターンごとに |
+| `warmline audit` | このセッションを、ターンごとに |
 | `warmline audit --all` | このマシンの全セッションを、並べ替えて |
 | `warmline watch` | 全セッションの温度を、ライブで、ctrl-c まで |
 

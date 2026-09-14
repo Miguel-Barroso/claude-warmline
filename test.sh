@@ -6,6 +6,9 @@ export SCRATCH="$(mktemp -d)"
 export WARMLINE_NO_COLOR=1
 # the host machine may configure these; the tests assume the defaults
 unset WARMLINE_TTL_MIN WARMLINE_REFRESH_SEC WARMLINE_FORCE_COLOR
+# these run inside a Claude Code session as often as not, and a real session id
+# in the environment would point the auditor at the developer's own transcript
+unset CLAUDE_CODE_SESSION_ID
 # an empty config dir, so the keep-warm field of the statusline tests below
 # reads a known-OFF state instead of whoever's real ~/.claude/CLAUDE.md
 export CLAUDE_CONFIG_DIR="$SCRATCH/cfg"
@@ -765,6 +768,64 @@ else
   echo "FAIL live: $out"; echo "$out2"; fail=$((fail + 1))
 fi
 
+# Which session a bare invocation means. Claude Code files a transcript under
+# the project the session was LAUNCHED in, so the shell's cwd -- one `cd` away
+# from it at any moment -- can't be what decides; the exported session id is.
+# Answering a deadline question with an unrelated session's expiry is the worse
+# half of this bug, because it looks like success.
+AUD="$PWD/warmline-audit"
+FTC="$SCRATCH/ft-cfg"; FTP="$FTC/projects"
+FTSID="11111111-2222-3333-4444-555555555555"
+FTOTHER="99999999-0000-0000-0000-000000000000"
+FTHOME="$SCRATCH/ft-launched"; FTDECOY="$SCRATCH/ft-decoy"
+mkdir -p "$FTHOME/deep/er" "$FTDECOY"
+# realpath, because that is what the auditor's cwd fallback sees: on macOS a
+# /var/folders scratch dir arrives as /private/var/folders once you cd into it
+slugof() { python3 -c 'import os,re,sys
+print(re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(sys.argv[1])))' "$1"; }
+ftsess() { # dir file -> a one-turn 1h-bucket transcript ending now
+  mkdir -p "$1"
+  python3 -c 'import datetime, json
+t = datetime.datetime.now(datetime.timezone.utc)
+print(json.dumps({"type": "assistant", "timestamp": t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "requestId": "f1", "cwd": "/tmp/proj",
+                  "message": {"usage": {"input_tokens": 5, "cache_read_input_tokens": 0,
+                                        "cache_creation_input_tokens": 30000,
+                                        "cache_creation": {"ephemeral_1h_input_tokens": 30000}}}}))' \
+    > "$1/$2"
+}
+ftsess "$FTP/$(slugof "$FTHOME")" "$FTSID.jsonl"
+ftsess "$FTP/$(slugof "$FTDECOY")" "$FTOTHER.jsonl"
+ftrun() { # dir sid [path] -> a --cold-at line, run from `dir` as session `sid`
+  local d="$1" sid="$2"; shift 2
+  # -u before any NAME=value: env stops reading options at the first operand
+  local -a e=(env -u CLAUDE_CODE_SESSION_ID "CLAUDE_CONFIG_DIR=$FTC")
+  if [ -n "$sid" ]; then e+=("CLAUDE_CODE_SESSION_ID=$sid"); fi
+  (cd "$d" && "${e[@]}" "$AUD" --cold-at "$@")
+}
+# each capture keeps its own failure (the pre-fix code exits 1 on the first of
+# them), so a regression is one FAIL line and not an aborted run
+# the shell cd'd below the session's own project: that slug names no project
+ft1=$(ftrun "$FTHOME/deep/er" "$FTSID" 2>&1) || true
+# ...and here it names a different, real one, whose newest session would be a
+# plausible answer and the wrong one
+ft2=$(ftrun "$FTDECOY" "$FTSID" 2>&1) || true
+# no session id at all (older builds, a human at an ordinary terminal): the
+# cwd's project is still the best guess available
+ft3=$(ftrun "$FTHOME" "" 2>&1) || true
+ftrc=0
+ft4=$(ftrun "$FTDECOY" deadbeef-0000 2>&1) || ftrc=$?
+ft5=$(ftrun "$FTHOME" "$FTSID" "$FTP/$(slugof "$FTDECOY")/$FTOTHER.jsonl" 2>&1) || true
+if [[ "$ft1" == *"/$FTSID.jsonl" && "$ft2" == *"/$FTSID.jsonl" \
+   && "$ft3" == *"/$FTSID.jsonl" && "$ft5" == *"/$FTOTHER.jsonl" \
+   && "$ftrc" != 0 && "$ft4" == *"no transcript for this session"* \
+   && "$ft4" != *"$FTOTHER"* ]]; then
+  echo "ok   find-transcript: session id outranks cwd, and never guesses"; pass=$((pass + 1))
+else
+  echo "FAIL find-transcript: rc=$ftrc"; printf '%s\n' "$ft1" "$ft2" "$ft3" "$ft4" "$ft5"
+  fail=$((fail + 1))
+fi
+
 # ---- installer + warmline CLI (isolated via CLAUDE_CONFIG_DIR / WARMLINE_BIN_DIR) ----
 IROOT="$(mktemp -d)"
 IBIN="$(mktemp -d)"
@@ -1167,6 +1228,30 @@ if [[ "$rc" == 2 && "$err" == *"can't read this session's cache expiry"* \
   echo "ok   wait-until-cold-guard: unreadable expiry exits 2, help documents 3"; pass=$((pass + 1))
 else
   echo "FAIL wait-until-cold-guard: rc=$rc :: $err"; fail=$((fail + 1))
+fi
+
+# The same thing end to end, and the shape the bug was found in: the session's
+# transcript is live, but the shell has cd'd into a subdirectory, so the cwd
+# slug names no project at all. The session id resolves it from anywhere -- and
+# where it genuinely can't, the auditor's own reason reaches the surface
+# instead of a generic line that sends you looking for a missing file.
+WFSID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+mkdir -p "$SCRATCH/wf-sub"
+wfsess 120
+mv "$IROOT/projects/$WFSLUG/sess.jsonl" "$IROOT/projects/$WFSLUG/$WFSID.jsonl"
+wfcold() { # sid -> wait-for --until-cold from a subdirectory, as session `sid`
+  (cd "$SCRATCH/wf-sub" && env "CLAUDE_CONFIG_DIR=$IROOT" \
+     "CLAUDE_CODE_SESSION_ID=$1" WARMLINE_WAITFOR_MIN_SEC=1 \
+     "$IBIN/warmline" wait-for -n 1 --until-cold --every 0 --timeout 5)
+}
+rc=0;  out=$(wfcold "$WFSID") || rc=$?
+rc2=0; err=$(wfcold ffffffff-0000-0000-0000-000000000000 2>&1 >/dev/null) || rc2=$?
+if [[ "$rc" == 3 && "$out" == *"cache deadline reached"* \
+   && "$rc2" == 2 && "$err" == *"can't read this session's cache expiry"* \
+   && "$err" == *"no transcript for this session"* ]]; then
+  echo "ok   wait-until-cold-cwd: the session id resolves it from a subdirectory"; pass=$((pass + 1))
+else
+  echo "FAIL wait-until-cold-cwd: rc=$rc/$rc2 :: $out | $err"; fail=$((fail + 1))
 fi
 
 # Installer help: install-side flags only, pointing control at warmline.

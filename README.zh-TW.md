@@ -55,7 +55,7 @@ brew install Miguel-Barroso/warmline/warmline
 | 指令 | 作用 |
 |---|---|
 | `warmline status` | 目前安裝並啟用了什麼 |
-| `warmline audit` | 本專案最近一個工作階段，逐輪查看 |
+| `warmline audit` | 目前的工作階段，逐輪查看 |
 | `warmline audit --all` | 本機所有工作階段，排序呈現 |
 | `warmline watch` | 所有工作階段的溫度，即時顯示，直到 ctrl-c |
 

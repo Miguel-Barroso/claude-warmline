@@ -4,6 +4,50 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.3.1] — 2026-09-14
+
+A bare `warmline-audit` meant "whatever session the shell is standing in",
+which is not the same thing as "this session" and, for `--cold-at`, was
+sometimes confidently wrong. No change to the statusline, the policy text or
+the report itself.
+
+### Fixed
+- **`--cold-at` and a bare audit now resolve *this* session, by id.** Claude
+  Code files a transcript under the project the session was **launched** in and
+  exports the session's id to every subprocess; the auditor was deriving the
+  project from `os.getcwd()` instead. A session whose shell had `cd`'d into a
+  subdirectory therefore resolved to a project directory that doesn't exist —
+  `warmline wait-for --until-cold` refused to start, with a transcript that was
+  live and being written that second. Worse, a `cd` into a *different* project
+  resolved to that project's newest session and returned its expiry with exit
+  0: a deadline thirteen days in the past, so `--until-cold` would fire on
+  every poll while reporting success. Resolution is now
+  `$CLAUDE_CODE_SESSION_ID` → `projects/*/<id>.jsonl`, with the cwd's project
+  kept only as the fallback for where that variable isn't set (older builds, a
+  human at an ordinary terminal). A set id is never fallen back *from*: a
+  session with no transcript on disk is an error, because a plausible wrong
+  deadline is worse than none. Found in live use, holding a cache warm across a
+  70-minute device backup.
+- **`wait-for --until-cold` says which failure it hit.** The preflight collapsed
+  "warmline-audit isn't installed" and "no expiry to read" into one message that
+  named "the current project" — the wrong thing to go looking at, and it cost
+  real diagnosis time. The two are now separate, and the auditor's own reason
+  is passed through verbatim.
+
+### Documentation
+- [`docs/AUDIT.md`](docs/AUDIT.md): which session "no argument" means, and why
+  location can't decide it.
+- [`docs/KEEP-WARM.md`](docs/KEEP-WARM.md): `--until-cold` resolves the session
+  by id, and refuses rather than guessing.
+
+### Tests
+- 105 → 107: `find_transcript` across all five cases (cwd below the session
+  root, cwd in a different real project, no id exported, an id with no
+  transcript, an explicit path), and `wait-for --until-cold` end to end from a
+  subdirectory. Both fail on 2.3.0 — the second one silently, which is the
+  point. The suite also unsets `CLAUDE_CODE_SESSION_ID`, or a run inside a real
+  session audits the developer's own transcript.
+
 ## [2.3.0] — 2026-09-02
 
 The audit proves one more cause, upgrades stop mistaking old official wording

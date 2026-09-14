@@ -55,7 +55,7 @@ brew install Miguel-Barroso/warmline/warmline
 | 命令 | 作用 |
 |---|---|
 | `warmline status` | 当前安装并启用了什么 |
-| `warmline audit` | 本项目最近一个会话，逐轮查看 |
+| `warmline audit` | 当前会话，逐轮查看 |
 | `warmline audit --all` | 本机所有会话，排序呈现 |
 | `warmline watch` | 所有会话的热度，实时显示，直到 ctrl-c |
 
