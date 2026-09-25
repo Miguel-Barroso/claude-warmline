@@ -1675,6 +1675,18 @@ else
   echo "FAIL setup-remove: rc=$rc :: $out"; fail=$((fail + 1))
 fi
 
+# a package hook's --remove (every brew upgrade runs one) unwires the same but
+# prints no notes: mid-upgrade they're wrong, after an uninstall they name a
+# command that is gone
+setup >/dev/null
+out=$(setup --package --remove)
+if [[ "$out" == *"removed statusLine from"* && "$out" != *"note:"* ]] \
+   && [ ! -e "$SROOT/warmline-statusline.py" ] && ! grep -q statusLine "$SROOT/settings.json"; then
+  echo "ok   setup-remove-package: unwired, no notes"; pass=$((pass + 1))
+else
+  echo "FAIL setup-remove-package: $out"; fail=$((fail + 1))
+fi
+
 # setup's refresh recognizes historical wording too. --remove above deleted
 # $POLICY, so there is no prev snapshot to match either: only the hash list
 # can tell this v1.6.0 block from a hand edit.
@@ -2018,8 +2030,8 @@ BSHOME="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
 bs1=$(env -u CLAUDE_CONFIG_DIR "HOME=$BSROOT/not-a-home" "$BSHIM" 2>&1) || true
 # an explicit config dir still wins, so a hand run can aim it anywhere
 bs2=$(env "HOME=$BSROOT/not-a-home" "CLAUDE_CONFIG_DIR=$BSROOT/cfg" "$BSHIM" --remove 2>&1) || true
-if [ "$bs1" = "cfg=[$BSHOME/.claude] args=[setup]" ] \
-   && [ "$bs2" = "cfg=[$BSROOT/cfg] args=[setup --remove]" ]; then
+if [ "$bs1" = "cfg=[$BSHOME/.claude] args=[setup --package]" ] \
+   && [ "$bs2" = "cfg=[$BSROOT/cfg] args=[setup --package --remove]" ]; then
   echo "ok   brew-setup: asks the account for home, not \$HOME, and forwards flags"
   pass=$((pass + 1))
 else

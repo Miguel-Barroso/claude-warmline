@@ -34,4 +34,7 @@ if [ -z "$home" ]; then
 fi
 
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$home/.claude}"
-exec "$(cd "$(dirname "$0")/../.." && pwd)/warmline" setup "$@"
+# --package: an upgrade runs --remove then setup, so the notes --remove would
+# print ("keep-warm is still ON", "AFK mode is unwired") are wrong mid-upgrade,
+# and after an uninstall they name a command that is gone
+exec "$(cd "$(dirname "$0")/../.." && pwd)/warmline" setup --package "$@"

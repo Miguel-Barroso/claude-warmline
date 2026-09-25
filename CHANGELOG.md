@@ -4,6 +4,25 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.6.1] — 2026-09-25
+
+A Homebrew upgrade stops printing notes that weren't true. Output only; what
+an upgrade or uninstall wires and unwires is unchanged.
+
+### Fixed
+- **A Homebrew upgrade printed notes that weren't true.** The cask's uninstall
+  step runs `warmline setup --remove` before the new version is set up again,
+  and that printed "keep-warm is still ON" and "AFK mode is unwired but still
+  consented" halfway through the upgrade, just before the rewiring happened.
+  After a real `brew uninstall` the same notes told you to run a command that
+  was already gone. The cask now calls `warmline setup --package`, which skips
+  those notes; `setup --remove` run by hand still prints them. The upgrade
+  *to* 2.6.1 still prints them one last time: its uninstall step is 2.6.0's.
+
+### Tests
+- `setup-remove-package`: `setup --package --remove` unwires the same and
+  prints no `note:`. `brew-setup` asserts the wrapper passes `--package`.
+
 ## [2.6.0] — 2026-09-25
 
 Windows, both ways: native Claude Code through Git Bash, and Claude Code in

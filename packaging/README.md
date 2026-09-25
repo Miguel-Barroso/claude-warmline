@@ -76,7 +76,10 @@ the failure mode above.
 Casks get the exception. `postflight_steps` runs `warmline setup` and
 `uninstall_preflight_steps` runs `warmline setup --remove` — *pre*flight, because
 it has to happen while the command still exists. On upgrade both fire in turn, so
-the statusline is unwired and rewired at the new version rather than left stale.
+the statusline is unwired and rewired at the new version rather than left stale. Both
+pass `--package`, which keeps `--remove` from printing its keep-warm and AFK
+notes: mid-upgrade they're wrong, and after an uninstall they name a command
+that's gone.
 
 Those steps are sandboxed too — the legacy `postflight` blocks weren't, and are
 deprecated as of Homebrew 7 — but a `run` step may name the paths it needs:
