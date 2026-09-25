@@ -121,8 +121,9 @@ you have, `warmline afk enable` adds `~/.claude/commands/afk.md`, a
 Both commands are installed, and the auditor has two spellings: `warmline audit
 …` is the primary form the docs use, and it runs `warmline-audit`, which remains
 fully supported — it is what scripts should keep calling, what a checkout runs
-(`./warmline-audit`), and the only form available on
-[manual/Windows installs](#windows), where the bash `warmline` wrapper isn't.
+(`./warmline-audit`), and the only form available on a
+[manual Windows install without Git Bash](#native-windows), where the bash
+`warmline` wrapper isn't.
 
 `settings.json` is backed up to `settings.json.warmline-bak` on every run, and
 an existing custom `statusLine` is never replaced without `--force`. The wiring
@@ -289,21 +290,114 @@ is [its own page](SURFACES.md).
 
 ## Windows
 
-The statusline and the auditor are pure standard-library Python; only the
-installer and the test suite are bash. Manual install:
+Claude Code runs on Windows two ways, and warmline supports both. They are
+separate installs that share nothing: each has its own `~/.claude`, its own
+transcripts, its own `CLAUDE.md` and its own copy of warmline.
 
-1. copy `statusline.py` to `%USERPROFILE%\.claude\warmline-statusline.py`
-   (and, optionally, `warmline-audit` anywhere convenient)
-2. in `%USERPROFILE%\.claude\settings.json`, set
-   `"statusLine": {"type": "command", "command": "python C:\\Users\\you\\.claude\\warmline-statusline.py"}`
-3. run the auditor as `python warmline-audit [args]`
+| | Native Windows | WSL |
+|---|---|---|
+| Claude Code config | `%USERPROFILE%\.claude` | `~/.claude` inside the distro |
+| install from | Git Bash | the distro's shell |
+| status line command | `py -3 "C:/Users/you/.claude/warmline-statusline.py"` | `~/.claude/warmline-statusline.py` |
+| `warmline awake` / AFK | PowerShell sleep holder | PowerShell sleep holder (the Windows host) |
 
-The `warmline` command is bash too, so on Windows toggle keep-warm by hand —
-add or remove the marker-delimited block (the text is
-[`keep-warm.md`](../keep-warm.md)) in `%USERPROFILE%\.claude\CLAUDE.md` — or use
-WSL / Git Bash. ANSI colors render fine in Windows Terminal. A tested
-`install.ps1` would be a welcome contribution — in keeping with this project's
-philosophy, we don't ship one we can't test.
+### Native Windows
+
+Needs [Git for Windows](https://git-scm.com/download/win) (Claude Code for
+Windows uses its bash too) and Python 3.7+ from python.org or the Microsoft
+Store. From a Git Bash window, the one-liner above works unchanged:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/main/install.sh | bash
+```
+
+What the installer does differently there:
+
+- **Python discovery.** It tries `py -3`, then `python`, then `python3`, and
+  runs each one rather than trusting `command -v` -- a fresh Windows answers
+  `python3` with the Microsoft Store's "install me" stub, which exists on
+  `PATH` and runs nothing. No working candidate, no install.
+- **The status line command names its interpreter.** Claude Code for Windows
+  runs `statusLine` through Git Bash, and through PowerShell when Git Bash
+  isn't there. A bare `.py` path works in neither: PowerShell hands it to the
+  file association, which opens it and prints nothing, so the status line
+  stays blank. The installer writes
+  `py -3 "C:/Users/you/.claude/warmline-statusline.py"` instead -- forward
+  slashes, because Git Bash eats backslashes, and a `C:/` path that bash,
+  PowerShell and Windows Python all read the same way.
+- **`PATH`.** Claude Code's own Windows installer puts
+  `%USERPROFILE%\.local\bin` on your user `PATH`, and that is where
+  `warmline` lands, so Git Bash usually finds it with no edit. If it doesn't,
+  the offer writes `~/.bashrc`; Git Bash starts login shells, and Git for
+  Windows creates a `~/.bash_profile` that sources `~/.bashrc` the first time
+  it sees one without the other.
+
+`warmline` and `warmline-audit` are scripts without an extension: run them
+from Git Bash. The status line itself doesn't care which shell you use.
+
+Windows Python reads and writes files and pipes as cp1252 unless told
+otherwise, and dies on the first byte cp1252 has no letter for -- a `CLAUDE.md`
+with Japanese in it, say. The statusline and the auditor read and write UTF-8
+explicitly, and every Python step inside the bash scripts runs with
+`PYTHONUTF8=1`.
+
+**Without Git Bash**, install by hand: copy `statusline.py` to
+`%USERPROFILE%\.claude\warmline-statusline.py`, and in
+`%USERPROFILE%\.claude\settings.json` set
+
+```json
+"statusLine": {"type": "command", "command": "py -3 \"C:/Users/you/.claude/warmline-statusline.py\"", "refreshInterval": 60}
+```
+
+Name the interpreter and use forward slashes, for the reasons above. Run the
+auditor as `py -3 warmline-audit [args]`, and toggle keep-warm by adding or
+removing the marker-delimited block ([`keep-warm.md`](../keep-warm.md)) in
+`%USERPROFILE%\.claude\CLAUDE.md`. `warmline awake` and AFK mode need Git Bash.
+
+### WSL
+
+Inside the distro, WSL is Linux: the installer, the one-liner and everything
+else behave exactly as on Linux. Two differences are Windows' doing:
+
+- **Sleep.** It's the Windows host that sleeps, not the Linux VM, and WSL's
+  `systemd-inhibit` can't reach it (unprivileged, it is refused outright). So
+  `warmline awake` and the AFK waiter use the same PowerShell holder native
+  Windows does, through `powershell.exe` on WSL's interop `PATH`.
+- **Line endings.** Clone inside the distro. Git for Windows defaults to
+  `core.autocrlf=true`, and before this repo's `.gitattributes` pinned LF, a
+  clone made by Windows' git (on `/mnt/c`, say) failed in WSL on the first
+  line: `/usr/bin/env: 'bash\r': No such file or directory`.
+
+The two sides can read each other's history. From WSL, audit your native
+Windows sessions with
+
+```sh
+CLAUDE_CONFIG_DIR=/mnt/c/Users/you/.claude warmline audit --all
+```
+
+### Keeping Windows awake
+
+`warmline awake` and the AFK waiter hold the machine up with
+`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` -- the call
+`caffeinate -is` makes on macOS -- from a small PowerShell process that holds
+it until its stdin closes. warmline keeps that pipe open for exactly as long as
+the wrapped command runs. When the command exits, or warmline is killed
+outright, the pipe closes, PowerShell exits, and Windows drops the request.
+No admin rights, nothing left behind. It keeps the system awake, not the
+display, and it doesn't stop a lid close or the power button.
+
+`powercfg /requests`, from an elevated prompt, is Windows' own list of who is
+holding the machine awake.
+
+### What's tested
+
+The whole suite runs under Git Bash with Windows Python: locally on Windows 11
+(Python 3.14) and in CI on `windows-latest` on every push. It includes a
+round-trip of the installed status line command through both `bash -c` and
+`powershell.exe -Command`, and UTF-8 checks for the statusline and the
+auditor. Under WSL it runs as it does on Linux. The PowerShell holder was
+checked on a real machine from both Git Bash and WSL by reading the system
+execution state, but the suite exercises it against a stub.
 
 ## Tests
 
@@ -340,5 +434,11 @@ manager's copy; and `warmline setup` against a synthetic
 prefix (`bin/` + `share/warmline`, reached through a symlink), covering the
 force/refusal contract, `--remove`, and a missing source tree. Pricing is
 hermetic: the suite ships a synthetic `.claude.json` whose arithmetic solves to
-round rates, so no test reads your real cost data. The same suite runs in CI on
-every push.
+round rates, so no test reads your real cost data. Windows gets its own
+section: the statusline and the auditor on a `CLAUDE.md` that cp1252 can't
+decode, `warmline awake` under WSL against a stub `powershell.exe` (the
+`SetThreadExecutionState` call, the exit code, the holder released even when
+the wrapped command leaves a background job behind), and, under Git Bash, the
+installed status line command run through both `bash -c` and
+`powershell.exe -Command`. The same suite runs in CI on every push, on Ubuntu
+and, under Git Bash, on Windows.

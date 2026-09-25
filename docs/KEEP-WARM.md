@@ -276,7 +276,9 @@ warmline awake claude --resume    # ...or wrap any command
 ```
 
 It wraps the session in the OS's own sleep inhibitor (`caffeinate -is` on
-macOS, `systemd-inhibit` on Linux), so system and idle sleep are prevented for
+macOS, `systemd-inhibit` on Linux, a PowerShell process calling
+`SetThreadExecutionState` on Windows and in WSL —
+[details](INSTALL.md#keeping-windows-awake)), so system and idle sleep are prevented for
 as long as the session runs — and *only* that long. The inhibition's lifetime
 is the wrapped process's lifetime: when you `/exit`, when the session crashes,
 when you ctrl-c it, the operating system releases the assertion and normal

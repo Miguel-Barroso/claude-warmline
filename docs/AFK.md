@@ -87,7 +87,8 @@ while the session is away.
    turn. The waiter polls this session's cache expiry, the same number
    [`wait-for --until-cold`](KEEP-WARM.md#--until-cold-wake-on-the-deadline-not-on-a-timer)
    reads, and holds off system sleep while it runs (`caffeinate` on macOS,
-   `systemd-inhibit` on Linux).
+   `systemd-inhibit` on Linux, a PowerShell `SetThreadExecutionState` holder
+   on Windows and in WSL).
 3. About three minutes before the cache would expire, the waiter exits with
    code **3**. The task notification wakes the session, the agent re-arms the
    waiter and ends the turn. That turn is the ping: one cache read of the

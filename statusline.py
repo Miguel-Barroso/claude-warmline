@@ -176,7 +176,7 @@ def load_settings(project_dir):
     merged = {}
     for p in paths:
         try:
-            with open(p) as f:
+            with open(p, encoding="utf-8") as f:
                 d = json.load(f)
         except (OSError, ValueError):
             continue
@@ -266,7 +266,7 @@ def keep_warm_state():
     `warmline keep-warm status` reports as `policy modified`.
     """
     try:
-        with open(os.path.join(CLAUDE_DIR, "CLAUDE.md")) as f:
+        with open(os.path.join(CLAUDE_DIR, "CLAUDE.md"), encoding="utf-8", errors="replace") as f:
             text = f.read()
     except OSError:
         return "off"
@@ -274,7 +274,7 @@ def keep_warm_state():
     if not (begin and end):
         return "?" if begin or end else "off"
     try:
-        with open(os.path.join(CLAUDE_DIR, "warmline-keep-warm.md")) as f:
+        with open(os.path.join(CLAUDE_DIR, "warmline-keep-warm.md"), encoding="utf-8", errors="replace") as f:
             policy = f.read()
     except OSError:
         return "on"  # no installed policy to compare against; don't cry wolf
@@ -294,7 +294,7 @@ def afk_field(session_id):
     if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", sid):
         return None
     try:
-        with open(os.path.join(CLAUDE_DIR, "warmline-afk", "sessions", sid + ".json")) as f:
+        with open(os.path.join(CLAUDE_DIR, "warmline-afk", "sessions", sid + ".json"), encoding="utf-8") as f:
             m = json.load(f)
         since = time.strftime("%H:%M", time.localtime(float(m["started"])))
         pings = int(m.get("pings") or 0)
@@ -367,7 +367,10 @@ def cache_field(prompt_cache, now):
 
 
 def main():
-    raw = sys.stdin.read()
+    # Claude Code speaks UTF-8 both ways; left alone, Windows Python reads and
+    # writes this pipe as cp1252 and dies on the first byte it has no letter for
+    raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+    sys.stdout.reconfigure(encoding="utf-8")
     try:
         d = json.loads(raw)
     except ValueError:

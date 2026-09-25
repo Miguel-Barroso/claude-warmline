@@ -64,7 +64,8 @@ Then:
 | `warmline watch` | every session's warmth, live, until ctrl-c |
 | `warmline afk enable` | optional, [at your own risk](#optional-at-your-own-risk-afk-mode): type `afk` and the cache stays warm until you're back |
 
-Needs `python3` and `bash`, nothing else. No `curl`? `wget -qO- <same URL> | bash`
+Needs `python3` and `bash`, nothing else. On Windows, run it from Git Bash
+(with Python 3.7+ installed) or inside WSL. No `curl`? `wget -qO- <same URL> | bash`
 works the same way, and the installer downloads with whichever one it finds.
 Whichever route you take it is one command: `brew install` wires the statusline
 too, `brew upgrade` re-wires it, and `brew uninstall` unwires it again.

@@ -11,3 +11,22 @@ jobs:
           # the historical keep-warm refresh cases read old tags' policy text
           fetch-depth: 0
       - run: ./test.sh
+  # Claude Code for Windows runs the statusline and hooks through Git Bash with
+  # a Windows Python behind them: cp1252 files and pipes, CRLF output, C:/
+  # paths, no fcntl. The same suite, there.
+  test-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      # test.sh and the shebangs call python3 by name; Windows' Python ships
+      # only python.exe
+      - run: cp "$(command -v python)" "$(dirname "$(command -v python)")/python3.exe"
+      - run: ./test.sh

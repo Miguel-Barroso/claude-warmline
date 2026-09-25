@@ -62,7 +62,8 @@ brew install Miguel-Barroso/warmline/warmline
 | `warmline audit --all` | このマシンの全セッションを、並べ替えて |
 | `warmline watch` | 全セッションの温度を、ライブで、ctrl-c まで |
 
-依存は `python3` と `bash` だけです。`curl` がなければ `wget -qO- <同じ URL> | bash`
+依存は `python3` と `bash` だけです。Windows では Git Bash から(Python 3.7 以上が必要)、
+または WSL の中で実行してください。`curl` がなければ `wget -qO- <同じ URL> | bash`
 でも同じように動き、インストーラ自身のダウンロードも見つかった方を使います。どの経路でも
 コマンドは 1 つです——`brew install` はステータスラインの配線までやり、`brew upgrade`
 は新しい版に張り替え、`brew uninstall` は配線を外します。

@@ -4,6 +4,49 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.6.0] — 2026-09-25
+
+Windows, both ways: native Claude Code through Git Bash, and Claude Code in
+WSL. Tested under Git Bash with Windows Python, locally and in a new Windows
+CI job.
+
+### Fixed
+- **The status line was blank on native Windows when Claude Code fell back to
+  PowerShell.** The installer wired a bare `.py` path, which PowerShell hands
+  to the file association: it opens and prints nothing. On Windows the command
+  now names its interpreter, `py -3 "C:/Users/you/.claude/warmline-statusline.py"`,
+  with forward slashes so Git Bash reads it too. Re-run the installer to
+  re-wire.
+- **Windows Python crashed on UTF-8.** Files and pipes defaulted to cp1252, so
+  a `CLAUDE.md`, transcript or payload holding a byte cp1252 has no letter for
+  killed the statusline and the auditor. Both read and write UTF-8 explicitly;
+  the Python inside the bash scripts runs with `PYTHONUTF8=1`.
+- **`warmline` under Git Bash**: CRLF from Windows Python leaked into parsed
+  values (`every \rs`), the config dir came through in MSYS form, and AFK's
+  lock needed `fcntl`, which Windows doesn't have (it uses `msvcrt` there).
+- **`python3` on a fresh Windows is the Microsoft Store's install prompt.** The
+  installer and `warmline` try `py -3`, `python` and `python3` and use the
+  first that actually runs.
+
+### Added
+- **`warmline awake` and the AFK waiter keep Windows awake**, natively and
+  from WSL, through a PowerShell process holding
+  `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` for as long as
+  the wrapped command runs. WSL used to reach for `systemd-inhibit`, which is
+  refused unprivileged and would only have held the VM.
+- **`.gitattributes` pins LF.** A clone made by Windows' git got CRLF, and WSL
+  bash then failed on the shebang.
+- **Windows documentation**: native vs WSL, what the installer does
+  differently, a manual install without Git Bash, auditing one side's sessions
+  from the other.
+
+### Tests
+- A `windows-latest` CI job runs the whole suite under Git Bash.
+- `utf8-statusline`, `utf8-audit`, `awake-windows` (stub `powershell.exe`)
+  and `win-statusline-cmd` (the installed command through `bash -c` and
+  `powershell.exe -Command`).
+- Symlink-dependent cases fall back to shims where Git Bash can't `ln -s`.
+
 ## [2.5.1] — 2026-09-25
 
 The AFK disclosure states the right ping rate. Text only, no behavior change.

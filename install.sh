@@ -13,8 +13,38 @@ set -euo pipefail
 
 REPO="https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+# Native Windows: Git Bash, which is what Claude Code for Windows runs its
+# statusline and hooks through (also MSYS2, Cygwin). Keep this block identical
+# in warmline. Three things differ there, and nothing below has to know:
+#  - `python3` is often the Microsoft Store's install prompt rather than a
+#    Python, so each candidate is run, not trusted by name;
+#  - Windows Python reads files as cp1252 and writes CRLF, so it runs in UTF-8
+#    mode and its output loses the CRs before bash parses a word of it;
+#  - paths are spelled C:/Users/..., the one form Git Bash, PowerShell and
+#    Windows Python all accept -- it is what lands in settings.json.
+WL_WIN=0
+WL_PY=(python3)
+case "${OSTYPE:-}" in msys*|cygwin*) WL_WIN=1 ;; esac
+if [ "$WL_WIN" = 1 ]; then
+  WL_PY=()
+  for c in "py -3" python python3; do
+    # shellcheck disable=SC2086  # "py -3" is two words on purpose
+    if $c -c 'import sys; sys.exit(sys.version_info < (3, 7))' >/dev/null 2>&1; then
+      read -ra WL_PY <<< "$c"; break
+    fi
+  done
+  if command -v cygpath >/dev/null; then CLAUDE_DIR="$(cygpath -m "$CLAUDE_DIR")"; fi
+  export PYTHONUTF8=1
+  python3() { "${WL_PY[@]}" "$@" | tr -d '\r'; }
+fi
 BIN_DIR="${WARMLINE_BIN_DIR:-$HOME/.local/bin}"
 DEST="$CLAUDE_DIR/warmline-statusline.py"
+# What settings.json runs: the file itself on macOS and Linux, where its shebang
+# picks the python; the interpreter spelled out on Windows, where a bare .py
+# opens by file association -- and prints nothing -- as soon as Claude Code
+# falls back from Git Bash to PowerShell.
+SL_CMD="$DEST"
+if [ "$WL_WIN" = 1 ]; then SL_CMD="${WL_PY[*]} \"$DEST\""; fi
 CLI="$BIN_DIR/warmline"
 AUDIT="$BIN_DIR/warmline-audit"
 POLICY="$CLAUDE_DIR/warmline-keep-warm.md"
@@ -105,7 +135,11 @@ if [ "$MODE" = help ]; then
   exit 0
 fi
 
-command -v python3 >/dev/null || { echo "claude-warmline needs python3 on PATH" >&2; exit 1; }
+if [ "$WL_WIN" = 1 ]; then
+  [ "${#WL_PY[@]}" -gt 0 ] || { echo "claude-warmline needs Python 3.7+ on PATH: 'py -3', 'python' or 'python3' (the Microsoft Store's install prompt doesn't count)" >&2; exit 1; }
+else
+  command -v python3 >/dev/null || { echo "claude-warmline needs python3 on PATH" >&2; exit 1; }
+fi
 
 # ---- PATH ------------------------------------------------------------------
 # A command in a directory the shell doesn't search is a half-install. This
@@ -407,7 +441,7 @@ PY
 fi
 if [ -n "$PREV_POLICY" ]; then rm -f "$PREV_POLICY"; fi
 
-DEST="$DEST" FORCE="$FORCE" python3 - "$SETTINGS" <<'PY'
+DEST="$DEST" SL_CMD="$SL_CMD" FORCE="$FORCE" python3 - "$SETTINGS" <<'PY'
 import json, os, shutil, sys
 path, dest = sys.argv[1], os.environ["DEST"]
 force = os.environ["FORCE"] == "1"
@@ -424,7 +458,7 @@ if sl and dest not in str(sl.get("command", "")) and not force:
 # keep whatever the user tuned on warmline's own statusLine block (padding,
 # a custom refreshInterval) across reinstalls
 new = dict(sl) if isinstance(sl, dict) and dest in str(sl.get("command", "")) else {}
-new.update({"type": "command", "command": dest})
+new.update({"type": "command", "command": os.environ["SL_CMD"]})
 # refreshInterval re-runs the statusline every N seconds while the session
 # idles (a local repaint, no API traffic). Claude Code's own expires_at
 # trigger already flips HOT to COLD at the right second -- verified firing on

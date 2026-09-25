@@ -91,6 +91,10 @@ your machine; cloud sessions do not.
 
 ## Windows
 
-The statusline and the auditor are pure standard-library Python and don't care
-about the OS; only the installer and the test suite are bash. See
-[installing](INSTALL.md#windows) for the manual three-step install.
+Native Windows and WSL are both supported, as two separate installs: native
+Claude Code reads `%USERPROFILE%\.claude`, Claude Code in WSL reads the
+distro's `~/.claude`, and each needs its own warmline. On native Windows the
+installer runs from Git Bash and wires the status line with an explicit
+interpreter (`py -3 "C:/Users/you/.claude/warmline-statusline.py"`), because
+Claude Code may run it through PowerShell, which won't execute a bare `.py`.
+See [installing](INSTALL.md#windows) for the details.

@@ -10,7 +10,37 @@ set -euo pipefail
 # same tag a pinned install used, so the fallback can't drift to main's wording
 REPO_RAW="https://raw.githubusercontent.com/Miguel-Barroso/claude-warmline/${WARMLINE_REF:-main}"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+# Native Windows: Git Bash, which is what Claude Code for Windows runs its
+# statusline and hooks through (also MSYS2, Cygwin). Keep this block identical
+# in install.sh. Three things differ there, and nothing below has to know:
+#  - `python3` is often the Microsoft Store's install prompt rather than a
+#    Python, so each candidate is run, not trusted by name;
+#  - Windows Python reads files as cp1252 and writes CRLF, so it runs in UTF-8
+#    mode and its output loses the CRs before bash parses a word of it;
+#  - paths are spelled C:/Users/..., the one form Git Bash, PowerShell and
+#    Windows Python all accept -- it is what lands in settings.json.
+WL_WIN=0
+WL_PY=(python3)
+case "${OSTYPE:-}" in msys*|cygwin*) WL_WIN=1 ;; esac
+if [ "$WL_WIN" = 1 ]; then
+  WL_PY=()
+  for c in "py -3" python python3; do
+    # shellcheck disable=SC2086  # "py -3" is two words on purpose
+    if $c -c 'import sys; sys.exit(sys.version_info < (3, 7))' >/dev/null 2>&1; then
+      read -ra WL_PY <<< "$c"; break
+    fi
+  done
+  if command -v cygpath >/dev/null; then CLAUDE_DIR="$(cygpath -m "$CLAUDE_DIR")"; fi
+  export PYTHONUTF8=1
+  python3() { "${WL_PY[@]}" "$@" | tr -d '\r'; }
+fi
 DEST="$CLAUDE_DIR/warmline-statusline.py"
+# What settings.json runs: the file itself on macOS and Linux, where its shebang
+# picks the python; the interpreter spelled out on Windows, where a bare .py
+# opens by file association -- and prints nothing -- as soon as Claude Code
+# falls back from Git Bash to PowerShell.
+SL_CMD="$DEST"
+if [ "$WL_WIN" = 1 ]; then SL_CMD="${WL_PY[*]} \"$DEST\""; fi
 SETTINGS="$CLAUDE_DIR/settings.json"
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 POLICY="$CLAUDE_DIR/warmline-keep-warm.md"
@@ -365,7 +395,7 @@ PY
     [ -n "$prev" ] && rm -f "$prev"
   fi
 
-  DEST="$DEST" FORCE="$force" python3 - "$SETTINGS" <<'PY'
+  DEST="$DEST" SL_CMD="$SL_CMD" FORCE="$force" python3 - "$SETTINGS" <<'PY'
 import json, os, shutil, sys
 path, dest = sys.argv[1], os.environ["DEST"]
 force = os.environ["FORCE"] == "1"
@@ -380,7 +410,7 @@ if sl and dest not in str(sl.get("command", "")) and not force:
     print("re-run with --force to replace it (backup: settings.json.warmline-bak)")
     sys.exit(1)
 new = dict(sl) if isinstance(sl, dict) and dest in str(sl.get("command", "")) else {}
-new.update({"type": "command", "command": dest})
+new.update({"type": "command", "command": os.environ["SL_CMD"]})
 refresh = os.environ.get("WARMLINE_REFRESH_SEC")
 if refresh is not None:
     try:
@@ -585,7 +615,7 @@ cmd_audit() {
     echo "warmline: warmline-audit not found (re-run install.sh)" >&2
     exit 1
   fi
-  exec "$audit_path" "$@"
+  exec "${WL_PY[@]}" "$audit_path" "$@"
 }
 
 watch_usage() {
@@ -624,7 +654,7 @@ cmd_watch() {
   local force=""
   [ -t 1 ] && force=1
   while :; do
-    out="$(WARMLINE_FORCE_COLOR="${WARMLINE_FORCE_COLOR:-$force}" "$audit_path" --live)" || true
+    out="$(WARMLINE_FORCE_COLOR="${WARMLINE_FORCE_COLOR:-$force}" python3 "$audit_path" --live)" || true
     printf '\033[H\033[2J%s\n\n(every %ss; ctrl-c to stop)\n' "$out" "$interval"
     sleep "$interval"
   done
@@ -649,7 +679,9 @@ no way to be left permanently sleepless. The display may still sleep;
 only system sleep is held off.
 
 Mechanism: 'caffeinate -is COMMAND' on macOS, 'systemd-inhibit COMMAND'
-on Linux.
+on Linux. On Windows -- Git Bash, and WSL too, since it is Windows that
+puts a WSL machine to sleep -- a hidden PowerShell holds the system-required
+power request (SetThreadExecutionState) until the command exits.
 EOF
 }
 
@@ -663,16 +695,52 @@ cmd_awake() {
   [ $# -gt 0 ] || set -- claude
   # exec ties the inhibitor's lifetime to this very process: the wrapped
   # command's exit (however it exits) is what releases the assertion
+  local ps rc=0
   if command -v caffeinate >/dev/null; then
     exec caffeinate -is "$@"
+  elif ps="$(win_sleep_host)"; then
+    # no exec here: the holder lives on fd 9 of this shell, which the wrapped
+    # command doesn't inherit -- so neither does anything it leaves running
+    exec 9> >(win_hold "$ps")
+    "$@" 9>&- || rc=$?
+    exit "$rc"
   elif command -v systemd-inhibit >/dev/null; then
     exec systemd-inhibit --what=sleep:idle \
       --why="claude session (warmline awake)" "$@"
   else
-    echo "warmline: no sleep inhibitor found (needs caffeinate on macOS" >&2
-    echo "or systemd-inhibit on Linux)" >&2
+    echo "warmline: no sleep inhibitor found (needs caffeinate on macOS," >&2
+    echo "systemd-inhibit on Linux, or powershell.exe on Windows and WSL)" >&2
     exit 1
   fi
+}
+
+# Windows decides when a Windows machine sleeps. Under WSL, systemd-inhibit
+# speaks only for the Linux VM -- and unprivileged it is refused outright -- so
+# from WSL as from Git Bash, ask Windows: prints the powershell.exe to use, or
+# fails where Windows doesn't own sleep.
+win_sleep_host() {
+  { [ "$WL_WIN" = 1 ] || [ -n "${WSL_DISTRO_NAME:-}" ]; } || return 1
+  command -v powershell.exe
+}
+
+# A PowerShell that holds ES_CONTINUOUS|ES_SYSTEM_REQUIRED until its stdin
+# closes. Windows drops the request the moment the process ends, and it ends
+# when the last writer of that pipe is gone, however the writer exits. It
+# ignores Ctrl-C, on both sides of the WSL boundary, so interrupting the
+# session can't release it early. No double quotes in the script: they don't
+# survive the trip through a Windows command line.
+WIN_HOLD_PS=""
+IFS= read -r -d '' WIN_HOLD_PS <<'PS' || true
+$d = '[DllImport(' + [char]34 + 'kernel32.dll' + [char]34 + ')] public static extern '
+$k = Add-Type -Name Awake -Namespace Warmline -PassThru -MemberDefinition ($d +
+  'uint SetThreadExecutionState(uint f); ' + $d + 'bool SetConsoleCtrlHandler(System.IntPtr h, bool add);')
+[void]$k::SetConsoleCtrlHandler([System.IntPtr]::Zero, $true)
+[void]$k::SetThreadExecutionState([uint32]2147483649)
+[void][Console]::In.ReadToEnd()
+PS
+win_hold() {
+  trap '' INT
+  exec "$1" -NoProfile -NonInteractive -Command "$WIN_HOLD_PS" >/dev/null 2>&1
 }
 
 wait_for_usage() {
@@ -789,7 +857,7 @@ cmd_wait_for() {
     # pass the auditor's own reason through: "no transcript for this session"
     # and "nothing readable where you're standing" send you to different places
     local why=""
-    if ! why="$("$audit_path" --cold-at 2>&1 >/dev/null)"; then
+    if ! why="$(python3 "$audit_path" --cold-at 2>&1 >/dev/null)"; then
       echo "warmline: --until-cold can't read this session's cache expiry" >&2
       [ -n "$why" ] && printf '%s\n' "${why#warmline-audit: }" >&2
       exit 2
@@ -800,7 +868,7 @@ cmd_wait_for() {
   # because any turn in the meantime re-warms the cache and moves it out.
   wf_deadline() {
     local line epoch
-    line="$("$audit_path" --cold-at 2>/dev/null)" || return 1
+    line="$(python3 "$audit_path" --cold-at 2>/dev/null)" || return 1
     epoch="${line%% *}"
     case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
     echo $(( epoch - margin * min ))
@@ -992,7 +1060,12 @@ afk_src_body() {
 # read, not $(cat): this runs on every invocation, even with a bare PATH
 AFK_PY=""
 IFS= read -r -d '' AFK_PY <<'PY' || true
-import contextlib, fcntl, json, os, re, sys, time
+import contextlib, json, os, re, sys, time
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 d = os.environ["AFK_DIR"]
 sessions = os.path.join(d, "sessions")
 consent_p = os.path.join(d, "consent.json")
@@ -1010,8 +1083,23 @@ def mpath(sid):
 def lock():
     os.makedirs(sessions, exist_ok=True)
     with open(os.path.join(d, ".lock"), "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        yield
+        if fcntl:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            yield
+            return
+        # no flock on Windows: a lock on byte 0 serializes the same way
+        f.seek(0)
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:  # LK_LOCK gives up after ~10s; keep waiting
+                pass
+        try:
+            yield
+        finally:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 
 def load(p):
     try:
@@ -1445,7 +1533,7 @@ afk_start() {
   sid="$(afk_sid)" || return 2
   audit_path="$(find_audit)"
   [ -n "$audit_path" ] || { echo "warmline afk: needs warmline-audit (re-run install.sh)" >&2; return 2; }
-  if ! line="$("$audit_path" --cold-at 2>&1)"; then
+  if ! line="$(python3 "$audit_path" --cold-at 2>&1)"; then
     echo "warmline afk: can't read this session's cache expiry:" >&2
     printf '%s\n' "${line#warmline-audit: }" >&2
     return 2
@@ -1482,9 +1570,13 @@ afk_stop() {
 # sleeping machine. The inhibitor watches our pid and dies with it however we
 # exit, so nothing outlives the wait.
 afk_inhibit() {
-  local me=$$
+  local me=$$ ps
   if command -v caffeinate >/dev/null; then
     caffeinate -is -w "$me" >/dev/null 2>&1 &
+  elif ps="$(win_sleep_host)"; then
+    # fd 9 stays open for as long as this waiter lives (a sleep it is running
+    # at the time can outlast it by one poll interval at most)
+    exec 9> >(win_hold "$ps")
   elif command -v systemd-inhibit >/dev/null; then
     systemd-inhibit --what=sleep:idle --why="warmline afk: keeping a Claude session warm" \
       sh -c "while kill -0 $me 2>/dev/null; do sleep 20; done" >/dev/null 2>&1 &
@@ -1534,7 +1626,7 @@ afk_wait() {
       echo "warmline afk: time limit reached -- AFK ended${line:+ ($line)}; the cache will now expire. Don't re-arm."
       return 1
     fi
-    if line="$("$audit_path" --cold-at 2>/dev/null)"; then
+    if line="$(python3 "$audit_path" --cold-at 2>/dev/null)"; then
       epoch="${line%% *}"
       case "$epoch" in ''|*[!0-9]*) epoch="" ;; esac
       if [ -n "$epoch" ] && [ "$now" -ge "$epoch" ]; then
@@ -1571,7 +1663,11 @@ cmd_afk() {
   esac
 }
 
-command -v python3 >/dev/null || { echo "warmline needs python3 on PATH" >&2; exit 1; }
+if [ "$WL_WIN" = 1 ]; then
+  [ "${#WL_PY[@]}" -gt 0 ] || { echo "warmline needs Python 3.7+ on PATH: 'py -3', 'python' or 'python3' (the Microsoft Store's install prompt doesn't count)" >&2; exit 1; }
+else
+  command -v python3 >/dev/null || { echo "warmline needs python3 on PATH" >&2; exit 1; }
+fi
 
 case "${1:-}" in
   status) cmd_status ;;

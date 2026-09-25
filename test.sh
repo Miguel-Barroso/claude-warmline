@@ -433,7 +433,8 @@ fi
 
 # No cost record to solve from: the $3 placeholder is still used, but it is
 # labeled ASSUMED rather than passed off as the user's rate.
-out=$(HOME="$SCRATCH/nohome" CLAUDE_CONFIG_DIR="$SCRATCH/nohome" \
+# (USERPROFILE too: Windows Python finds ~ through it and ignores HOME)
+out=$(HOME="$SCRATCH/nohome" USERPROFILE="$SCRATCH/nohome" CLAUDE_CONFIG_DIR="$SCRATCH/nohome" \
       ./warmline-audit --price "$AUDIT_T")
 if [[ "$out" == *'input $3/MTok ASSUMED (Sonnet tier)'* \
    && "$out" == *"placeholder, not your price"* \
@@ -818,8 +819,9 @@ ft3=$(ftrun "$FTHOME" "" 2>&1) || true
 ftrc=0
 ft4=$(ftrun "$FTDECOY" deadbeef-0000 2>&1) || ftrc=$?
 ft5=$(ftrun "$FTHOME" "$FTSID" "$FTP/$(slugof "$FTDECOY")/$FTOTHER.jsonl" 2>&1) || true
-if [[ "$ft1" == *"/$FTSID.jsonl" && "$ft2" == *"/$FTSID.jsonl" \
-   && "$ft3" == *"/$FTSID.jsonl" && "$ft5" == *"/$FTOTHER.jsonl" \
+# [/\\]: Windows Python joins the path with backslashes
+if [[ "$ft1" == *[/\\]"$FTSID.jsonl" && "$ft2" == *[/\\]"$FTSID.jsonl" \
+   && "$ft3" == *[/\\]"$FTSID.jsonl" && "$ft5" == *[/\\]"$FTOTHER.jsonl" \
    && "$ftrc" != 0 && "$ft4" == *"no transcript for this session"* \
    && "$ft4" != *"$FTOTHER"* ]]; then
   echo "ok   find-transcript: session id outranks cwd, and never guesses"; pass=$((pass + 1))
@@ -1103,8 +1105,11 @@ out=$(wl awake --help)
 rc=0; wl awake --bogus >/dev/null 2>&1 || rc=$?
 NOPATH="$SCRATCH/awake-nopath"
 mkdir -p "$NOPATH"
-ln -sf "$(command -v bash)" "$NOPATH/bash"
-ln -sf "$(command -v python3)" "$NOPATH/python3"
+# exec shims, not symlinks: Git Bash can't make a symlink without Windows
+# developer mode, and a shim reaches the same interpreter either way
+shim() { printf '#!%s\nexec "%s" "$@"\n' "$(command -v bash)" "$(command -v "$1")" \
+  > "$NOPATH/$1"; chmod +x "$NOPATH/$1"; }
+shim bash; shim python3
 rc2=0; err=$(PATH="$NOPATH" "$IBIN/warmline" awake true 2>&1) || rc2=$?
 if [[ "$out" == *"no-sleep"* && "$out" == *"caffeinate"* \
    && "$out" == *"normal sleep behavior returns"* && "$rc" == 2 \
@@ -1627,8 +1632,12 @@ SROOT="$(mktemp -d)"; SPREFIX="$(mktemp -d)"
 mkdir -p "$SPREFIX/bin" "$SPREFIX/share/warmline"
 cp warmline warmline-audit "$SPREFIX/bin/"
 cp statusline.py keep-warm.md "$SPREFIX/share/warmline/"
-mkdir -p "$SPREFIX/linked"; ln -sf "$SPREFIX/bin/warmline" "$SPREFIX/linked/warmline"
-setup() { CLAUDE_CONFIG_DIR="$SROOT" "$SPREFIX/linked/warmline" setup "$@"; }
+mkdir -p "$SPREFIX/linked"
+# Git Bash without Windows developer mode can't make the symlink; the prefix
+# layout is still worth testing from bin/ itself
+SLINK="$SPREFIX/linked/warmline"
+ln -sf "$SPREFIX/bin/warmline" "$SLINK" 2>/dev/null || SLINK="$SPREFIX/bin/warmline"
+setup() { CLAUDE_CONFIG_DIR="$SROOT" "$SLINK" setup "$@"; }
 out=$(setup)
 if [[ "$out" == *"statusLine wired in"* ]] \
    && [ -x "$SROOT/warmline-statusline.py" ] && [ -f "$SROOT/warmline-keep-warm.md" ] \
@@ -1783,7 +1792,9 @@ fi
 
 # --all cause histogram: counts right, bars scaled to the max (2 -> 26
 # cells, 1 -> 13), aggregate health bar above the table.
-out=$(./warmline-audit --all "$ROOT")
+# (UTF-8 stdout pinned: a Windows pipe is cp1252, which takes the '#' bars
+# that ascii-fallback above already covers)
+out=$(PYTHONIOENCODING=utf-8 ./warmline-audit --all "$ROOT")
 if [[ "$out" == *"where the cold came from"* \
    && "$out" == *$'\n'"  /compact            ██████████████████████████  2"* \
    && "$out" == *$'\n'"  model change        █████████████  1"* \
@@ -1838,7 +1849,10 @@ cat > "$CLAUDE_CONFIG_DIR/projects/proj-cfg/sess.jsonl" <<'EOF'
 {"type":"assistant","timestamp":"2026-01-01T00:05:00Z","cwd":"/tmp/cfg","message":{"id":"g2","usage":{"cache_read_input_tokens":1000,"cache_creation_input_tokens":10,"input_tokens":5}}}
 EOF
 out=$(./warmline-audit --all)   # local time varies, so match the row loosely
-if [[ "$out" == *"1 sessions under $CLAUDE_CONFIG_DIR/projects"* ]] \
+# the dir as the auditor spells it: C:\...\projects under Git Bash
+cfgproj=$(python3 -c 'import os, sys; print(os.path.normpath(os.path.join(sys.argv[1], "projects")))' \
+  "$CLAUDE_CONFIG_DIR" | tr -d '\r')
+if [[ "$out" == *"1 sessions under $cfgproj"* ]] \
    && echo "$out" | grep -qE '^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}  cfg +2 '; then
   echo "ok   audit-config-dir: --all honors CLAUDE_CONFIG_DIR"; pass=$((pass + 1))
 else
@@ -1995,6 +2009,10 @@ cp packaging/homebrew/brew-setup "$BSROOT/packaging/homebrew/"
 printf '#!/bin/sh\necho "cfg=[$CLAUDE_CONFIG_DIR] args=[$*]"\n' > "$BSROOT/warmline"
 chmod +x "$BSROOT/warmline" "$BSROOT/packaging/homebrew/brew-setup"
 BSHIM="$BSROOT/packaging/homebrew/brew-setup"
+# Homebrew is macOS and Linux; Windows Python has no pwd module to ask
+if ! python3 -c 'import pwd' 2>/dev/null; then
+  echo "skip brew-setup: no pwd module (Windows)"
+else
 BSHOME="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
 # -u before any NAME=value: env stops reading options at the first operand
 bs1=$(env -u CLAUDE_CONFIG_DIR "HOME=$BSROOT/not-a-home" "$BSHIM" 2>&1) || true
@@ -2007,6 +2025,99 @@ if [ "$bs1" = "cfg=[$BSHOME/.claude] args=[setup]" ] \
 else
   echo "FAIL brew-setup:"; printf '%s\n' "$bs1" "$bs2"; fail=$((fail + 1))
 fi
+fi
+
+# ---- Windows: Git Bash + Windows Python, and WSL ----
+# Claude Code for Windows runs the statusline and hooks through Git Bash, with
+# a Windows Python behind them. Everything here runs on every platform unless
+# it says otherwise, so a Linux run still guards the Windows behavior.
+
+# UTF-8 both ways, whatever the platform's default: Windows Python reads files
+# and pipes as cp1252 unless told otherwise, and U+3050 (ぐ) is e3 81 90 --
+# 0x81 and 0x90 are the bytes cp1252 has no letter for. A CLAUDE.md holding one
+# used to crash the statusline outright; now it still reads the block (a lone
+# begin marker: the '?' state) and prints the project's name intact.
+U8CFG="$SCRATCH/utf8-cfg"; mkdir -p "$U8CFG"
+printf '# ノート ぐ\n<!-- >>> claude-warmline keep-warm >>> -->\n' > "$U8CFG/CLAUDE.md"
+u8=$(python3 -c 'import json; print(json.dumps({"session_id": "u8",
+  "model": {"display_name": "Opus"}, "workspace": {"current_dir": "/work/ぐ"},
+  "prompt_cache": {"warm": True}}))')
+out=$(printf '%s' "$u8" | CLAUDE_CONFIG_DIR="$U8CFG" ./statusline.py 2>&1 | tr -d '\r')
+if [[ "$out" == "Opus | ぐ | cache HOT | keep-warm ?" ]]; then
+  echo "ok   utf8-statusline: UTF-8 CLAUDE.md and project name, cp1252 or not"; pass=$((pass + 1))
+else
+  echo "FAIL utf8-statusline: $out"; fail=$((fail + 1))
+fi
+
+# ...and the auditor, on a transcript and project that aren't ASCII
+U8P="$SCRATCH/utf8-projects/-work-ぐ"; mkdir -p "$U8P"
+cat > "$U8P/s.jsonl" <<'EOF'
+{"type":"user","timestamp":"2026-01-01T00:00:00Z","cwd":"/work/ぐ","message":{"content":"ぐ ノート"}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","cwd":"/work/ぐ","message":{"id":"u1","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":1000,"input_tokens":5}}}
+EOF
+rc=0; out=$(./warmline-audit --all "$SCRATCH/utf8-projects" 2>&1) || rc=$?
+if [[ "$rc" == 0 && "$out" == *"1 sessions under"* ]]; then
+  echo "ok   utf8-audit: a non-ASCII transcript audits instead of crashing"; pass=$((pass + 1))
+else
+  echo "FAIL utf8-audit: rc=$rc"; echo "$out" | tail -3; fail=$((fail + 1))
+fi
+
+# warmline awake where Windows owns sleep -- Git Bash, or WSL, whose
+# systemd-inhibit speaks only for the Linux VM. A stub powershell.exe stands
+# in for the real holder: it records its script and waits for EOF, exactly as
+# the real one does. The wrapped command leaves a sleep running; the holder
+# must still see EOF the moment the command itself exits, or a leftover
+# background job would keep the machine up.
+WPS="$SCRATCH/win-ps"; mkdir -p "$WPS"
+for t in bash python3 sleep cat sh tr dirname; do
+  printf '#!%s\nexec "%s" "$@"\n' "$(command -v bash)" "$(command -v "$t")" > "$WPS/$t"
+  chmod +x "$WPS/$t"
+done
+if command -v cygpath >/dev/null; then
+  printf '#!%s\nexec "%s" "$@"\n' "$(command -v bash)" "$(command -v cygpath)" > "$WPS/cygpath"
+  chmod +x "$WPS/cygpath"
+fi
+WLOG="$SCRATCH/win-ps.log"
+printf '#!%s\nprintf "%%s\\n" "$@" > "%s.args"\ncat >/dev/null\necho eof > "%s.eof"\n' \
+  "$(command -v bash)" "$WLOG" "$WLOG" > "$WPS/powershell.exe"
+chmod +x "$WPS/powershell.exe"
+rm -f "$WLOG.args" "$WLOG.eof"
+rc=0; out=$(PATH="$WPS" WSL_DISTRO_NAME=test ./warmline awake \
+  sh -c 'echo session-running; (sleep 5 &); exit 7') || rc=$?
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -f "$WLOG.eof" ] && break; sleep 0.1
+done
+args=$(cat "$WLOG.args" 2>/dev/null)
+if [[ "$rc" == 7 && "$out" == "session-running" && -f "$WLOG.eof" \
+   && "$args" == *"-NonInteractive"* && "$args" == *"SetThreadExecutionState([uint32]2147483649)"* \
+   && "$args" == *"SetConsoleCtrlHandler"* && "$args" == *"ReadToEnd"* && "$args" != *'"'* ]]; then
+  echo "ok   awake-windows: PowerShell holder, released on exit despite a leftover job"; pass=$((pass + 1))
+else
+  echo "FAIL awake-windows: rc=$rc out=$out eof=$([ -f "$WLOG.eof" ] && echo y || echo n)"
+  echo "$args" | head -3; fail=$((fail + 1))
+fi
+
+# Git Bash only: what the installer wired must run under both of the shells
+# Claude Code for Windows may use -- Git Bash, and PowerShell when Git Bash is
+# absent, where a bare .py path opens by file association and prints nothing.
+case "${OSTYPE:-}" in
+  msys*|cygwin*)
+    WROOT="$SCRATCH/win-root"; mkdir -p "$WROOT"
+    CLAUDE_CONFIG_DIR="$WROOT" WARMLINE_BIN_DIR="$SCRATCH/win-bin" ./install.sh --no-path >/dev/null
+    slcmd=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["statusLine"]["command"])' \
+      "$WROOT/settings.json" | tr -d '\r')
+    o1=$(printf '%s' "$u8" | CLAUDE_CONFIG_DIR="$U8CFG" bash -c "$slcmd" 2>&1 | tr -d '\r')
+    o2=$(printf '%s' "$u8" | CLAUDE_CONFIG_DIR="$U8CFG" powershell.exe -NoProfile -NonInteractive \
+      -Command "$slcmd" 2>&1 | tr -d '\r')
+    if [[ "$slcmd" == *' "'?':/'*'/warmline-statusline.py"' \
+       && "$o1" == "Opus | ぐ | cache HOT | keep-warm ?" && "$o2" == "$o1" ]]; then
+      echo "ok   win-statusline-cmd: $slcmd runs under Git Bash and PowerShell"; pass=$((pass + 1))
+    else
+      echo "FAIL win-statusline-cmd: [$slcmd]"; echo "bash: $o1"; echo "powershell: $o2"
+      fail=$((fail + 1))
+    fi ;;
+  *) echo "skip win-statusline-cmd: Git Bash only" ;;
+esac
 
 echo
 echo "$pass passed, $fail failed"

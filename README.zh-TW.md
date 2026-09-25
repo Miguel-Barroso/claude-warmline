@@ -59,7 +59,8 @@ brew install Miguel-Barroso/warmline/warmline
 | `warmline audit --all` | 本機所有工作階段，排序呈現 |
 | `warmline watch` | 所有工作階段的溫度，即時顯示，直到 ctrl-c |
 
-只需要 `python3` 與 `bash`，沒有別的依賴。沒有 `curl` 也行：`wget -qO- <同一個 URL> | bash`
+只需要 `python3` 與 `bash`，沒有別的依賴。在 Windows 上，請在 Git Bash 中執行（需要 Python 3.7+），
+或在 WSL 裡執行。沒有 `curl` 也行：`wget -qO- <同一個 URL> | bash`
 效果一樣，安裝器自己下載檔案時也會用它找得到的那一個。無論走哪條路都只有一條指令：
 `brew install` 連狀態列一起接好，`brew upgrade` 會換到新版本，`brew uninstall` 會拆掉。
 

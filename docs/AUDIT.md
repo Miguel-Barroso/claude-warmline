@@ -28,8 +28,9 @@ warmline watch                      # ...re-rendered live until ctrl-c
 command, discoverable from `warmline --help`. It runs `warmline-audit`, the
 executable the installer puts in `~/.local/bin/`, which stays fully supported
 and is the form to use in scripts you've already written, from a checkout
-(`./warmline-audit`), and on [manual/Windows installs](INSTALL.md#windows),
-where the `warmline` wrapper (bash) isn't available. Nothing is deprecated;
+(`./warmline-audit`), and on a
+[manual Windows install without Git Bash](INSTALL.md#native-windows), where the
+`warmline` wrapper (bash) isn't available. Nothing is deprecated;
 error messages print the program's own name, `warmline-audit`.
 
 Transcripts are read from `$CLAUDE_CONFIG_DIR/projects` (default

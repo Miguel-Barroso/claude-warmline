@@ -122,9 +122,9 @@ TTL_MIN = float(os.environ.get("WARMLINE_TTL_MIN", "60"))
 TTL_FORCED = "WARMLINE_TTL_MIN" in os.environ
 # every front end that runs the Claude Code engine locally -- terminal CLI,
 # desktop app, IDE extension -- records its transcripts here
-PROJECTS_DIR = os.path.join(
+PROJECTS_DIR = os.path.normpath(os.path.join(
     os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"),
-    "projects")
+    "projects"))
 # Every Claude pricing tier bills the same multiples of its own base input
 # price: output 5x, a 1-hour cache write 2x, a 5-minute cache write 1.25x, a
 # warm read 0.1x, and $0.01 per web search. Verified identical across all
@@ -156,6 +156,9 @@ GREEN, YELLOW, RED, DIM, BOLD, RESET = (
 VERDICT_COLOR = {"HOT": GREEN, "PARTIAL": YELLOW,
                  "COLD(rebuilt)": YELLOW, "COLD(ttl)": RED}
 
+# a project name the output encoding can't spell prints as '?' instead of
+# ending the report: a Windows pipe is cp1252, and projects are named anything
+sys.stdout.reconfigure(errors="replace")
 try:  # a LANG=C pipe can't take U+2588; degrade to '#'/'.' over crashing
     "█".encode(sys.stdout.encoding or "utf-8")
     BAR_FULL, BAR_EMPTY = "█", "░"
@@ -241,7 +244,8 @@ def parse_transcript(path):
     multiplier, since the two buckets don't cost the same."""
     turns, seen, compacts, label = [], set(), [], None
     eph5 = eph1h = 0
-    with open(path) as f:
+    # transcripts are UTF-8 whatever the platform; Windows would read cp1252
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             # cheap prefilter: most transcript bytes are tool results in
             # user entries; only parse lines that can matter
@@ -487,7 +491,7 @@ def ledger_projects():
     if not path:
         return {}
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             projects = (json.load(f) or {}).get("projects") or {}
     except (OSError, ValueError, AttributeError):
         return {}

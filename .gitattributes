@@ -1,0 +1,6 @@
+# LF everywhere, even where Git for Windows' default core.autocrlf=true would
+# check files out as CRLF. Git Bash shrugs off a CR, but a WSL shell running a
+# clone that Windows' git made -- on /mnt/c, say -- dies on the shebang
+# ("bash\r: No such file or directory"), and the policy text the installer
+# splices into CLAUDE.md would carry the CRs along.
+* text=auto eol=lf
