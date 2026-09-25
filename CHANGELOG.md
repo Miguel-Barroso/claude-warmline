@@ -4,9 +4,9 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
-## [Unreleased] — AFK mode
+## [2.5.0] — 2026-09-25
 
-Type `afk` and walk away. The session keeps its own prompt cache warm until you
+AFK mode: type `afk` and walk away. The session keeps its own prompt cache warm until you
 type again, so the first reply after lunch is a warm read and not a 2× rebuild of
 the whole context. This is the one feature that steps past the bounds Keep Warm
 was built around, so it is opt-in, at your own account risk, and only you can
