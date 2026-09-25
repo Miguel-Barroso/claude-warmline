@@ -1,6 +1,6 @@
 cask "warmline" do
-  version "2.5.0"
-  sha256 "8fc6d516bd35c6a854a17c4e9480e8b5ed825226cbbd56af1bfe011f3ef73208"
+  version "2.5.1"
+  sha256 "1d16d22855867bd2c300c2c7d9f67b8f5e102a827b856fa472e9f19dbf00d205"
 
   url "https://github.com/Miguel-Barroso/claude-warmline/archive/refs/tags/v#{version}.tar.gz"
   name "claude-warmline"
