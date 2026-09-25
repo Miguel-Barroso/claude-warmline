@@ -4,6 +4,23 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [2.5.1] — 2026-09-25
+
+The AFK disclosure states the right ping rate. Text only, no behavior change.
+
+### Fixed
+- **The AFK risk disclosure overstated the ping rate.** `warmline afk enable`
+  said "~12 pings per hour at most on the 1-hour cache". That is the
+  5-minute-cache figure, and AFK mode refuses the 5-minute cache unless you
+  pass `--allow-5m`. On the 1-hour cache the waiter fires about three minutes
+  before each expiry: about one ping an hour. The disclosure now says so.
+  `AFK_TERMS` stays at 1: the correction lowers the stated risk, so nobody
+  needs to consent again.
+
+### Tests
+- `afk-consent` also asserts the disclosure says "about one ping" and never
+  "12 pings per hour".
+
 ## [2.5.0] — 2026-09-25
 
 AFK mode: type `afk` and walk away. The session keeps its own prompt cache warm until you

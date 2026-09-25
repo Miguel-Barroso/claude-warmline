@@ -1316,6 +1316,7 @@ before=$(cat "$AROOT/settings.json")
 rc=0;  out=$(awl afk enable </dev/null 2>&1) || rc=$?
 rc2=0; err2=$(env CLAUDECODE=1 CLAUDE_CONFIG_DIR="$AROOT" "$IBIN/warmline" afk enable --i-accept-the-risk 2>&1) || rc2=$?
 if [[ "$rc" == 1 && "$out" == *"ban"* && "$out" == *"--i-accept-the-risk"* \
+   && "$out" == *"about one ping"* && "$out" != *"12 pings per hour"* \
    && "$rc2" == 3 && "$err2" == *"own terminal"* \
    && ! -e "$AROOT/warmline-afk" && "$(cat "$AROOT/settings.json")" == "$before" ]]; then
   echo "ok   afk-consent: no tty or inside Claude Code -> refused, nothing written"; pass=$((pass + 1))

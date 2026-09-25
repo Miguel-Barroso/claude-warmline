@@ -948,10 +948,11 @@ nobody is sitting at:
 On an API key (Console billing, Bedrock, Vertex) automated use is the norm and
 the terms risk is lower; on a Pro/Max subscription it is highest.
 
-Bounds that stay on regardless: one waiter per session; ~12 pings per hour
-at most on the 1-hour cache, and none on the 5-minute cache unless you
-say so; a limit per AFK stretch (default 10h, never more than 24h); AFK
-ends the moment you type anything, and the agent never enables it itself.
+Bounds that stay on regardless: one waiter per session; about one ping
+an hour on the usual 1-hour cache, and none on the 5-minute cache
+unless you say so; a limit per AFK stretch (default 10h, never more
+than 24h); AFK ends the moment you type anything, and the agent never
+enables it itself.
 EOF
 }
 
