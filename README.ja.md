@@ -283,6 +283,29 @@ warmline wait-for --pidfile /tmp/job.pid --until-cold
 
 [何であり何でないか・`wait-for`・ノースリープモード・限界・利用規約の検討 →](docs/KEEP-WARM.md)(英語)
 
+## 任意・自己責任: AFK モード
+
+キープウォームはジョブの実行中にしか ping しません。席を離れただけでは何もしません。AFK モードは、席を離れるときのための機能です。Claude Code のセッション(ターミナルでもデスクトップアプリでも)で `afk` と入力すると、あなたが次に何か入力するまで、セッションが自分のキャッシュを温め続けます。
+
+```text
+> afk
+  AFK: keeping the cache warm until you're back (at most until 23:10).
+  ...
+> ok, where were we?
+  warmline: welcome back -- AFK ended (away 2h40m, 3 keep-warm pings)
+```
+
+> [!WARNING]
+> これらの ping は、誰も見ていないセッションから送られる自動リクエストです。Anthropic の規約に反する可能性があり、**アカウントのレート制限・停止・BAN につながるおそれがあります**。リスクが最も高いのは Pro / Max サブスクリプションです。AFK モードは、あなた自身が有効にするまでオフのままです。
+
+```sh
+warmline afk enable     # リスクを説明し、"I accept the risk" の入力を求めます
+```
+
+`afk`、`brb`、`afk 3h`、`/afk 2h` で開始し、それ以外のメッセージを送ると終了します。仕組みはバックグラウンドの待機プロセスです。キャッシュが切れる数分前にセッションを起こし、エージェントが 1 行のターンで再設定します。そのターンが ping になります。範囲は制限されています。1 セッションにつき待機は 1 つ、1 回あたりの上限は既定で 10 時間(最大 24 時間)、5 分キャッシュは対象外、すでに冷えていたら再構築の費用を払わずに停止します。エージェントが勝手に有効化することはできません。
+
+[仕組み・制限・リスクの詳細 →](docs/AFK.md)(英語)
+
 ## 設計としてローカル完結
 
 warmline はあなたのマシンの中だけで動きます。外部への送信も、テレメトリも、
@@ -332,6 +355,7 @@ TTL は仮定ではなく実測です。干渉のない環境での 2 系統プ�
 | [Statusline](docs/STATUSLINE.md) | 全フィールド、色、トラブルシューティング |
 | [Audit](docs/AUDIT.md) | 判定、原因の帰属、`--all`、ライブの `watch` ビュー、"avoidable" の定義 |
 | [Keep Warm](docs/KEEP-WARM.md) | ポリシー、ノースリープモード(`warmline awake`)、限界、規約の検討 |
+| [AFK mode](docs/AFK.md) | 任意・自己責任: `afk` と入力すれば、戻るまでキャッシュを温かく保つ |
 | [Where it works](docs/SURFACES.md) | ターミナル、デスクトップ、IDE、SSH、クラウド |
 | [Install](docs/INSTALL.md) | インストール、更新、アンインストール、設定、Windows、テスト |
 | [Measurements](docs/MEASUREMENTS.md) | すべての主張の裏付けとなる実測 |

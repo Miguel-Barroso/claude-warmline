@@ -91,6 +91,10 @@ The statusline says which bucket you are on — [`cache HOT
 
 ## What it is NOT
 
+(If what you want is "keep it warm while I'm away from the keyboard", that's
+[AFK mode](AFK.md). It's a separate opt-in because it removes the bound below
+that matters most.)
+
 - **Not a daemon.** No background process, no cron, no requests outside a
   running Claude Code session. When Claude Code isn't running, nothing runs.
 - **Not always-on.** It deliberately *skips* when local background tasks are
@@ -324,6 +328,11 @@ policy is bounded by design: it pings only through a genuine wait you intend to
 return to, at most about once per 50 minutes, skips when warmth is already
 free, stops the moment work resumes, gives up after ~10 hours, and is never a
 daemon. Don't loosen those bounds.
+
+[AFK mode](AFK.md) is the one place warmline loosens them itself: it pings for
+a person who has walked away, not for a job. That is why it isn't part of this
+policy, is off until you accept the account risk in your own terminal, and
+comes with its own bounds.
 
 One honest unknown remains: whether scheduled pings inside a consumer Claude
 Code session count as the "ordinary, individual usage" the subscription plans

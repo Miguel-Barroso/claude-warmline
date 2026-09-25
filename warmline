@@ -15,6 +15,18 @@ SETTINGS="$CLAUDE_DIR/settings.json"
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 POLICY="$CLAUDE_DIR/warmline-keep-warm.md"
 STATE_DIR="$CLAUDE_DIR/warmline-state"
+# AFK mode: opt-in, off until `warmline afk enable` records the user's consent.
+# The dir holds that consent, the rendered procedure and one marker per session
+# that is AFK right now; the command file is what makes /afk a slash command.
+AFK_DIR="$CLAUDE_DIR/warmline-afk"
+AFK_SRC="$CLAUDE_DIR/warmline-afk.md"
+AFK_CMD="$CLAUDE_DIR/commands/afk.md"
+AFK_TAG="claude-warmline afk:"
+# bump when the disclosure below changes in substance: consent is to a text
+AFK_TERMS=1
+# no single AFK stretch runs longer than this, whatever the user asks for
+AFK_HARD_MAX_H=24
+AFK_DEFAULT_MAX_H=10
 MARK_BEGIN="<!-- >>> claude-warmline keep-warm >>> -->"
 MARK_END="<!-- <<< claude-warmline keep-warm <<< -->"
 # install.sh writes this block when you let it put the bin dir on PATH; taking
@@ -41,9 +53,12 @@ The installer (install.sh) installs and updates; this command controls.
   warmline keep-warm on        turn the keep-warm policy ON (global)
   warmline keep-warm off       turn it OFF -- removes only warmline's block
   warmline keep-warm status    detailed state; exit 0=ON  1=OFF  2=INCONSISTENT
+  warmline afk enable          AFK mode, opt-in AT YOUR OWN RISK: type 'afk' in
+                               Claude Code and the cache stays warm until you're
+                               back (warmline afk --help explains the risk)
   warmline audit [args...]     run warmline-audit (grades past sessions)
   warmline uninstall           remove warmline from this machine: files,
-                               wiring, keep-warm block, PATH line
+                               wiring, keep-warm block, AFK mode, PATH line
   warmline --help              this text
 
 Config dir: $CLAUDE_DIR  (override with CLAUDE_CONFIG_DIR)
@@ -243,11 +258,16 @@ if os.environ["DEST"] in str(sl.get("command", "")):
 PY
   fi
   rm -f "$DEST" "$POLICY"
+  # a hook pointing at a command about to be deleted fails on every prompt;
+  # the consent stays, so an upgrade's remove-then-setup puts it straight back
+  if afk_enabled || afk_hook_wired || afk_cmd_ours; then afk_unwire; fi
+  rm -f "$AFK_SRC"
 }
 
 setup_usage() {
   cat <<EOF
-warmline setup: wire the statusline into Claude Code.
+warmline setup: wire the statusline into Claude Code (and, if you enabled
+AFK mode, re-wire /afk and its hook to this install).
 
   warmline setup            install the statusline and policy text, wire settings.json
   warmline setup --force    with install: replace a statusLine that isn't warmline's
@@ -280,6 +300,7 @@ cmd_setup() {
     setup_remove
     echo "warmline setup removed (the commands themselves are your package manager's)"
     [ "$(kw_state)" = on ] && echo "note: keep-warm is still ON -- 'warmline keep-warm off' removes that block"
+    afk_enabled && echo "note: AFK mode is unwired but still consented -- 'warmline setup' rewires it, 'warmline afk disable' forgets it"
     return 0
   fi
 
@@ -297,6 +318,7 @@ cmd_setup() {
     if [ -f "$POLICY" ]; then prev="$(mktemp)"; cp "$POLICY" "$prev"; fi
     cp "$src/keep-warm.md" "$POLICY"
     echo "installed $POLICY"
+    if [ -f "$src/afk.md" ]; then cp "$src/afk.md" "$AFK_SRC"; echo "installed $AFK_SRC"; fi
     # the block already in CLAUDE.md is what the agent reads, so refreshing only
     # $POLICY would leave every session on the previous release's wording
     if [ -f "$CLAUDE_MD" ]; then
@@ -379,6 +401,7 @@ r = new.get("refreshInterval")
 how = f"self-refreshes every {r}s while idle" if r else "event-driven only"
 print(f"statusLine wired in {path}  ({how})")
 PY
+  afk_refresh
 }
 
 uninstall_usage() {
@@ -392,6 +415,9 @@ the installer.
 
   warmline uninstall           remove it all
   warmline uninstall --help    this text
+
+AFK mode, if you enabled it, is disabled too: /afk, its hook and
+permission rule, and the recorded consent.
 
 Two kinds of commands are never deleted: a package manager's (under
 Homebrew this unwires everything, then 'brew uninstall warmline' takes
@@ -442,6 +468,7 @@ cmd_uninstall() {
        return 2 ;;
   esac
 
+  afk_disable --quiet
   setup_remove
   rm -rf "$STATE_DIR"
   [ "$(kw_state)" = off ] || kw_off
@@ -516,6 +543,14 @@ PY
     off) kw_line="OFF  (enable: warmline keep-warm on)" ;;
     *)   kw_line="INCONSISTENT  (details: warmline keep-warm status)" ;;
   esac
+  local afk_line
+  if ! afk_enabled; then
+    afk_line="OFF  (opt-in, at your own risk: warmline afk enable)"
+  elif afk_hook_wired; then
+    afk_line="ON   type 'afk' in Claude Code (details: warmline afk status)"
+  else
+    afk_line="INCONSISTENT  consented but unwired (repair: warmline afk enable)"
+  fi
   audit_path="$(find_audit)"
   if [ -n "$audit_path" ]; then
     audit_line="ON   $audit_path"
@@ -538,7 +573,7 @@ PY
   fi
   echo "claude-warmline status  (config: $CLAUDE_DIR)"
   printf '  %-10s  %s\n' statusline "$sl_line" keep-warm "$kw_line" \
-    auditor "$audit_line" ttl "$ttl_line"
+    afk "$afk_line" auditor "$audit_line" ttl "$ttl_line"
   [ -n "$refresh_line" ] && printf '  %-10s  %s\n' refresh "$refresh_line"
   return 0
 }
@@ -841,6 +876,700 @@ cmd_wait_for() {
   done
 }
 
+# ---- AFK mode ---------------------------------------------------------------
+# Keep-warm's bounds exist because a ping nobody is waiting on is the behavior
+# Anthropic's limits are aimed at. AFK mode is the one place warmline steps
+# past them on purpose: the user says "afk", walks away, and the session keeps
+# its own cache warm until they type again. That is unattended automation by
+# any reading, so it is off until the user -- not the agent -- accepts the risk
+# in their own terminal, and it stays bounded: one session, one waiter, a hard
+# ceiling, and it ends the moment the user is back or the cache goes cold.
+
+afk_usage() {
+  cat <<EOF
+warmline afk: AFK mode -- keep a Claude Code session's prompt cache warm while
+you are away, until you come back. Opt-in, at your own risk: it sends
+automated requests from a session nobody is attending, which may breach
+Anthropic's terms and cost you your account. 'enable' explains and asks.
+
+You, in your own terminal:
+  warmline afk enable          read the risk, accept it, wire /afk and the hook
+  warmline afk enable --max-hours N
+                               default limit per AFK stretch (1-$AFK_HARD_MAX_H, default $AFK_DEFAULT_MAX_H)
+  warmline afk disable         unwire everything and forget the consent
+  warmline afk status          enabled? wired? who is AFK now?  exit 0/1/2
+  warmline afk stop [--all]    end AFK for this session (or every session)
+
+In Claude Code, terminal or desktop app:
+  /afk [3h]                    go AFK (the slash command)
+  afk  |  brb  |  afk 3h       the same, typed as a plain message
+  <anything else>              you're back: AFK ends, the reply is normal
+
+What the agent runs (you don't need to):
+  warmline afk start [DURATION] [--allow-5m]
+                               mark this session AFK; exit 5 not enabled,
+                               6 on a 5-minute cache, 2 no session/transcript
+  warmline afk wait [-n SECS] [--margin MIN] [--no-inhibit]
+                               background waiter: exit 3 ping now, 0 AFK over,
+                               1 time limit, 4 cache went cold anyway
+  warmline afk hook            the UserPromptSubmit hook (reads JSON on stdin)
+
+Details: https://github.com/Miguel-Barroso/claude-warmline/blob/main/docs/AFK.md
+EOF
+}
+
+afk_disclosure() {
+  cat <<'EOF'
+AFK mode -- read this before you turn it on
+===========================================
+
+What it does. When you type `afk` (or /afk) in a Claude Code session, the
+agent starts a small background waiter. Just before the prompt cache would
+expire, the waiter wakes the session, the agent re-arms it and ends the
+turn -- one cheap cache read instead of a full rebuild when you return. It
+repeats until you type again, until the time limit, or until the cache goes
+cold anyway (a sleeping machine), whichever comes first.
+
+Why it is risky. Every ping is an automated request sent from a session
+nobody is sitting at:
+  * Anthropic's Consumer Terms restrict accessing the services by automated
+    or non-human means, except where Anthropic permits it. Unattended pings
+    are automated use by any reading, and whether they are permitted is
+    Anthropic's call, not warmline's.
+  * Anthropic's usage limits exist to curb accounts that run Claude Code
+    unattended, around the clock. AFK mode is exactly the kind of traffic
+    those limits watch for.
+  * The consequence can be rate limiting, suspension, or termination of your
+    account -- a ban -- with no refund. warmline cannot protect you from it
+    and accepts no liability for it.
+  * Each ping is billed against your own plan or API key. It saves money
+    only if you really do come back to the session.
+
+On an API key (Console billing, Bedrock, Vertex) automated use is the norm and
+the terms risk is lower; on a Pro/Max subscription it is highest.
+
+Bounds that stay on regardless: one waiter per session; ~12 pings per hour
+at most on the 1-hour cache, and none on the 5-minute cache unless you
+say so; a limit per AFK stretch (default 10h, never more than 24h); AFK
+ends the moment you type anything, and the agent never enables it itself.
+EOF
+}
+
+# The warmline to name in the hook, the procedure and the permission rule: an
+# absolute path, because the desktop app does not inherit your shell's PATH.
+# The PATH copy when it is this very command (brew's bin/ symlink survives an
+# upgrade, the Caskroom path it points into does not), else this file.
+afk_wl() {
+  local onpath self
+  self="$(self_path)"
+  onpath="$(command -v warmline 2>/dev/null || true)"
+  if [ -n "$onpath" ] && [ "$(cd "$(dirname "$onpath")" && pwd)/$(basename "$onpath")" != "$self" ]; then
+    # a symlink to us still counts; a different install does not
+    local p="$onpath" d n=0
+    while [ -L "$p" ] && [ "$n" -lt 16 ]; do
+      n=$((n + 1)); d="$(cd "$(dirname "$p")" && pwd)"; p="$(readlink "$p")"
+      case "$p" in /*) ;; *) p="$d/$p" ;; esac
+    done
+    [ "$(cd "$(dirname "$p")" 2>/dev/null && pwd)/$(basename "$p")" = "$self" ] || onpath=""
+  fi
+  echo "${onpath:-$self}"
+}
+
+afk_src_body() {
+  local src
+  if [ -f "$AFK_SRC" ]; then cat "$AFK_SRC"
+  elif [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/afk.md" ]; then cat "$SELF_DIR/afk.md"
+  elif src="$(share_dir 2>/dev/null)" && [ -f "$src/afk.md" ]; then cat "$src/afk.md"
+  elif command -v curl >/dev/null; then curl -fsSL "$REPO_RAW/afk.md"
+  else wget -qO- "$REPO_RAW/afk.md"
+  fi
+}
+
+# All AFK state goes through one python helper, under one lock, so the hook
+# ending AFK and a waiter counting a ping can never interleave into a marker
+# that outlives the user's return.
+# read, not $(cat): this runs on every invocation, even with a bare PATH
+AFK_PY=""
+IFS= read -r -d '' AFK_PY <<'PY' || true
+import contextlib, fcntl, json, os, re, sys, time
+d = os.environ["AFK_DIR"]
+sessions = os.path.join(d, "sessions")
+consent_p = os.path.join(d, "consent.json")
+proc_p = os.path.join(d, "procedure.md")
+MIN = float(os.environ.get("MIN") or 60)
+op, args = sys.argv[1], sys.argv[2:]
+
+def ok_sid(s):
+    return bool(s) and re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", s) is not None
+
+def mpath(sid):
+    return os.path.join(sessions, sid + ".json")
+
+@contextlib.contextmanager
+def lock():
+    os.makedirs(sessions, exist_ok=True)
+    with open(os.path.join(d, ".lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+def load(p):
+    try:
+        with open(p) as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
+
+def save(p, obj):
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, p)
+
+def span(sec):
+    m = int(max(0, sec) // 60)
+    return "%dm" % m if m < 60 else "%dh%02dm" % (m // 60, m % 60)
+
+def clock(ep):
+    return time.strftime("%H:%M", time.localtime(ep))
+
+def summary(m, now):
+    n = int(m.get("pings") or 0)
+    return "away %s, %d keep-warm ping%s" % (
+        span(now - float(m.get("started") or now)), n, "" if n == 1 else "s")
+
+DUR = re.compile(r"^(?:for\s+)?(\d+(?:\.\d+)?)\s*(h|hrs?|hours?|m|mins?|minutes?)?$", re.I)
+
+def parse_dur(text):
+    """seconds (scaled by MIN) for '3h', '90m', '1.5 hours', 'for 2h', '2'."""
+    m = DUR.match(text.strip())
+    if not m:
+        return None
+    n, unit = float(m.group(1)), (m.group(2) or "h").lower()
+    return n * MIN * (60 if unit.startswith("h") else 1)
+
+now = time.time()
+
+if op == "consent-write":          # max_hours terms
+    with lock():
+        c = load(consent_p) or {}
+        c.setdefault("accepted_at", now)
+        c.update(max_hours=float(args[0]), terms=int(args[1]))
+        save(consent_p, c)
+elif op == "consent-read":
+    c = load(consent_p)
+    if not c:
+        sys.exit(1)
+    print("%d %g %s" % (c.get("accepted_at", 0), c.get("max_hours", 10), c.get("terms", 0)))
+elif op == "dur":                  # text default_h hard_h -> seconds, or exit 2
+    text, dflt, hard = args[0], float(args[1]), float(args[2])
+    sec = parse_dur(text) if text.strip() else dflt * 60 * MIN
+    if sec is None or sec <= 0:
+        sys.exit(2)
+    print(int(min(sec, hard * 60 * MIN)))
+elif op == "start":                # sid until
+    with lock():
+        save(mpath(args[0]), {"started": now, "until": float(args[1]),
+                              "pings": 0, "waiter": 0})
+elif op == "register":             # sid pid
+    with lock():
+        m = load(mpath(args[0]))
+        if m is None:
+            sys.exit(1)
+        m["waiter"] = int(args[1])
+        save(mpath(args[0]), m)
+elif op == "poll":                 # sid pid -> gone | superseded | ok UNTIL
+    m = load(mpath(args[0]))
+    if m is None:
+        print("gone")
+    elif int(m.get("waiter") or 0) != int(args[1]):
+        print("superseded")
+    else:
+        print("ok %d" % m.get("until", 0))
+elif op == "ping":                 # sid -> ping count
+    with lock():
+        m = load(mpath(args[0]))
+        if m is None:
+            sys.exit(1)
+        m["pings"] = int(m.get("pings") or 0) + 1
+        m["last_ping"] = now
+        save(mpath(args[0]), m)
+    print(m["pings"])
+elif op == "end":                  # sid -> summary, exit 1 if not AFK
+    with lock():
+        m = load(mpath(args[0]))
+        if m is None:
+            sys.exit(1)
+        os.remove(mpath(args[0]))
+    print(summary(m, now))
+elif op == "end-all":
+    n = 0
+    with lock():
+        for f in os.listdir(sessions):
+            if f.endswith(".json"):
+                os.remove(os.path.join(sessions, f)); n += 1
+    print(n)
+elif op == "list":
+    if os.path.isdir(sessions):
+        for f in sorted(os.listdir(sessions)):
+            m = load(os.path.join(sessions, f)) if f.endswith(".json") else None
+            if m:
+                print("%s  since %s, until %s, %s" % (
+                    f[:-5][:8], clock(m.get("started", now)),
+                    clock(m.get("until", now)), summary(m, now).split(", ", 1)[1]))
+elif op == "hook":
+    # Never fail and never block: a hook error lands on every prompt the user
+    # types, which is a far worse bug than AFK not starting.
+    try:
+        h = json.loads(os.environ.get("HOOK_INPUT") or "{}")
+    except ValueError:
+        sys.exit(0)
+    sid = str(h.get("session_id") or "")
+    prompt = str(h.get("prompt") or "").strip()
+    # a background task's completion -- the very wake that is a keep-warm
+    # ping -- must never read as "the user is back": it arrives tagged, as
+    # does other injected text. /afk is its own trigger and restarts AFK.
+    if not ok_sid(sid) or prompt.startswith("<") or "<task-notification" in prompt \
+            or prompt.lower().startswith("/afk"):
+        sys.exit(0)
+    out = {}
+    trig = re.match(r"^(afk|brb)(?:\s+(.{1,24}?))?[\s.!]*$", prompt, re.I)
+    if trig and trig.group(2) and parse_dur(trig.group(2)) is None:
+        trig = None                # "afk mode is broken" is a sentence, not a request
+    if trig:
+        word, when = trig.group(1).lower(), (trig.group(2) or "").strip()
+        body = None
+        if load(consent_p):
+            try:
+                body = open(proc_p).read()
+            except OSError:
+                pass
+        if body is None:
+            ctx = ("The user typed `%s`, which would start warmline's AFK mode, but AFK "
+                   "mode is not enabled on this machine. Tell them in one line: run "
+                   "`warmline afk enable` in their own terminal -- it explains the "
+                   "account risk and asks for their consent. Do not run it for them." % word)
+        else:
+            body = re.sub(r"(?s)\A---\n.*?\n---\n", "", body)
+            body = re.sub(r"<!--.*?-->\n?", "", body).replace("$ARGUMENTS", when)
+            ctx = ("The user typed `%s`: they are stepping away and asked for AFK mode. "
+                   "Carry out this procedure now.\n\n%s" % (prompt, body.strip()))
+        out = {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                      "additionalContext": ctx}}
+    elif os.path.exists(mpath(sid)):   # every prompt passes here: stay lock-free unless AFK
+        with lock():
+            m = load(mpath(sid))
+            if m is not None:
+                os.remove(mpath(sid))
+        if m is not None:
+            s = summary(m, now)
+            out = {"systemMessage": "warmline: welcome back -- AFK ended (%s)" % s,
+                   "hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                   "additionalContext": (
+                       "warmline AFK mode just ended: the user is back (%s). The "
+                       "background `warmline afk wait` task exits by itself (exit 0) -- "
+                       "do not re-arm it and do not comment on its notification. "
+                       "Answer the user's message normally." % s)}}
+    if out:
+        print(json.dumps(out))
+PY
+afk_py() { AFK_DIR="$AFK_DIR" MIN="${WARMLINE_WAITFOR_MIN_SEC:-60}" python3 -c "$AFK_PY" "$@"; }
+
+afk_enabled() { [ -f "$AFK_DIR/consent.json" ]; }
+
+afk_quote() { # a path, shell-quoted only when it needs it
+  case "$1" in *[!A-Za-z0-9_./-]*) printf "'%s'" "${1//\'/\'\\\'\'}" ;; *) printf '%s' "$1" ;; esac
+}
+
+# settings.json: the UserPromptSubmit hook that makes a bare `afk` work and ends
+# AFK when you're back, and an allow rule so a ping never stalls on a
+# permission prompt nobody is there to answer. Ours is recognised by shape, so
+# a path that moved (a reinstall elsewhere) is replaced rather than doubled.
+afk_settings() { # wire|unwire [wl]
+  AFK_OP="$1" WL="${2:-}" WLQ="$(afk_quote "${2:-}")" python3 - "$SETTINGS" <<'PY'
+import json, os, re, sys
+path = sys.argv[1]
+op, wl, wlq = os.environ["AFK_OP"], os.environ["WL"], os.environ["WLQ"]
+try:
+    with open(path) as f:
+        d = json.load(f)
+except FileNotFoundError:
+    d = {}
+except ValueError:
+    sys.exit("warmline: %s is not valid JSON; fix it, then retry" % path)
+ours_hook = lambda c: re.search(r"warmline'?\s+afk\s+hook\s*$", str(c or "")) is not None
+ours_rule = lambda r: re.fullmatch(r"Bash\(.*warmline'? afk:\*\)", str(r)) is not None
+changed = False
+hooks = d.get("hooks") if isinstance(d.get("hooks"), dict) else {}
+groups = hooks.get("UserPromptSubmit") if isinstance(hooks.get("UserPromptSubmit"), list) else []
+kept = []
+for g in groups:
+    hs = g.get("hooks") if isinstance(g, dict) else None
+    if isinstance(hs, list) and any(isinstance(x, dict) and ours_hook(x.get("command")) for x in hs):
+        rest = [x for x in hs if not (isinstance(x, dict) and ours_hook(x.get("command")))]
+        changed = True
+        if rest:
+            kept.append(dict(g, hooks=rest))
+    else:
+        kept.append(g)
+perms = d.get("permissions") if isinstance(d.get("permissions"), dict) else {}
+allow = perms.get("allow") if isinstance(perms.get("allow"), list) else []
+allow2 = [r for r in allow if not ours_rule(r)]
+changed |= len(allow2) != len(allow)
+if op == "wire":
+    kept.append({"hooks": [{"type": "command", "command": wlq + " afk hook", "timeout": 10}]})
+    allow2 += ["Bash(%s afk:*)" % wlq] + (["Bash(warmline afk:*)"] if wlq != "warmline" else [])
+    changed = True
+if not changed:
+    sys.exit(0)
+if kept:
+    hooks["UserPromptSubmit"] = kept
+else:
+    hooks.pop("UserPromptSubmit", None)
+if hooks:
+    d["hooks"] = hooks
+else:
+    d.pop("hooks", None)
+if allow2:
+    perms["allow"] = allow2
+else:
+    perms.pop("allow", None)
+if perms:
+    d["permissions"] = perms
+else:
+    d.pop("permissions", None)
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+if os.path.exists(path):
+    import shutil
+    shutil.copyfile(path, path + ".warmline-bak")
+with open(path, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+PY
+}
+
+afk_hook_wired() {
+  [ -f "$SETTINGS" ] && python3 - "$SETTINGS" <<'PY'
+import json, re, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+for g in ((d.get("hooks") or {}).get("UserPromptSubmit") or []):
+    for x in (g.get("hooks") or []) if isinstance(g, dict) else []:
+        if isinstance(x, dict) and re.search(r"warmline'?\s+afk\s+hook\s*$", str(x.get("command") or "")):
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+
+afk_cmd_ours() { [ -f "$AFK_CMD" ] && grep -qF "$AFK_TAG" "$AFK_CMD"; }
+
+# Render the procedure with this install's warmline path, into warmline's own
+# dir (what the hook reads) and into commands/ (what makes /afk exist) --
+# unless commands/afk.md is somebody else's, which is never overwritten.
+afk_wire() {
+  local wl body
+  wl="$(afk_wl)"
+  body="$(afk_src_body)" || {
+    echo "warmline: no afk.md found ($AFK_SRC missing, no checkout copy, no" >&2
+    echo "network); re-run install.sh first" >&2
+    return 1
+  }
+  mkdir -p "$AFK_DIR" "$(dirname "$AFK_CMD")"
+  printf '%s\n' "${body//\{\{WL\}\}/$(afk_quote "$wl")}" > "$AFK_DIR/procedure.md"
+  if [ -e "$AFK_CMD" ] && ! afk_cmd_ours; then
+    echo "note: $AFK_CMD exists and isn't warmline's -- left alone, so /afk runs"
+    echo "      your own command. Typing plain 'afk' still works through the hook."
+  else
+    cp "$AFK_DIR/procedure.md" "$AFK_CMD"
+  fi
+  afk_settings wire "$wl"
+}
+
+afk_unwire() {
+  afk_cmd_ours && rm -f "$AFK_CMD"
+  rm -f "$AFK_DIR/procedure.md"
+  afk_settings unwire
+}
+
+afk_enable() {
+  local accept=0 max="" line
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --i-accept-the-risk) accept=1 ;;
+      --max-hours) [ $# -ge 2 ] || { echo "warmline: --max-hours needs a number" >&2; return 2; }
+                   max="$2"; shift ;;
+      --max-hours=*) max="${1#--max-hours=}" ;;
+      --help|-h) afk_usage; return 0 ;;
+      *) echo "warmline afk enable: unknown flag '$1' (see warmline afk --help)" >&2; return 2 ;;
+    esac
+    shift
+  done
+  if [ -n "$max" ]; then
+    case "$max" in ''|*[!0-9]*) echo "warmline: --max-hours takes whole hours, 1-$AFK_HARD_MAX_H" >&2; return 2 ;; esac
+    if [ "$max" -lt 1 ] || [ "$max" -gt "$AFK_HARD_MAX_H" ]; then
+      echo "warmline: --max-hours takes whole hours, 1-$AFK_HARD_MAX_H" >&2; return 2
+    fi
+  fi
+  # Consent is the user's to give. An agent's shell carries these variables,
+  # so an enable from inside Claude Code -- the agent, or a `!` command -- is
+  # refused, flag or no flag: it has to happen in a terminal of your own.
+  if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    echo "warmline: 'afk enable' has to be run by you, in your own terminal --" >&2
+    echo "not from inside a Claude Code session. Consent isn't the agent's to give." >&2
+    return 3
+  fi
+  if afk_enabled; then
+    local cur
+    cur="$(afk_py consent-read)"; cur="${cur#* }"; cur="${cur%% *}"
+    afk_py consent-write "${max:-$cur}" "$AFK_TERMS"
+    afk_wire || return 1
+    echo "AFK mode already enabled -- wiring refreshed${max:+, limit now ${max}h}."
+    return 0
+  fi
+  # the procedure text first: consent recorded for a feature that can't be
+  # wired would leave status ON and /afk missing
+  afk_src_body >/dev/null 2>&1 || {
+    echo "warmline: no afk.md found ($AFK_SRC missing, no checkout copy, no" >&2
+    echo "network); re-run install.sh first" >&2
+    return 1
+  }
+  afk_disclosure
+  echo
+  if [ "$accept" = 1 ]; then
+    echo "accepted with --i-accept-the-risk"
+  elif (exec 3<>/dev/tty) 2>/dev/null; then
+    printf "Type 'I accept the risk' to enable AFK mode (anything else cancels): " > /dev/tty
+    line=""
+    read -r line < /dev/tty || line=""
+    line="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:].!]*$//')"
+    if [ "$line" != "i accept the risk" ]; then
+      echo "not enabled -- nothing was changed."
+      return 1
+    fi
+  else
+    echo "warmline: no terminal to ask on. To accept non-interactively, re-run with" >&2
+    echo "  warmline afk enable --i-accept-the-risk" >&2
+    return 1
+  fi
+  afk_py consent-write "${max:-$AFK_DEFAULT_MAX_H}" "$AFK_TERMS"
+  afk_wire || return 1
+  cat <<EOF
+
+AFK mode ENABLED  (limit per stretch: ${max:-$AFK_DEFAULT_MAX_H}h; change with --max-hours N)
+  In any Claude Code session -- terminal or desktop app -- type
+      afk        or   /afk 3h   or   brb
+  and walk away. Type anything when you're back; AFK ends by itself.
+  Start new sessions (or restart open ones) so they pick up /afk and the hook.
+  Turn it off:  warmline afk disable
+EOF
+}
+
+afk_disable() {
+  local quiet="${1:-}" n
+  if [ "$quiet" != --quiet ] && ! afk_enabled && ! afk_hook_wired && ! afk_cmd_ours; then
+    echo "AFK mode already OFF"
+    return 0
+  fi
+  n="$( [ -d "$AFK_DIR/sessions" ] && afk_py end-all || echo 0)"
+  afk_unwire
+  rm -rf "$AFK_DIR"
+  [ "$quiet" = --quiet ] && return 0
+  echo "AFK mode DISABLED -- /afk, the hook and the permission rule removed; consent forgotten."
+  [ "${n:-0}" -gt 0 ] && echo "ended $n active AFK session(s); their waiters exit on their own."
+  return 0
+}
+
+# install.sh and `warmline setup` call this after an upgrade: a changed path
+# or a changed procedure is re-rendered, and nothing happens unless enabled.
+afk_refresh() {
+  afk_enabled || return 0
+  afk_wire >/dev/null && echo "refreshed the AFK wiring (AFK mode is enabled)"
+}
+
+afk_status() {
+  local c at max active wired=1 line
+  if ! afk_enabled; then
+    echo "afk  OFF"
+    echo "  enable   warmline afk enable   (explains the account risk and asks first)"
+    return 1
+  fi
+  c="$(afk_py consent-read)"; at="${c%% *}"; c="${c#* }"; max="${c%% *}"
+  echo "afk  ON  -- risk accepted $(date -d "@$at" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$at" '+%Y-%m-%d %H:%M')"
+  echo "  limit    ${max}h per AFK stretch (ceiling ${AFK_HARD_MAX_H}h)"
+  if afk_cmd_ours; then echo "  /afk     $AFK_CMD"
+  elif [ -e "$AFK_CMD" ]; then echo "  /afk     taken by your own $AFK_CMD (plain 'afk' still works)"
+  else echo "  /afk     MISSING  (repair: warmline afk enable)"; wired=0; fi
+  if afk_hook_wired; then echo "  hook     wired in $SETTINGS"
+  else echo "  hook     MISSING  (repair: warmline afk enable)"; wired=0; fi
+  active="$(afk_py list)"
+  if [ -n "$active" ]; then
+    while IFS= read -r line; do echo "  away     $line"; done <<< "$active"
+  else
+    echo "  away     nobody right now"
+  fi
+  [ "$wired" = 1 ] && return 0 || return 2
+}
+
+afk_sid() {
+  local sid="${CLAUDE_CODE_SESSION_ID:-}"
+  case "$sid" in
+    ''|.*|*[!A-Za-z0-9._-]*)
+      echo "warmline afk: no Claude Code session id here (\$CLAUDE_CODE_SESSION_ID)." >&2
+      echo "AFK is started by the agent inside a session: type 'afk' or /afk there." >&2
+      return 2 ;;
+  esac
+  echo "$sid"
+}
+
+afk_start() {
+  local allow5m=0 text="" sid audit_path line bucket sec until max c
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --allow-5m) allow5m=1 ;;
+      --help|-h) afk_usage; return 0 ;;
+      -*) echo "warmline afk start: unknown flag '$1'" >&2; return 2 ;;
+      *) text="${text:+$text }$1" ;;
+    esac
+    shift
+  done
+  if ! afk_enabled; then
+    echo "warmline afk: AFK mode is not enabled on this machine. It sends automated" >&2
+    echo "requests while nobody is at the session, which can put the account at risk," >&2
+    echo "so the user has to turn it on themselves, in their own terminal:" >&2
+    echo "  warmline afk enable" >&2
+    return 5
+  fi
+  sid="$(afk_sid)" || return 2
+  audit_path="$(find_audit)"
+  [ -n "$audit_path" ] || { echo "warmline afk: needs warmline-audit (re-run install.sh)" >&2; return 2; }
+  if ! line="$("$audit_path" --cold-at 2>&1)"; then
+    echo "warmline afk: can't read this session's cache expiry:" >&2
+    printf '%s\n' "${line#warmline-audit: }" >&2
+    return 2
+  fi
+  bucket="$(printf '%s' "$line" | awk '{print $2}')"
+  if [ "$bucket" = 5m ] && [ "$allow5m" = 0 ]; then
+    echo "warmline afk: this session is on the 5-minute cache. Keeping it warm takes a" >&2
+    echo "ping every ~3 minutes -- ~20 an hour -- which costs more than the rebuild it" >&2
+    echo "prevents within the hour, and looks the most like a bot. Not started." >&2
+    echo "(If the user explicitly wants it anyway: warmline afk start --allow-5m)" >&2
+    return 6
+  fi
+  c="$(afk_py consent-read)"; c="${c#* }"; max="${c%% *}"
+  sec="$(afk_py dur "$text" "$max" "$AFK_HARD_MAX_H")" || {
+    echo "warmline afk: can't read '$text' as a duration (try 3h, 90m, 1.5h)" >&2; return 2; }
+  until=$(( $(date +%s) + sec ))
+  afk_py start "$sid" "$until"
+  echo "AFK on: this session's cache is kept warm until you're back -- at most until $(date -d "@$until" +%H:%M 2>/dev/null || date -r "$until" +%H:%M)."
+  echo "next: run '$(afk_quote "$(afk_wl)") afk wait' as a background task."
+}
+
+afk_stop() {
+  local sid s
+  case "${1:-}" in
+    --all) s="$(afk_py end-all 2>/dev/null || echo 0)"; echo "ended AFK for $s session(s)"; return 0 ;;
+    "") ;;
+    *) echo "warmline afk stop: unknown argument '$1'" >&2; return 2 ;;
+  esac
+  sid="$(afk_sid)" || return 2
+  if s="$(afk_py end "$sid")"; then echo "AFK ended ($s)"; else echo "this session isn't AFK"; fi
+}
+
+# Hold off system sleep while this waiter lives: a ping cannot fire from a
+# sleeping machine. The inhibitor watches our pid and dies with it however we
+# exit, so nothing outlives the wait.
+afk_inhibit() {
+  local me=$$
+  if command -v caffeinate >/dev/null; then
+    caffeinate -is -w "$me" >/dev/null 2>&1 &
+  elif command -v systemd-inhibit >/dev/null; then
+    systemd-inhibit --what=sleep:idle --why="warmline afk: keeping a Claude session warm" \
+      sh -c "while kill -0 $me 2>/dev/null; do sleep 20; done" >/dev/null 2>&1 &
+  fi
+}
+
+afk_wait() {
+  local interval=30 margin=3 inhibit=1 sid audit_path st until line epoch now n
+  local min="${WARMLINE_WAITFOR_MIN_SEC:-60}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n|--margin)
+        [ $# -ge 2 ] || { echo "warmline: $1 needs a value" >&2; return 2; }
+        case "$2" in ''|*[!0-9]*) echo "warmline: $1 needs a whole number" >&2; return 2 ;; esac
+        if [ "$1" = -n ]; then interval="$2"; else margin="$2"; fi
+        shift ;;
+      --no-inhibit) inhibit=0 ;;
+      --help|-h) afk_usage; return 0 ;;
+      *) echo "warmline afk wait: unknown argument '$1'" >&2; return 2 ;;
+    esac
+    shift
+  done
+  [ "$interval" -gt 0 ] || { echo "warmline: -n must be at least 1 second" >&2; return 2; }
+  sid="$(afk_sid)" || return 2
+  audit_path="$(find_audit)"
+  [ -n "$audit_path" ] || { echo "warmline afk: needs warmline-audit (re-run install.sh)" >&2; return 2; }
+  # taking the waiter slot retires any older waiter: one session, one waiter,
+  # so a doubled re-arm can never double the pings
+  if ! afk_py register "$sid" $$; then
+    echo "warmline afk: AFK is not active for this session -- nothing to keep warm."
+    return 0
+  fi
+  [ "$inhibit" = 1 ] && [ -z "${WARMLINE_AFK_NO_INHIBIT:-}" ] && afk_inhibit
+  while :; do
+    st="$(afk_py poll "$sid" $$)"
+    case "$st" in
+      gone) echo "warmline afk: AFK ended -- the user is back (or ran warmline afk stop). Don't re-arm."; return 0 ;;
+      superseded) echo "warmline afk: a newer waiter took over. Don't re-arm."; return 0 ;;
+    esac
+    case "$st" in
+      ok\ *) ;;
+      *) echo "warmline afk: can't read this session's AFK state -- stopping" >&2; return 2 ;;
+    esac
+    until="${st#ok }"; now=$(date +%s)
+    if [ "$now" -ge "$until" ]; then
+      line="$(afk_py end "$sid" || true)"
+      echo "warmline afk: time limit reached -- AFK ended${line:+ ($line)}; the cache will now expire. Don't re-arm."
+      return 1
+    fi
+    if line="$("$audit_path" --cold-at 2>/dev/null)"; then
+      epoch="${line%% *}"
+      case "$epoch" in ''|*[!0-9]*) epoch="" ;; esac
+      if [ -n "$epoch" ] && [ "$now" -ge "$epoch" ]; then
+        # past the expiry already: a ping now is a full-price rebuild, the
+        # very thing AFK exists to avoid. Stop rather than pay it.
+        line="$(afk_py end "$sid" || true)"
+        echo "warmline afk: the cache already went cold (was the machine asleep?) -- AFK ended${line:+ ($line)} rather than paying for a rebuild. Don't re-arm."
+        return 4
+      fi
+      if [ -n "$epoch" ] && [ "$now" -ge $(( epoch - margin * min )) ]; then
+        n="$(afk_py ping "$sid" || echo '?')"
+        echo "warmline afk: ping #$n -- the cache would expire at $(date -d "@$epoch" +%H:%M 2>/dev/null || date -r "$epoch" +%H:%M). Re-arm: run '$(afk_quote "$(afk_wl)") afk wait' in the background again, then end the turn."
+        return 3
+      fi
+    fi
+    sleep "$interval"
+  done
+}
+
+cmd_afk() {
+  local sub="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$sub" in
+    enable|on) afk_enable "$@" ;;
+    disable|off) afk_disable "$@" ;;
+    status) afk_status ;;
+    start) afk_start "$@" ;;
+    wait) afk_wait "$@" ;;
+    stop) afk_stop "$@" ;;
+    hook) HOOK_INPUT="$(cat)" afk_py hook 2>/dev/null || true ;;
+    refresh) afk_refresh ;;
+    ""|--help|-h|help) afk_usage ;;
+    *) echo "warmline: unknown afk action '$sub' (see warmline afk --help)" >&2; return 2 ;;
+  esac
+}
+
 command -v python3 >/dev/null || { echo "warmline needs python3 on PATH" >&2; exit 1; }
 
 case "${1:-}" in
@@ -849,6 +1578,7 @@ case "${1:-}" in
   watch) shift; cmd_watch "$@" ;;
   awake) shift; cmd_awake "$@" ;;
   wait-for) shift; cmd_wait_for "$@" ;;
+  afk) shift; cmd_afk "$@" ;;
   keep-warm)
     case "${2:-}" in
       on) kw_on ;;

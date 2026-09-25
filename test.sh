@@ -9,6 +9,8 @@ unset WARMLINE_TTL_MIN WARMLINE_REFRESH_SEC WARMLINE_FORCE_COLOR
 # these run inside a Claude Code session as often as not, and a real session id
 # in the environment would point the auditor at the developer's own transcript
 unset CLAUDE_CODE_SESSION_ID
+# ...and CLAUDECODE, which `warmline afk enable` reads as "the agent is asking"
+unset CLAUDECODE
 # an empty config dir, so the keep-warm field of the statusline tests below
 # reads a known-OFF state instead of whoever's real ~/.claude/CLAUDE.md
 export CLAUDE_CONFIG_DIR="$SCRATCH/cfg"
@@ -1261,6 +1263,232 @@ if [[ "$rc" == 3 && "$out" == *"cache deadline reached"* \
   echo "ok   wait-until-cold-cwd: the session id resolves it from a subdirectory"; pass=$((pass + 1))
 else
   echo "FAIL wait-until-cold-cwd: rc=$rc/$rc2 :: $out | $err"; fail=$((fail + 1))
+fi
+
+# ---- AFK mode ----
+# Opt-in unattended keep-warm. Its own config root, so enabling it can't leak
+# into the install/uninstall cases around it; the installed command runs it,
+# because that is the path the hook and the permission rule must name.
+AROOT="$SCRATCH/afk-cfg"
+ASID="afk00000-1111-2222-3333-444444444444"
+mkdir -p "$AROOT/projects/p"
+cp afk.md "$AROOT/warmline-afk.md"   # where install.sh puts it
+awl() { env -u CLAUDECODE CLAUDE_CONFIG_DIR="$AROOT" WARMLINE_WAITFOR_MIN_SEC=1 \
+          WARMLINE_AFK_NO_INHIBIT=1 "$IBIN/warmline" "$@"; }
+asess() { env -u CLAUDECODE CLAUDE_CONFIG_DIR="$AROOT" CLAUDE_CODE_SESSION_ID="$ASID" \
+          WARMLINE_WAITFOR_MIN_SEC=1 WARMLINE_AFK_NO_INHIBIT=1 "$IBIN/warmline" "$@"; }
+ahook() { # prompt [sid] -> the hook's stdout
+  python3 -c 'import json,sys; print(json.dumps({"session_id": sys.argv[2], "prompt": sys.argv[1],
+      "hook_event_name": "UserPromptSubmit"}))' "$1" "${2:-$ASID}" | awl afk hook
+}
+aturn() { # seconds_ago [bucket] -> this session's transcript, one turn that old
+  python3 -c 'import datetime, json, sys
+t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=float(sys.argv[1]))
+print(json.dumps({"type": "assistant", "timestamp": t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "requestId": "a1", "message": {"usage": {"input_tokens": 5,
+                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 30000,
+                  "cache_creation": {"ephemeral_%s_input_tokens" % sys.argv[2]: 30000}}}}))' \
+    "$1" "${2:-1h}" > "$AROOT/projects/p/$ASID.jsonl"
+}
+aturn 0
+# someone else's settings, which every AFK step below must leave alone
+cat > "$AROOT/settings.json" <<'JSON'
+{"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "my-hook"}]}]},
+ "permissions": {"allow": ["Bash(ls:*)"]}, "model": "opus"}
+JSON
+
+# Off by default, and the agent can't get past that: start refuses with 5,
+# and a bare "afk" through a hook that somehow survived says how to enable.
+rc=0; awl afk status >/dev/null || rc=$?
+rc2=0; err=$(asess afk start 2>&1 >/dev/null) || rc2=$?
+h=$(ahook afk)
+if [[ "$rc" == 1 && "$rc2" == 5 && "$err" == *"warmline afk enable"* \
+   && "$h" == *"not enabled"* && "$h" == *"Do not run it for them"* \
+   && ! -e "$AROOT/commands/afk.md" ]]; then
+  echo "ok   afk-off: off by default; start exits 5, the hook points at enable"; pass=$((pass + 1))
+else
+  echo "FAIL afk-off: rc=$rc rc2=$rc2 err=$err h=$h"; fail=$((fail + 1))
+fi
+
+# Consent: no terminal and no flag is a refusal, and so is the flag from
+# inside a Claude Code session -- the agent's shell carries CLAUDECODE.
+before=$(cat "$AROOT/settings.json")
+rc=0;  out=$(awl afk enable </dev/null 2>&1) || rc=$?
+rc2=0; err2=$(env CLAUDECODE=1 CLAUDE_CONFIG_DIR="$AROOT" "$IBIN/warmline" afk enable --i-accept-the-risk 2>&1) || rc2=$?
+if [[ "$rc" == 1 && "$out" == *"ban"* && "$out" == *"--i-accept-the-risk"* \
+   && "$rc2" == 3 && "$err2" == *"own terminal"* \
+   && ! -e "$AROOT/warmline-afk" && "$(cat "$AROOT/settings.json")" == "$before" ]]; then
+  echo "ok   afk-consent: no tty or inside Claude Code -> refused, nothing written"; pass=$((pass + 1))
+else
+  echo "FAIL afk-consent: rc=$rc rc2=$rc2 :: $err2"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Accepted: /afk exists and names this install by absolute path, the hook and
+# the allow rule are added beside the user's own, and status is ON.
+rc=0; out=$(awl afk enable --i-accept-the-risk --max-hours 6) || rc=$?
+rc2=0; st=$(awl afk status) || rc2=$?
+chk=$(python3 - "$AROOT/settings.json" "$IBIN/warmline" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); wl = sys.argv[2]
+cmds = [h["command"] for g in d["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
+allow = d["permissions"]["allow"]
+print("ok" if cmds == ["my-hook", wl + " afk hook"] and "Bash(ls:*)" in allow
+      and "Bash(%s afk:*)" % wl in allow and d["model"] == "opus" else "bad %r %r" % (cmds, allow))
+PY
+)
+if [[ "$rc" == 0 && "$out" == *"ENABLED"* && "$rc2" == 0 && "$st" == *"6h per AFK"* \
+   && "$chk" == ok && "$(grep -c "$IBIN/warmline afk wait" "$AROOT/commands/afk.md")" -ge 2 \
+   && "$(cat "$AROOT/commands/afk.md")" != *"{{WL}}"* \
+   && "$(head -1 "$AROOT/commands/afk.md")" == "---" ]]; then
+  echo "ok   afk-enable: /afk rendered, hook + allow rule added beside the user's"; pass=$((pass + 1))
+else
+  echo "FAIL afk-enable: rc=$rc rc2=$rc2 chk=$chk"; echo "$out"; echo "$st"; fail=$((fail + 1))
+fi
+
+# Re-enabling repairs rather than duplicating.
+awl afk enable >/dev/null
+n=$(grep -c "afk hook" "$AROOT/settings.json")
+if [ "$n" = 1 ]; then
+  echo "ok   afk-reenable: idempotent, one hook"; pass=$((pass + 1))
+else
+  echo "FAIL afk-reenable: $n hooks"; fail=$((fail + 1))
+fi
+
+# What the hook takes as "afk": the word alone, brb, or with a duration --
+# never a sentence that merely starts with it.
+h1=$(ahook afk); h2=$(ahook 'BRB!'); h3=$(ahook 'afk 2h'); h4=$(ahook 'afk for 90 minutes')
+h5=$(ahook 'afk mode is broken, fix it'); h6=$(ahook '/afk 3h'); h7=$(ahook 'hello')
+if [[ "$h1" == *"afk start "* && "$h1" == *"afk wait"* && "$h1" != *'$ARGUMENTS'* \
+   && "$h2" == *"Carry out this procedure"* && "$h3" == *"afk start 2h"* \
+   && "$h4" == *"afk start for 90 minutes"* && -z "$h5$h6$h7" ]]; then
+  echo "ok   afk-hook-trigger: afk / brb / afk 2h trigger; sentences don't"; pass=$((pass + 1))
+else
+  echo "FAIL afk-hook-trigger:"; printf '%s\n' "$h1" "$h2" "$h3" "$h4" "5=$h5" "6=$h6" "7=$h7"; fail=$((fail + 1))
+fi
+
+# The cycle: start, a waiter that returns 3 just before expiry and counts the
+# ping, a notification that is NOT the user coming back, then the user.
+aturn 0
+rc=0; out=$(asess afk start) || rc=$?
+aturn 3595          # a 1h cache 5 seconds from expiry; margin is 3 "minutes" = 3s
+rc2=0; out2=$(asess afk wait -n 1) || rc2=$?
+aturn 0
+( asess afk wait -n 1 > "$SCRATCH/afk-w1" 2>&1; echo $? > "$SCRATCH/afk-w1.rc" ) &
+sleep 2
+hn=$(ahook '<task-notification><status>completed</status></task-notification>')
+still=$([ -f "$AROOT/warmline-afk/sessions/$ASID.json" ] && echo yes || echo no)
+hb=$(ahook 'ok, back -- what did CI say?')
+wait
+if [[ "$rc" == 0 && "$out" == *"at most until"* \
+   && "$rc2" == 3 && "$out2" == *"ping #1"* && "$out2" == *"Re-arm"* \
+   && -z "$hn" && "$still" == yes \
+   && "$hb" == *"welcome back"* && "$hb" == *"1 keep-warm ping"* && "$hb" == *"do not re-arm"* \
+   && "$(cat "$SCRATCH/afk-w1.rc")" == 0 && "$(cat "$SCRATCH/afk-w1")" == *"the user is back"* \
+   && ! -e "$AROOT/warmline-afk/sessions/$ASID.json" ]]; then
+  echo "ok   afk-cycle: ping exits 3, a notification isn't a return, the user is"; pass=$((pass + 1))
+else
+  echo "FAIL afk-cycle: rc=$rc rc2=$rc2 still=$still :: $out2 :: hn=$hn :: hb=$hb :: $(cat "$SCRATCH/afk-w1")"; fail=$((fail + 1))
+fi
+
+# The bounds: the 5-minute cache (6, unless asked), the time limit (1), a
+# cache that already went cold (4, no rebuild), a waiter with no AFK (0), an
+# unreadable duration (2), and the 24h ceiling on whatever is asked for.
+aturn 5 5m
+rc=0;  err=$(asess afk start 2>&1) || rc=$?
+rc2=0; asess afk start --allow-5m >/dev/null || rc2=$?
+aturn 0
+asess afk start 2m >/dev/null
+rc3=0; out3=$(asess afk wait -n 1) || rc3=$?
+asess afk start >/dev/null
+aturn 3700
+rc4=0; out4=$(asess afk wait -n 1) || rc4=$?
+rc5=0; out5=$(asess afk wait -n 1) || rc5=$?
+rc6=0; asess afk start soon >/dev/null 2>&1 || rc6=$?
+aturn 0
+asess afk start 100h >/dev/null
+cap=$(python3 -c 'import json,sys,time; m=json.load(open(sys.argv[1])); print(int(m["until"]-time.time()))' \
+      "$AROOT/warmline-afk/sessions/$ASID.json")
+asess afk stop >/dev/null
+if [[ "$rc" == 6 && "$err" == *"5-minute cache"* && "$rc2" == 0 \
+   && "$rc3" == 1 && "$out3" == *"time limit"* \
+   && "$rc4" == 4 && "$out4" == *"went cold"* \
+   && "$rc5" == 0 && "$out5" == *"not active"* && "$rc6" == 2 \
+   && "$cap" -le 1440 && "$cap" -ge 1430 ]]; then
+  echo "ok   afk-bounds: 5m refused, limit 1, cold 4, no-AFK 0, bad 2, 24h ceiling"; pass=$((pass + 1))
+else
+  echo "FAIL afk-bounds: $rc/$rc2/$rc3/$rc4/$rc5/$rc6 cap=$cap :: $err :: $out3 :: $out4 :: $out5"; fail=$((fail + 1))
+fi
+
+# One session, one waiter: a doubled re-arm retires the older one, so pings
+# can't multiply.
+asess afk start >/dev/null
+( asess afk wait -n 1 > "$SCRATCH/afk-old" 2>&1; echo $? > "$SCRATCH/afk-old.rc" ) &
+sleep 2
+( asess afk wait -n 1 > /dev/null 2>&1 ) & ANEW=$!
+sleep 2
+asess afk stop >/dev/null
+wait
+if [[ "$(cat "$SCRATCH/afk-old.rc")" == 0 && "$(cat "$SCRATCH/afk-old")" == *"newer waiter"* ]]; then
+  echo "ok   afk-one-waiter: a second waiter supersedes the first"; pass=$((pass + 1))
+else
+  echo "FAIL afk-one-waiter: $(cat "$SCRATCH/afk-old")"; fail=$((fail + 1))
+fi
+
+# The statusline says so while a session is AFK, and only that session.
+asess afk start >/dev/null
+sl=$(mkpayload "$ASID" "$(pc 40 1h)" | CLAUDE_CONFIG_DIR="$AROOT" ./statusline.py)
+sl2=$(mkpayload other "$(pc 40 1h)" | CLAUDE_CONFIG_DIR="$AROOT" ./statusline.py)
+sl3=$(mkpayload "$ASID" "$(pc 40 1h)" | CLAUDE_CONFIG_DIR="$AROOT" WARMLINE_NO_AFK=1 ./statusline.py)
+if [[ "$sl" == *"| afk since "* && "$sl2" != *afk* && "$sl3" != *afk* ]]; then
+  echo "ok   afk-statusline: $sl"; pass=$((pass + 1))
+else
+  echo "FAIL afk-statusline: $sl | $sl2 | $sl3"; fail=$((fail + 1))
+fi
+
+# setup --remove (what a brew upgrade runs first) unwires but keeps consent;
+# setup puts it back. A /afk that is the user's own is never overwritten.
+env CLAUDE_CONFIG_DIR="$AROOT" "$IBIN/warmline" setup --remove >/dev/null
+unw=$(grep -c "afk hook" "$AROOT/settings.json" || true)
+env CLAUDE_CONFIG_DIR="$AROOT" WARMLINE_SHARE_DIR="$PWD" "$IBIN/warmline" setup >/dev/null 2>&1 || true
+rew=$(grep -c "afk hook" "$AROOT/settings.json" || true)
+printf 'my own afk\n' > "$AROOT/commands/afk.md"
+fo=$(awl afk enable)
+if [[ "$unw" == 0 && "$rew" == 1 && "$fo" == *"isn't warmline's"* \
+   && "$(cat "$AROOT/commands/afk.md")" == "my own afk" ]]; then
+  echo "ok   afk-setup: remove unwires, setup rewires, a foreign /afk survives"; pass=$((pass + 1))
+else
+  echo "FAIL afk-setup: unw=$unw rew=$rew :: $fo"; fail=$((fail + 1))
+fi
+rm -f "$AROOT/commands/afk.md"; awl afk enable >/dev/null
+
+# Disable takes back exactly what enable added -- and ends anyone AFK.
+rc=0; out=$(awl afk disable) || rc=$?
+rc2=0; awl afk status >/dev/null || rc2=$?
+after=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.pop("statusLine", None); print(json.dumps(d, sort_keys=True))' "$AROOT/settings.json")
+want=$(printf '%s' "$before" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))')
+if [[ "$rc" == 0 && "$out" == *"DISABLED"* && "$out" == *"ended 1 active"* && "$rc2" == 1 \
+   && "$after" == "$want" && ! -e "$AROOT/commands/afk.md" && ! -e "$AROOT/warmline-afk" ]]; then
+  echo "ok   afk-disable: settings back to the user's own, consent and markers gone"; pass=$((pass + 1))
+else
+  echo "FAIL afk-disable: rc=$rc rc2=$rc2 :: $out"; echo "$after"; echo "$want"; fail=$((fail + 1))
+fi
+
+# The installer's side: an upgrade re-renders an enabled AFK wiring and never
+# enables it itself; --uninstall takes all of it out, so no hook is left
+# pointing at a deleted command.
+A2="$SCRATCH/afk-inst"; A2BIN="$SCRATCH/afk-inst-bin"
+a2i() { env -u CLAUDECODE CLAUDE_CONFIG_DIR="$A2" WARMLINE_BIN_DIR="$A2BIN" ./install.sh "$@"; }
+a2i --no-path >/dev/null
+off=$(grep -c "afk hook" "$A2/settings.json" || true)
+env -u CLAUDECODE CLAUDE_CONFIG_DIR="$A2" "$A2BIN/warmline" afk enable --i-accept-the-risk >/dev/null
+up=$(a2i --no-path)
+a2i --uninstall >/dev/null
+left=$(grep -c "afk" "$A2/settings.json" 2>/dev/null || true)
+if [[ "$off" == 0 && "$up" == *"refreshed the AFK wiring"* && "$left" == 0 \
+   && ! -e "$A2/commands/afk.md" && ! -e "$A2/warmline-afk" && ! -e "$A2/warmline-afk.md" ]]; then
+  echo "ok   afk-installer: never enabled by install, refreshed on upgrade, gone on uninstall"; pass=$((pass + 1))
+else
+  echo "FAIL afk-installer: off=$off left=$left"; echo "$up"; fail=$((fail + 1))
 fi
 
 # Installer help: install-side flags only, pointing control at warmline.

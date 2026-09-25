@@ -51,6 +51,8 @@ cask "warmline" do
   caveats <<~CAVEATS
     warmline is already wired into Claude Code -- `warmline status` shows what is on,
     and uninstalling unwires it again. Keeping the prompt cache warm through long
-    waits is opt-in and stays off until you run `warmline keep-warm on`.
+    waits is opt-in and stays off until you run `warmline keep-warm on`. AFK mode
+    (type `afk`, the cache stays warm until you're back) is opt-in at your own
+    account risk: `warmline afk enable` explains it and asks first.
   CAVEATS
 end

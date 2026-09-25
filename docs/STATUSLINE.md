@@ -30,6 +30,7 @@ truth; this line owns the presentation.
 | `cache off` | `caching_observed` is false — prompt caching is off, or this provider or gateway never reports cache tokens (dim) |
 | `cache ?` | no `prompt_cache` object: Claude Code before v2.1.251, or before the session's first API response (dim) |
 | `keep-warm on*` / `?` | shown **only** when the policy needs attention (see [keep-warm](#the-keep-warm-field)) |
+| `afk since 13:10, 2 pings` | this session is in [AFK mode](AFK.md): you typed `afk` and it is keeping its own cache warm until you're back (yellow) |
 
 `COLD`, `off` and `?` are three different facts and are deliberately not
 collapsed into one. *"The cache expired"* means wait or ping; *"caching isn't
@@ -215,6 +216,17 @@ whether it worked.
 
 Set `WARMLINE_NO_KEEPWARM=1` to drop the field entirely.
 
+## The afk field
+
+Shown only while this session is in [AFK mode](AFK.md), which is opt-in and at
+your own risk. It is yellow because the session is sending unattended requests
+on your account. As elsewhere on the line it gives a wall-clock start rather
+than a countdown, plus how many keep-warm pings have gone out. It comes from the
+per-session marker `warmline afk start` writes, and it disappears on the next
+repaint after you type, because that's when the hook removes the marker.
+
+Set `WARMLINE_NO_AFK=1` to drop the field entirely.
+
 ## Colors
 
 On by default — Claude Code renders ANSI in the statusline. Green is good,
@@ -243,6 +255,7 @@ yellow is "act now", red is "already cold", dim is informational. Set
 | `WARMLINE_REFRESH_SEC` | `60` | install-time: the `refreshInterval` written to `settings.json`; `0` writes none |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, never show the keep-warm field |
 | `WARMLINE_NO_QUOTA` | unset | if set, never show the plan-limit field |
+| `WARMLINE_NO_AFK` | unset | if set, never show the AFK field |
 | `WARMLINE_CTX_WARN_PCT` | unset (auto) | a flat percentage at which `ctx` turns yellow, replacing the computed auto-compact threshold; `0` or less disables the warning |
 | `WARMLINE_NO_COLOR` / `NO_COLOR` | unset | plain output, no ANSI |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | config dir; its `CLAUDE.md` holds the keep-warm block and its `settings.json` says whether auto-compact is on |

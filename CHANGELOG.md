@@ -4,6 +4,71 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [Unreleased] — AFK mode
+
+Type `afk` and walk away. The session keeps its own prompt cache warm until you
+type again, so the first reply after lunch is a warm read and not a 2× rebuild of
+the whole context. This is the one feature that steps past the bounds Keep Warm
+was built around, so it is opt-in, at your own account risk, and only you can
+enable it.
+
+### Added
+- **AFK mode (`warmline afk`)**, off until `warmline afk enable`. Enabling
+  prints what it does and what it risks: unattended automated requests may
+  breach Anthropic's terms and can get an account rate-limited, suspended or
+  banned. You then have to type `I accept the risk`, or pass
+  `--i-accept-the-risk` in a script. Enable refuses to run from inside a Claude
+  Code session, with or without the flag, because consent isn't the agent's to
+  give.
+  - **`afk`, `brb`, `afk 3h`** typed as a plain message, or **`/afk [2h]`**,
+    in the terminal CLI or the desktop app's Code tab. A `UserPromptSubmit` hook
+    catches the bare word, and only the whole message: "afk mode is broken" is
+    an ordinary sentence. `/afk` is a user-level slash command with model
+    invocation disabled, so the agent can't start AFK on its own.
+  - **Any other message ends it.** The hook removes the session's marker
+    before the message reaches the model, says "welcome back" with the time
+    away and the ping count, and tells the agent not to re-arm. A background
+    task's own completion notice, which is the wake that *is* a ping, is never
+    mistaken for your return.
+  - **The mechanism is `warmline afk wait`**, a background waiter on the same
+    per-session expiry as `wait-for --until-cold`. It exits 3 about three
+    minutes before expiry, the agent re-arms it in a one-line turn, and that
+    turn is the ping. It holds off system sleep while it runs (`caffeinate` /
+    `systemd-inhibit`, tied to its own pid).
+  - **Bounds:** one waiter per session (a second one takes over and the first
+    exits 0, so a doubled re-arm can't double the pings). A limit per stretch,
+    10h by default (`enable --max-hours N`) with a hard 24h ceiling. If the
+    cache has already gone cold it stops with exit 4 instead of paying for the
+    rebuild. It refuses the 5-minute cache (exit 6) unless you ask with
+    `--allow-5m`.
+  - A permission rule for `warmline afk …` is added with the hook, so a ping
+    never waits on a permission prompt nobody is there to answer.
+  - `warmline afk status` (exit 0 on / 1 off / 2 consented but unwired),
+    `warmline afk stop [--all]`, `warmline afk disable`.
+- **Statusline: `afk since 13:10, 2 pings`**, in yellow, while the session is
+  away. `WARMLINE_NO_AFK` hides it.
+- `warmline status` gains an `afk` line.
+- [docs/AFK.md](docs/AFK.md): how it works, the bounds, the risk in full, and
+  where it works.
+
+### Changed
+- The installer ships `afk.md` to `~/.claude/warmline-afk.md`, which does
+  nothing until you enable AFK mode. It never enables AFK mode. Once you have,
+  every update re-renders `/afk` and the hook against the new install.
+- `warmline setup --remove`, which Homebrew runs first on every upgrade and
+  uninstall, unwires AFK mode so no hook is left pointing at a deleted command,
+  but keeps your consent. `setup` wires it back.
+- `warmline uninstall` and `./install.sh --uninstall` also disable AFK mode,
+  and leave your own hooks and permission rules alone.
+
+### Tests
+- Twelve cases: off by default, the consent refusals (no terminal, inside
+  Claude Code), enable and re-enable beside the user's own hooks, which
+  messages trigger it, the full ping / notification / return cycle, every
+  bound, the one-waiter rule, the statusline field, `setup --remove`/`setup`
+  and a foreign `/afk`, disable, and the installer round trip.
+  `CLAUDECODE` is now unset for the suite.
+
 ## [2.4.1] — 2026-09-14
 
 A same-day fix to the uninstall that shipped hours earlier, found by running it

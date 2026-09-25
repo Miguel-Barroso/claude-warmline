@@ -79,10 +79,18 @@ answers "is it on"; a statusline field that has read the same green `on` for
 three months is wallpaper, and next to a red `cache COLD` it reads as a
 contradiction.
 
+The afk field appears only while this session is in AFK mode (`warmline
+afk`, opt-in): someone typed `afk` and walked away, and the session is pinging
+itself to keep the cache warm until they are back:
+
+  afk since 13:10, 2 pings   yellow, because unattended requests are going out
+                  on the account; wall-clock again, never a countdown
+
 Configuration (environment variables):
   WARMLINE_NO_COLOR   if set (or NO_COLOR), plain output without ANSI colors
   WARMLINE_NO_KEEPWARM  if set, never show the keep-warm field
   WARMLINE_NO_QUOTA   if set, never show the rate-limit field
+  WARMLINE_NO_AFK     if set, never show the AFK field
   WARMLINE_CTX_WARN_PCT  fixed context-window percentage at which the ctx
                       field turns yellow, replacing the auto-compact
                       threshold above (0 or less disables the warning)
@@ -121,6 +129,7 @@ KW_BEGIN = "<!-- >>> claude-warmline keep-warm >>> -->"
 KW_END = "<!-- <<< claude-warmline keep-warm <<< -->"
 SHOW_KEEPWARM = not os.environ.get("WARMLINE_NO_KEEPWARM")
 SHOW_QUOTA = not os.environ.get("WARMLINE_NO_QUOTA")
+SHOW_AFK = not os.environ.get("WARMLINE_NO_AFK")
 try:
     # unset means "use the real auto-compact threshold"; a number pins it
     CTX_WARN_PCT = float(os.environ["WARMLINE_CTX_WARN_PCT"])
@@ -274,6 +283,28 @@ def keep_warm_state():
     return "on" if norm(body) == norm(policy) else "stale"
 
 
+def afk_field(session_id):
+    """'afk since 13:10, 2 pings' while this session is AFK, else None.
+
+    The marker is written by `warmline afk start` and removed the moment the
+    user types again, so its presence is the whole state. The session id is
+    checked against the same shape warmline accepts, since it becomes a path.
+    """
+    sid = str(session_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", sid):
+        return None
+    try:
+        with open(os.path.join(CLAUDE_DIR, "warmline-afk", "sessions", sid + ".json")) as f:
+            m = json.load(f)
+        since = time.strftime("%H:%M", time.localtime(float(m["started"])))
+        pings = int(m.get("pings") or 0)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not pings:
+        return "afk since %s" % since
+    return "afk since %s, %d ping%s" % (since, pings, "" if pings == 1 else "s")
+
+
 def cache_field(prompt_cache, now):
     """(text, color) for the cache verdict, from the authoritative object.
 
@@ -377,6 +408,11 @@ def main():
         quota = quota_field(d.get("rate_limits"))
         if quota:
             parts.append(paint(quota[0], quota[1]) if quota[1] else quota[0])
+
+    if SHOW_AFK:
+        afk = afk_field(d.get("session_id"))
+        if afk:
+            parts.append(paint(afk, YELLOW))
 
     if SHOW_KEEPWARM:
         kw = keep_warm_state()

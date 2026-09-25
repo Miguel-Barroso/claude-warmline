@@ -5,14 +5,14 @@
 Claude Code is one engine behind several front ends. warmline is three
 independent pieces, and they don't all reach every front end:
 
-| Front end | statusline | `warmline audit` / `watch` | keep-warm policy |
-|---|---|---|---|
-| Terminal CLI (`claude`) | ✅ | ✅ | ✅ |
-| Desktop app — Code tab, local session | ❌ not rendered | ✅ same transcripts | ✅ same CLAUDE.md |
-| VS Code / JetBrains extension panel | ❌ not rendered | ✅ | ✅ |
-| CLI inside an IDE's integrated terminal | ✅ | ✅ | ✅ |
-| Desktop app — SSH session | ❌ | ✅ *on the remote host* | ✅ *on the remote host* |
-| Cloud / Cowork / Dispatch sessions | ❌ | ❌ nothing local to read | ❌ local CLAUDE.md never reaches them |
+| Front end | statusline | `warmline audit` / `watch` | keep-warm policy | [AFK mode](AFK.md) (`afk`, `/afk`) |
+|---|---|---|---|---|
+| Terminal CLI (`claude`) | ✅ | ✅ | ✅ | ✅ |
+| Desktop app — Code tab, local session | ❌ not rendered | ✅ same transcripts | ✅ same CLAUDE.md | ✅ same hooks and commands |
+| VS Code / JetBrains extension panel | ❌ not rendered | ✅ | ✅ | ✅ |
+| CLI inside an IDE's integrated terminal | ✅ | ✅ | ✅ | ✅ |
+| Desktop app — SSH session | ❌ | ✅ *on the remote host* | ✅ *on the remote host* | ✅ *enabled on the remote host* |
+| Cloud / Cowork / Dispatch sessions | ❌ | ❌ nothing local to read | ❌ local CLAUDE.md never reaches them | ❌ |
 
 **Short version for the desktop app: two of three.** The gauge is terminal-only,
 but the auditor — including the live [`warmline watch`](AUDIT.md#which-sessions-are-warm-right-now---live--warmline-watch)

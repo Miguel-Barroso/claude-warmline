@@ -21,6 +21,9 @@ POLICY="$CLAUDE_DIR/warmline-keep-warm.md"
 SETTINGS="$CLAUDE_DIR/settings.json"
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 STATE_DIR="$CLAUDE_DIR/warmline-state"
+AFK_SRC="$CLAUDE_DIR/warmline-afk.md"
+AFK_DIR="$CLAUDE_DIR/warmline-afk"
+AFK_CMD="$CLAUDE_DIR/commands/afk.md"
 MARK_BEGIN="<!-- >>> claude-warmline keep-warm >>> -->"
 MARK_END="<!-- <<< claude-warmline keep-warm <<< -->"
 # Same two strings in the warmline command, which is what removes this block
@@ -253,6 +256,19 @@ PY
 }
 
 if [ "$MODE" = uninstall ]; then
+  # AFK mode first, while the command that knows its wiring still exists: the
+  # hook in settings.json would otherwise point at a deleted file and fail on
+  # every prompt. Without the command, take out what is provably ours.
+  if [ -x "$CLI" ]; then
+    "$CLI" afk disable --quiet || true
+  else
+    if [ -f "$AFK_CMD" ] && grep -qF "claude-warmline afk:" "$AFK_CMD"; then rm -f "$AFK_CMD"; fi
+    rm -rf "$AFK_DIR"
+    if [ -f "$SETTINGS" ] && grep -q "afk hook" "$SETTINGS"; then
+      echo "note: $SETTINGS may still hold warmline's AFK hook -- remove the"
+      echo "      UserPromptSubmit entry ending in 'warmline afk hook' by hand"
+    fi
+  fi
   if [ -f "$SETTINGS" ]; then
     DEST="$DEST" python3 - "$SETTINGS" <<'PY'
 import json, os, sys
@@ -268,7 +284,7 @@ if os.environ["DEST"] in str(sl.get("command", "")):
     print(f"removed statusLine from {path}")
 PY
   fi
-  rm -f "$DEST" "$CLI" "$AUDIT" "$POLICY"
+  rm -f "$DEST" "$CLI" "$AUDIT" "$POLICY" "$AFK_SRC"
   rm -rf "$STATE_DIR"
   if [ -f "$CLAUDE_MD" ]; then
     MB="$MARK_BEGIN" ME="$MARK_END" python3 - "$CLAUDE_MD" <<'PY'
@@ -346,6 +362,7 @@ if [ -f "$POLICY" ]; then
   cp "$POLICY" "$PREV_POLICY"
 fi
 fetch keep-warm.md "$POLICY"
+fetch afk.md "$AFK_SRC"
 
 if [ -f "$CLAUDE_MD" ]; then
   MB="$MARK_BEGIN" ME="$MARK_END" PREV="$PREV_POLICY" \
@@ -440,11 +457,16 @@ if [ "$KEEP_WARM" = 1 ]; then
   "$CLI" keep-warm on
 fi
 
+# AFK mode is never switched on here -- it needs the user's own consent, in
+# 'warmline afk enable'. Already enabled, an upgrade re-renders its wiring.
+"$CLI" afk refresh || true
+
 echo
 echo "Done. Claude Code usually picks the statusline up within a few seconds;"
 echo "restart the session if it doesn't. Next:"
 echo "  warmline status         # what's on right now"
 echo "  warmline keep-warm on   # optional: keep the cache warm through long waits"
+echo "  warmline afk --help     # optional, at your own risk: type 'afk', cache stays warm"
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) path_offer ;;
