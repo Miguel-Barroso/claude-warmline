@@ -250,6 +250,29 @@ warmline wait-for --pidfile /tmp/job.pid --until-cold
 
 [它是什麼、不是什麼、`wait-for`、免睡眠模式、限制與條款討論 →](docs/KEEP-WARM.md)（英文）
 
+## 選用、風險自負：AFK 模式
+
+Keep Warm 只在有工作執行時才 ping，你單純離開座位時它什麼都不做。AFK 模式就是為離開座位而設計的。在 Claude Code 工作階段（終端機或桌面應用程式皆可）輸入 `afk`，工作階段會自己保持快取溫熱，直到你再次輸入：
+
+```text
+> afk
+  AFK: keeping the cache warm until you're back (at most until 23:10).
+  ...
+> ok, where were we?
+  warmline: welcome back -- AFK ended (away 2h40m, 3 keep-warm pings)
+```
+
+> [!WARNING]
+> 這些 ping 是從無人看管的工作階段送出的自動化請求，可能違反 Anthropic 的條款，**可能導致帳號被限速、停權或封鎖**。使用 Pro / Max 訂閱時風險最高。AFK 模式在你親自開啟之前一直是關閉的：
+
+```sh
+warmline afk enable     # 說明風險，並要求你輸入 "I accept the risk"
+```
+
+輸入 `afk`、`brb`、`afk 3h` 或 `/afk 2h` 即開始，送出其他任何訊息即結束。背後是一個背景等待程序：它在快取到期前幾分鐘喚醒工作階段，代理用一行的回合重新設定它，而這個回合本身就是 ping。範圍有明確限制：每個工作階段只有一個等待程序，每段預設上限 10 小時（最多 24 小時），不處理 5 分鐘快取，快取若已冷掉就直接停止，不花錢重建。代理無法替你開啟它。
+
+[運作方式、限制與完整風險說明 →](docs/AFK.md)（英文）
+
 ## 本機優先，是設計如此
 
 warmline 只在你自己的機器上執行。它不向外傳送資料、不收集遙測、不需要帳號，除
@@ -293,6 +316,7 @@ TTL 是實測出來的，不是假設。在無干擾環境下的雙臂探測中�
 | [Statusline](docs/STATUSLINE.md) | 全部欄位、顏色、疑難排解 |
 | [Audit](docs/AUDIT.md) | 判定、原因歸因、`--all`、即時的 `watch` 檢視、"avoidable" 的定義 |
 | [Keep Warm](docs/KEEP-WARM.md) | 策略、免睡眠模式（`warmline awake`）、限制與條款討論 |
+| [AFK mode](docs/AFK.md) | 選用、風險自負：輸入 `afk`，快取保持溫熱直到你回來 |
 | [Where it works](docs/SURFACES.md) | 終端機、桌面、IDE、SSH、雲端 |
 | [Install](docs/INSTALL.md) | 安裝、更新、解除安裝、設定、Windows、測試 |
 | [Measurements](docs/MEASUREMENTS.md) | 支撐每一項主張的實測資料 |

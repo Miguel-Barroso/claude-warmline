@@ -62,6 +62,7 @@ Then:
 | `warmline audit` | this session, turn by turn |
 | `warmline audit --all` | every session on this machine, ranked |
 | `warmline watch` | every session's warmth, live, until ctrl-c |
+| `warmline afk enable` | optional, [at your own risk](#optional-at-your-own-risk-afk-mode): type `afk` and the cache stays warm until you're back |
 
 Needs `python3` and `bash`, nothing else. No `curl`? `wget -qO- <same URL> | bash`
 works the same way, and the installer downloads with whichever one it finds.
@@ -287,6 +288,41 @@ minute 12 costs no ping at all.
 
 [What it is and isn't, `wait-for`, no-sleep mode, limits, terms →](docs/KEEP-WARM.md)
 
+## Optional, at your own risk: AFK mode
+
+Keep Warm pings only while a job is running, never just because you walked
+away. AFK mode is for walking away. Type `afk` in a Claude Code session, in the
+terminal or the desktop app, and the session keeps its own cache warm until you
+type again:
+
+```text
+> afk
+  AFK: keeping the cache warm until you're back (at most until 23:10).
+  ...
+> ok, where were we?
+  warmline: welcome back -- AFK ended (away 2h40m, 3 keep-warm pings)
+```
+
+> [!WARNING]
+> Those pings are automated requests from a session nobody is attending. That
+> may breach Anthropic's terms and **can get your account rate-limited,
+> suspended or banned**. On a Pro or Max subscription the risk is highest.
+> AFK mode is off until you turn it on yourself:
+
+```sh
+warmline afk enable     # explains the risk; you type "I accept the risk"
+```
+
+`afk`, `brb`, `afk 3h` or `/afk 2h` starts it, and any other message ends it.
+Under the hood it's a background waiter that wakes the session a few minutes
+before the cache would expire. The agent re-arms it with a one-line turn, and
+that turn is the ping. It stays bounded: one waiter per session, a limit per
+stretch (10h by default, 24h at most), no 5-minute caches, and it stops rather
+than pay for a rebuild if the cache goes cold anyway. The agent can't enable it
+for you.
+
+[How it works, the bounds, the risk in full →](docs/AFK.md)
+
 ## Local by design
 
 Warmline runs on your machine. It does not phone home, collect telemetry, or
@@ -300,7 +336,7 @@ nothing to log into.
 
 ## Where it works
 
-| Front end | statusline | `warmline audit` / `watch` | keep-warm |
+| Front end | statusline | `warmline audit` / `watch` | keep-warm / AFK |
 |---|---|---|---|
 | Terminal CLI | ✅ | ✅ | ✅ |
 | Desktop app (local Code tab) | ❌ | ✅ | ✅ |
@@ -332,6 +368,7 @@ page comes from the same corpus the audit above grades.
 | [Statusline](docs/STATUSLINE.md) | every field, colors, gap mechanics, troubleshooting |
 | [Audit](docs/AUDIT.md) | verdicts, cause attribution, `--all`, the live `watch` view, what "avoidable" means |
 | [Keep Warm](docs/KEEP-WARM.md) | the policy, no-sleep mode (`warmline awake`), limits, the terms question |
+| [AFK mode](docs/AFK.md) | opt-in, at your own risk: type `afk`, the cache stays warm until you're back |
 | [Where it works](docs/SURFACES.md) | terminal, desktop, IDE, SSH, cloud |
 | [Install](docs/INSTALL.md) | install, update, uninstall, configure, Windows, tests |
 | [Measurements](docs/MEASUREMENTS.md) | the evidence behind every claim |

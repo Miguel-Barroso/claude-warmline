@@ -111,6 +111,12 @@ file you also write in is not something an uninstaller should decide —
 | `warmline` | `~/.local/bin/warmline` |
 | `warmline-audit` | `~/.local/bin/warmline-audit` |
 | `keep-warm.md` | `~/.claude/warmline-keep-warm.md` (the policy source) |
+| `afk.md` | `~/.claude/warmline-afk.md` (the [AFK mode](AFK.md) procedure source, inert until `warmline afk enable`) |
+
+The installer never enables AFK mode, since that takes your own consent. Once
+you have, `warmline afk enable` adds `~/.claude/commands/afk.md`, a
+`UserPromptSubmit` hook and a `Bash(… afk:*)` permission rule to
+`settings.json`, and `~/.claude/warmline-afk/`.
 
 Both commands are installed, and the auditor has two spellings: `warmline audit
 …` is the primary form the docs use, and it runs `warmline-audit`, which remains
@@ -213,6 +219,10 @@ a note on the console telling you the wording moved on. Either way the rest of
 your CLAUDE.md is untouched. See
 [editing the policy](KEEP-WARM.md#editing-the-policy).
 
+If you've enabled [AFK mode](AFK.md), an update also re-renders `/afk` and its
+hook against the new install, so a moved command never leaves a hook pointing
+at nothing. An update never turns AFK mode on.
+
 ## Uninstalling
 
 ```sh
@@ -220,8 +230,10 @@ warmline uninstall          # or, from a checkout: ./install.sh --uninstall
 ```
 
 Removes the statusline and its wiring, both commands, the policy file, the
-state directory, the `PATH` line if you let the installer add one, and the
-keep-warm block from your CLAUDE.md — leaving the rest of that file untouched.
+state directory, the `PATH` line if you let the installer add one, the
+keep-warm block from your CLAUDE.md — leaving the rest of that file untouched —
+and, if you enabled it, AFK mode: `/afk`, its hook and permission rule, and the
+recorded consent. Your own hooks and permission rules stay.
 The two forms do the same work; `warmline uninstall` just doesn't need the
 installer to still be lying around, which after a `curl | bash` it isn't.
 
@@ -242,7 +254,9 @@ source rather than an install. A checkout can still uninstall the copy in
 | `WARMLINE_REF` | `main` | the tag or branch the installer fetches files from — same as `--ref`; also pins the `warmline` command's last-resort download of the policy text |
 | `WARMLINE_NO_KEEPWARM` | unset | if set, the statusline never shows the keep-warm field |
 | `WARMLINE_NO_QUOTA` | unset | if set, the statusline never shows the plan-limit field (`5h 78%`) |
-| `WARMLINE_SHARE_DIR` | unset | where `warmline setup` looks for `statusline.py` and `keep-warm.md`; unset, beside the command then `../share/warmline` |
+| `WARMLINE_NO_AFK` | unset | if set, the statusline never shows the AFK field |
+| `WARMLINE_AFK_NO_INHIBIT` | unset | if set, `warmline afk wait` doesn't hold off system sleep |
+| `WARMLINE_SHARE_DIR` | unset | where `warmline setup` looks for `statusline.py`, `keep-warm.md` and `afk.md`; unset, beside the command then `../share/warmline` |
 | `WARMLINE_CTX_WARN_PCT` | unset (auto) | percentage at which the statusline's `ctx` field turns yellow; unset, it warns within 10k of where auto-compact actually fires (`window - 33000`) and stays silent when auto-compact is off; `0` disables |
 | `WARMLINE_NO_COLOR` | unset | if set (or `NO_COLOR`), plain output without ANSI colors |
 | `WARMLINE_FORCE_COLOR` | unset | if set, colored audit output even when piped |

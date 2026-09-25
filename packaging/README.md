@@ -1,8 +1,8 @@
 # Packaging
 
-warmline is three scripts and a markdown file. There is nothing to compile, so
+warmline is three scripts and two markdown files. There is nothing to compile, so
 a package's whole job is to put `warmline` and `warmline-audit` on `PATH` and
-`statusline.py` + `keep-warm.md` somewhere the command can find them.
+`statusline.py`, `keep-warm.md` and `afk.md` somewhere the command can find them.
 
 Layout a package should produce:
 
@@ -11,6 +11,7 @@ Layout a package should produce:
 <prefix>/bin/warmline-audit
 <prefix>/share/warmline/statusline.py
 <prefix>/share/warmline/keep-warm.md
+<prefix>/share/warmline/afk.md
 ```
 
 `warmline setup` resolves that layout by following symlinks from the command
