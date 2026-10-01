@@ -11,7 +11,7 @@ Fable 5 | claude-warmline | ctx 43% (86k) | cache HOT (127k, cold ~13:04) | 5h 7
 Since v2.1.251 Claude Code puts the prompt cache's real state on the
 statusline's stdin — whether the prefix is warm, which TTL it is on, and the
 epoch second it expires. **warmline shows those numbers and does not compute
-its own.** It reads no transcript, keeps no state file, and does not time the
+its own.** It reads no transcript, keeps no cache state, and does not time the
 gap between turns to guess whether the cache survived. Claude Code owns the
 truth; this line owns the presentation.
 
@@ -201,6 +201,16 @@ Both come from the same source of truth as
 [`warmline keep-warm status`](KEEP-WARM.md): the marker block in
 `$CLAUDE_CONFIG_DIR/CLAUDE.md` (default `~/.claude/CLAUDE.md`), re-read on
 every render, never a cached state file.
+
+The reading is also written down, but only when it changes. When it differs
+from the last line of `warmline-keepwarm.log` in the same directory, the
+statusline appends one line: UTC time plus `on`, `off` or `inconsistent`. A
+stale block counts as `on`, since a policy is still in place.
+[`warmline audit`](AUDIT.md#was-keep-warm-on) reads that history to say
+whether keep-warm was on when a session went cold from inactivity. While the
+state holds, the cost is one small read of the log's tail. The display never
+consults the log, and a log that can't be read or written costs only the
+record. `WARMLINE_NO_KEEPWARM` hides the field, but the recording continues.
 
 The star matters because the block in CLAUDE.md is what the agent reads, and
 upgrading warmline used to refresh only the policy *source* beside it. A

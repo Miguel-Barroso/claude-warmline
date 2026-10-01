@@ -113,6 +113,10 @@ file you also write in is not something an uninstaller should decide —
 | `keep-warm.md` | `~/.claude/warmline-keep-warm.md` (the policy source) |
 | `afk.md` | `~/.claude/warmline-afk.md` (the [AFK mode](AFK.md) procedure source, inert until `warmline afk enable`) |
 
+Once running, the statusline also writes `~/.claude/warmline-keepwarm.log`, a
+line for each keep-warm on/off transition. That history is what
+[`warmline audit`](AUDIT.md#was-keep-warm-on) reads. Uninstalling removes it.
+
 The installer never enables AFK mode, since that takes your own consent. Once
 you have, `warmline afk enable` adds `~/.claude/commands/afk.md`, a
 `UserPromptSubmit` hook and a `Bash(… afk:*)` permission rule to
