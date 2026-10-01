@@ -727,6 +727,28 @@ else
   echo "FAIL audit-keepwarm: $nolog / $one / $all"; echo "$out"; fail=$((fail + 1))
 fi
 
+# The log describes only this config dir's own transcripts. The same session
+# copied outside <config>/projects -- or another tree passed to --all, say
+# the other side of a WSL machine -- ran under a CLAUDE.md this log never
+# saw, so the log present above must label none of it.
+KWF="$SCRATCH/kwforeign"; mkdir -p "$KWF/p"
+cp "$KWA/projects/p/kw.jsonl" "$KWF/p/kw.jsonl"
+f_one=$(kwa --json "$KWF/p/kw.jsonl" | kwj)
+f_all=$(kwa --all --json "$KWF" | kwj)
+f_out=$(kwa "$KWF/p/kw.jsonl")
+f_outall=$(kwa --all "$KWF")
+f_flag=$(kwa --json "$KWF/p/kw.jsonl" | python3 -c 'import json, sys
+print(json.load(sys.stdin)["summary"]["keep_warm_inactivity"]["log_applies"])')
+fwant='on=0/0 off=0/0 inconsistent=0/0 unknown=4/50000 None'
+if [[ "$f_one" == "$fwant" && "$f_all" == "$fwant" && "$f_flag" == False \
+   && "$f_out" == *"unknown             4 (100%)  50,000 tokens re-cached  -- not under "*"keep-warm record doesn't cover it"* \
+   && "$f_out" != *"keep-warm on   "* && "$f_out" != *"keep-warm off  "* \
+   && "$f_outall" == *"unknown             4 (100%)"* && "$f_outall" != *"keep-warm on   "* ]]; then
+  echo "ok   audit-keepwarm-foreign: a transcript outside the config dir is all unknown"; pass=$((pass + 1))
+else
+  echo "FAIL audit-keepwarm-foreign: $f_one / $f_all / $f_flag"; echo "$f_out"; fail=$((fail + 1))
+fi
+
 # --all --price: the TOTAL row itself carries the premium (30200 avoidable
 # * 1.9 * $10/MTok = $0.57), the estimate disclaimer prints, and the notes
 # say which side of the input/output split the premium lives on.

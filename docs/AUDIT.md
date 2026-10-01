@@ -179,6 +179,12 @@ meant to cover. Two more limits:
   desktop app, or a different statusline) records only the CLI's changes.
 - The log is the CLAUDE.md file's state. A session that had already started
   may still have been running on what it loaded at startup.
+- The log only labels transcripts under its own config dir's `projects/`,
+  compared by resolved real path. A transcript copied elsewhere, or another
+  machine's or config's tree passed as `--all DIR`, ran under a CLAUDE.md this
+  log never saw. All of its gaps are `unknown`, and `recorded_since` is
+  `null`. To audit another config dir with its own log, point
+  `CLAUDE_CONFIG_DIR` at it.
 
 ## Where does the money leak? `--all`
 
@@ -409,7 +415,9 @@ account.
   - **`keep_warm_inactivity`**, in the single-session `summary`, on each
     `--all` session and in the `--all` total, holds `on`, `off`,
     `inconsistent` and `unknown`, each `{"events", "tokens"}`, plus
-    `recorded_since` (the log's first line, or `null`). See
+    `recorded_since` (the log's first line, or `null`) and `log_applies`
+    (`false` when the transcript isn't under this config dir, so nothing
+    recorded here could describe it). See
     [Was keep-warm on?](#was-keep-warm-on).
 - `--ttl N` forces the cache TTL for every session (also `WARMLINE_TTL_MIN`);
   unset, it is [auto-detected per session](#the-ttl-is-auto-detected).

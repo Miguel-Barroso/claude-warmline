@@ -422,18 +422,41 @@ def keepwarm_state_at(t):
     return states[i - 1] if i else "unknown"
 
 
-def keepwarm_split(rows):
+def keepwarm_owns(path):
+    """True when the transcript lives under this config dir's projects/ --
+    the only transcripts KW_LOG describes. A copied transcript, or another
+    machine's or config's tree passed as --all DIR, ran under a CLAUDE.md
+    this log never saw. Real paths, case-normalized, so symlinks (macOS's
+    /var -> /private/var) and Windows drive-letter case don't decide it;
+    paths on different Windows drives simply aren't nested."""
+    def norm(p):
+        # an MSYS spelling (/c/Users/...) that reached Windows Python
+        # unconverted names the same file as C:/Users/...
+        if os.name == "nt" and re.match(r"^/[A-Za-z](/|$)", p):
+            p = p[1] + ":" + (p[2:] or "/")
+        return os.path.normcase(os.path.realpath(p))
+    root, p = norm(PROJECTS_DIR), norm(path)
+    try:
+        return os.path.commonpath([root, p]) == root and p != root
+    except ValueError:
+        return False
+
+
+def keepwarm_split(rows, owned=True):
     """Inactivity cold turns -- the COLD(ttl) verdicts -- split by the
     keep-warm state in effect when each idle gap began (the previous turn).
     Keyed on the verdict rather than the cause label, so how causes are
-    named or aggregated doesn't move this."""
-    times = keepwarm_history()[0]
+    named or aggregated doesn't move this. A transcript the log doesn't own
+    is all unknown, with no recorded_since: nothing was recorded for it."""
+    times = keepwarm_history()[0] if owned else []
     out = {k: {"events": 0, "tokens": 0} for k in KW_STATES}
     out["recorded_since"] = times[0].isoformat() if times else None
+    # False: this machine's record doesn't describe the transcript at all
+    out["log_applies"] = owned
     prev = None
     for r in rows:
         if r["verdict"] == "COLD(ttl)" and prev is not None:
-            b = out[keepwarm_state_at(prev)]
+            b = out[keepwarm_state_at(prev) if owned else "unknown"]
             b["events"] += 1
             b["tokens"] += r["write"]
         prev = r["time"]
@@ -444,11 +467,13 @@ def keepwarm_merge(splits):
     """One split from many sessions' -- for the --all total."""
     out = {k: {"events": 0, "tokens": 0} for k in KW_STATES}
     out["recorded_since"] = None
+    out["log_applies"] = False
     for sp in splits:
         for k in KW_STATES:
             out[k]["events"] += sp[k]["events"]
             out[k]["tokens"] += sp[k]["tokens"]
         out["recorded_since"] = out["recorded_since"] or sp["recorded_since"]
+        out["log_applies"] = out["log_applies"] or sp["log_applies"]
     return out
 
 
@@ -474,7 +499,10 @@ def keepwarm_lines(split):
             "{:,}".format(b["tokens"]))
         if k == "unknown":
             since = split["recorded_since"]
-            if since:
+            if not split["log_applies"]:
+                why = ("not under %s, so this config's keep-warm record "
+                       "doesn't cover it" % PROJECTS_DIR)
+            elif since:
                 why = "before warmline began recording it (%s)" % \
                     parse_ts(since).astimezone().strftime("%m-%d %H:%M")
             else:
@@ -497,7 +525,7 @@ def audit_session(path):
     ttl = TTL_MIN if TTL_FORCED else (ttl_hint or TTL_MIN)
     rows = grade(turns, compacts, ttl)
     s = summarize(rows)
-    s["keep_warm_inactivity"] = keepwarm_split(rows)
+    s["keep_warm_inactivity"] = keepwarm_split(rows, keepwarm_owns(path))
     s["transcript"] = path
     s["project"] = label or os.path.basename(os.path.dirname(path))
     # the directory name is the cwd's slug -- the join key to Claude Code's

@@ -379,6 +379,13 @@ Windows sessions with
 CLAUDE_CONFIG_DIR=/mnt/c/Users/you/.claude warmline audit --all
 ```
 
+Setting `CLAUDE_CONFIG_DIR` matters for the keep-warm split as well as for
+finding the sessions. That split comes from the `warmline-keepwarm.log` in the
+config dir, and the log only labels transcripts under that dir's `projects/`.
+`warmline audit --all /mnt/c/Users/you/.claude/projects`, run without the
+variable, still grades every session, but it reports their inactivity gaps as
+`unknown` rather than applying WSL's own log to them.
+
 ### Keeping Windows awake
 
 `warmline awake` and the AFK waiter hold the machine up with
