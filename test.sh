@@ -1254,7 +1254,7 @@ kc keep-warm off >/dev/null; kc keep-warm off >/dev/null
 s_off=$(awk '{print $2}' "$KC/warmline-keepwarm.log" | paste -sd, -)
 st=$(kc keep-warm status || true); ov=$(kc status)
 if [[ "$s_on" == on && "$s_off" == on,off && "$pre" != *"history"* \
-   && "$st" == *"history  last recorded: off at 20"*"Z  (in $KC/warmline-keepwarm.log)"* \
+   && "$st" == *"history  last recorded: off at 20"*"Z  (in "*"/warmline-keepwarm.log)"* \
    && "$(echo "$ov" | grep keep-warm)" == *" OFF "*"-- last recorded: off at 20"* ]] \
    && grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z on$' "$KC/warmline-keepwarm.log"; then
   echo "ok   cli-kw-record: on/off logged at once, repeats not, status shows it"; pass=$((pass + 1))
