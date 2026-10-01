@@ -73,13 +73,14 @@ time                gap   cache read   cache write  verdict
 cache health  ██████████████████████████  98% hot  (255 of 260 turns)
 
 260 API turns; HOT 255 (98%)  PARTIAL 3 (1.2%)  COLD(rebuilt) 1 (<1%)  COLD(ttl) 1 (<1%)
-causes: inactivity+compact 1 (50%)  /compact 1 (50%)
+causes: inactivity+compact 58k tok (59%, 1 event)  /compact 41k tok (41%, 1 event)
 tokens re-cached while cold: 99,188   read from cache: 45,926,103   output: 218,038
 (a cold re-cache bills ~2x base input on this session's 1h cache; a warm wake reads at ~0.1x)
 input $3/MTok as given on the command line
 the cold re-caches cost ~$0.57 more than warm reads of the same tokens would have; cache reads billed ~$13.78
 output tokens at $15/MTok: ~$3.27 -- output is never cached; cache warmth doesn't change this part of the bill
-estimated avoidable premium ~$0.57
+avoidable cold = tokens re-cached cold, excluding each session's first write, compaction writes (/compact, auto-compact, inactivity+compact: the compacted context, cached for the first time) and model changes (chosen)
+estimated avoidable premium ~$0.00
 ```
 
 Reading it, top to bottom:
@@ -94,13 +95,17 @@ Reading it, top to bottom:
 - The `6h12m` row is the expensive one: overnight silence, the cache expired,
   and the first morning message re-wrote 58k tokens at the 2× rate. A
   compaction *also* sits inside that gap, so rather than guess, the auditor
-  labels it **`inactivity+compact`** — either could explain the rebuild.
+  labels it **`inactivity+compact`** — either could explain the rebuild. What
+  it wrote is the compacted context (58k, where the context before the gap was
+  over 300k), which had to be cached once however warm the cache had stayed, so
+  it doesn't count as avoidable.
 - The **cache health bar** is the fraction of turns that ran hot. Below it, the
   verdict census — each verdict with its share of turns, so the cold events'
   relative weight is readable without division — then *why* each cold turn
-  happened, again with each cause's share. (A session's very first cache write
-  is graded `session start` and never counted as avoidable; this particular
-  session resumed into a still-warm cache, so it has none.)
+  happened, ranked by the tokens each cause re-cached, with its share of them
+  and its event count. (A session's very first cache write is graded `session
+  start` and never counted as avoidable; this particular session resumed into
+  a still-warm cache, so it has none.)
 - The **output line** keeps the bill honest: output tokens are priced at their
   own (higher) rate, and they are never cached — no amount of warmth changes
   that part of the cost. Everything else on this report is input-side.
@@ -110,12 +115,15 @@ Reading it, top to bottom:
   [pricing](#pricing-your-rate-not-a-price-sheet).
 - **Two dollar figures, and they usually differ.** The `cold re-caches cost`
   line prices *every* cold re-cache in the session. The closing **estimated
-  avoidable premium** prices the same re-caches **minus each session's first
-  cache write**, which no session can avoid. Both read `$0.57` here only because
-  this session resumed into a still-warm cache and never paid a session-start
-  write; a session that starts cold shows the first number higher than the
-  second (a real one on the same machine: `~$0.67` against `~$0.48`). Either way
-  the figure is what cold re-caching cost *over* warm reads of the same tokens —
+  avoidable premium** prices only the avoidable ones: it leaves out the
+  session's first cache write, every compaction's write (`/compact`,
+  `auto-compact`, `inactivity+compact`) and model changes — the line above it
+  says so. Here the two figures are as far apart as they get: `$0.57` against
+  `$0.00`, because both of this session's cold turns were compactions. A model
+  change, when there is one, gets its own `chosen (model change)` line with its
+  tokens and dollars, so a cost you chose stays visible without being called a
+  leak. Either way the figure is what cold re-caching cost *over* warm reads of
+  the same tokens —
   a cold re-cache bills ~2× base input where the warm read it replaced would
   have billed ~0.1×, a 1.9× difference on this session's 1-hour bucket (1.15×
   had it been on the 5-minute one) — and both are estimates of **exposure**
@@ -149,62 +157,94 @@ Causes are attribution, not guesswork:
 | `inactivity+compact` | both happened inside the same gap; either explains it |
 | `unknown` | a rebuild the transcript can't explain — in practice mostly prefix drift (an edited CLAUDE.md, changed git state, MCP availability) |
 
+Each cause also sorts into one of three classes, which decide what the
+avoidable figures count:
+
+- **not avoidable** — `session start`, `/compact`, `auto-compact`, `compact`
+  and `inactivity+compact`: a write that had to happen once its cause did. A
+  compaction's write is the newly compacted context, cached for the first time.
+  `inactivity+compact` is here too: it is a `COLD(ttl)` turn with a compaction
+  inside the gap, so what it wrote is the compacted context, typically a
+  fraction of the context before the gap. Whatever the idle time did cost (the
+  compaction's own pass over the old context) is not a request the transcript
+  records usage for, so no recorded number measures it, and counting the write
+  as avoidable would claim more than the data shows.
+- **chosen** — `model change`: paid for on purpose, so not a leak, but reported
+  on its own line (and as `chosen_cold_tokens` in `--json`) so the cost stays
+  visible.
+- **avoidable** — `inactivity`, `claude upgrade` and `unknown`: rebuilds that
+  different timing or a steadier prefix *might* have spared.
+
+A compaction turn that reads some of its prefix back grades `PARTIAL`, not
+cold, yet still carries its cause: the cause census counts it, the cold totals
+don't. `--all` prints that difference when there is one.
+
 ## Where does the money leak? `--all`
 
 `--all` audits every session under `~/.claude/projects` (or a directory you
 pass), one line per session, ranked by **avoidable cold tokens**. Real output
-from one machine's 8 weeks of history:
+from one machine's 14 weeks of history:
 
 ```
 $ warmline-audit --all --price 3
-147 sessions under /Users/mb/.claude/projects  (13 more without API turns; ttl per session from its cache buckets, 60m fallback)
+74 sessions under /Users/mb/.claude/projects  (4 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  95% hot  (10,394 of 10,921 turns)
-cold events   198  (159 rebuilt, 39 ttl) -- 1.8% of all turns
+cache health  █████████████████████████░  97% hot  (18,577 of 19,182 turns)
+cold events   105  (36 rebuilt, 69 ttl) -- <1% of all turns
 
 start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770    11%      $7.38
-08-08 10:57  MimirBlue                  66     58     1        4     3         814,630   6.7%      $4.64
-08-11 12:03  MimirBlue                  48     40     1        4     3         624,201   5.1%      $3.56
+09-23 17:57  MimirBlue                 287    282     0        1     4       2,635,789    18%     $15.02
+09-25 23:38  claude-warmline           112    105     3        0     4       1,887,330    13%     $10.76
+09-21 22:34  MimirBlue                 311    294    13        1     3       1,289,790   8.9%      $7.35
    ⋮
-TOTAL                                10921  10394   329      159    39      12,134,109   100%     $69.16
+TOTAL                                19182  18577   500       36    69      14,473,962   100%     $82.50
 
-causes: inactivity 31 (13%)  inactivity+compact 8 (3.4%)  /compact 7 (3.0%)  auto-compact 37 (16%)  model change 3 (1.3%)  unknown 92 (39%)  session start 59 (25%)
+causes: inactivity 14.5M tok (63%, 64 events)  auto-compact 6.2M tok (27%, 164 events)  model change 1.3M tok (5.7%, 6 events)  session start 688k tok (3.0%, 30 events)  inactivity+compact 213k tok (<1%, 5 events)  /compact 212k tok (<1%, 5 events)
 
-where the cold came from
-  unknown             ██████████████████████████  92 (39%)
-  session start       █████████████████  59 (25%)
-  auto-compact        ██████████  37 (16%)
-  inactivity          █████████  31 (13%)
-  inactivity+compact  ██  8 (3.4%)
-  /compact            ██  7 (3.0%)
-  model change        █  3 (1.3%)
+where the cold came from  (by estimated premium over warm reads; events beside)
+  inactivity          ██████████████████████████  ~$82.50 (63%)  64 events
+  auto-compact        ███████████  ~$35.07 (27%)  164 events  not avoidable
+  model change        ██  ~$7.47 (5.7%)  6 events  chosen
+  session start       █  ~$3.92 (3.0%)  30 events  not avoidable
+  inactivity+compact  █  ~$1.22 (<1%)  5 events  not avoidable
+  /compact            █  ~$1.21 (<1%)  5 events  not avoidable
 
-avoidable cold = tokens re-cached cold, excluding each session's unavoidable first write
-premium = estimated avoidable premium of those re-caches vs warm reads (1.9x base input, per session's own cache bucket);
+cause totals include 169 compaction turns graded PARTIAL (6,363,767 tokens re-written); cold events and the cold totals count COLD turns only
+of 16,685,848 tokens re-cached on COLD turns, 14,473,962 are avoidable cold
+avoidable cold = tokens re-cached cold, excluding each session's first write, compaction writes (/compact, auto-compact, inactivity+compact: the compacted context, cached for the first time) and model changes (chosen)
+chosen (model change): 1,310,425 tokens re-cached cold, ~$7.47 over warm reads -- not counted as avoidable
+premium = estimated premium of the avoidable re-caches vs warm reads (1.15x and 1.9x base input, per session's own cache bucket);
 an estimate from recorded token counts, not billing data
 input $3/MTok as given on the command line
-input-side only: the 10,846,481 output tokens across these sessions bill at $15/MTok warm or cold
+input-side only: the 17,610,495 output tokens across these sessions bill at $15/MTok warm or cold
 
-estimated avoidable premium ~$69.16  (top 5 sessions: $21.36, other 142: $47.81)
+estimated avoidable premium ~$82.50  (top 5 sessions: $43.86, other 69: $38.64)
 ```
 
-How to read it: the percentages do the ranking for you. In the cause histogram,
-each cause carries its share of all cold-cause events — here 39% of the cold
-came from `unknown` (prefix drift), 16% from `auto-compact`, 13% from walking
-away past the TTL — so the events most likely to cost you are obvious at a
-glance, raw counts preserved beside them. The `share` column is each session's
-slice of all avoidable cold tokens: the top session alone holds 11% of the
-leak. Sessions at the top with big `ttl` counts are keep-warm candidates —
-money lost to walking away. Big `rebuilt`/`unknown` counts mean prefix churn:
-something rewrote the conversation prefix between turns. Lots of `auto-compact`
-means sessions routinely slamming into the context ceiling, where
-[compacting earlier and deliberately](#when-you-come-back-cold)
-is cheaper. The split on the last line is concentration: is the leak a few
-disasters, or spread thin? On this machine, thin — the top five sessions carry
-less than a third of the premium, which fits the honest headline that silent
-prefix drift (`unknown`, 39%) rebuilt more caches than compaction (44 events,
-19%) did. The leak is rarely where you expect it.
+How to read it: the chart ranks causes by what they cost — tokens re-cached,
+or with `--price` the estimated premium over warm reads — not by how often they
+happened, with the event count beside each. Here `auto-compact` fired 164 times
+to `inactivity`'s 64, but walking away past the TTL re-cached the most (63%),
+and it is the only cause this history's avoidable premium counts: the
+`not avoidable` and `chosen` tags mark the rest, and the footer prints the
+chosen cost on its own line. Ranking by count would have put compaction first
+and called it the leak. The `share` column is each session's slice of all
+avoidable cold tokens: the top session alone holds 18%. Sessions at the top
+with big `ttl` counts are keep-warm candidates — money lost to walking away.
+Big `rebuilt`/`unknown` counts mean prefix churn: something rewrote the
+conversation prefix between turns. Lots of `auto-compact` means sessions
+routinely slamming into the context ceiling, where
+[compacting earlier and deliberately](#when-you-come-back-cold) is cheaper
+even though no compaction write counts as avoidable. The split on the last
+line is concentration: is the leak a few disasters, or spread thin?
+
+**What the totals count.** `cold events` and every cold total count `COLD`
+turns only. The cause census and chart also count compaction turns that read
+part of their prefix back and graded `PARTIAL` (169 of them here, 6.4M
+tokens), which is why the causes add up to more than the cold events; the
+footer says so whenever it happens. The `TOTAL` row's token column is
+*avoidable* cold, and the footer prints it beside every token re-cached on a
+`COLD` turn (14.5M of 16.7M here), so neither is mistaken for the other.
 
 ## When you come back cold
 
@@ -332,20 +372,27 @@ and says `ASSUMED` when it is what got used.
 
 Every session must pay for its first cache write: a conversation has to be
 cached once before anything can ever be read back cheaply. warmline never
-counts that. What it counts as *avoidable* is every token re-cached cold
-**after** that point — rebuilds caused by TTL expiry, compaction, or prefix
-drift, which different timing (a keep-warm ping, an earlier deliberate
-`/compact`, a stable prefix) *might* have prevented.
+counts that. Nor does it count a compaction's write — `/compact`,
+`auto-compact`, or a compaction inside an idle gap (`inactivity+compact`):
+that write is the newly compacted context being cached for the first time, and
+once the compaction has happened no timing could have spared it. A model change
+is left out too, as **chosen**: you paid for it on purpose, so it is reported
+on its own line rather than called a leak. What it counts as *avoidable* is
+every other token re-cached cold — rebuilds caused by TTL expiry, a Claude Code
+upgrade, or prefix drift (`unknown`), which different timing (a keep-warm ping,
+a stable prefix) *might* have prevented. (Before v2.7.0 compaction and model
+changes counted too, and only the first write was left out.)
 
 **Read it as a measure of exposure, not of money actually wasted.** The word
-"avoidable" in the printed label marks one specific exclusion — each session's
-unavoidable first write — and nothing more. It is not a claim that everything
-counted could have been prevented, and a fair amount of it could not have been:
-a TTL expiry while your laptop was asleep is counted, though no ping could have
-fired; so is an `auto-compact`, which
-[nothing prevents](KEEP-WARM.md#auto-compact-the-one-you-dont-choose) once the
-context window fills. What the number is good for is comparison and ranking —
-which sessions, and which causes, carry your exposure — not a refund estimate.
+"avoidable" in the printed label marks those exclusions and nothing more. It is
+not a claim that everything counted could have been prevented, and some of it
+could not have been: a TTL expiry while your laptop was asleep is counted,
+though no ping could have fired. The exclusions lean the other way on purpose:
+when the idle time before an `inactivity+compact` turn did cost something (the
+compaction's own pass over the old context), the transcript records no usage
+for that request, so warmline counts nothing rather than guess. What the number
+is good for is comparison and ranking — which sessions, and which causes, carry
+your exposure — not a refund estimate.
 
 And all of it is computed from token counts recorded in your own transcripts:
 warmline never sees, and cannot see, what Anthropic actually billed your
@@ -367,6 +414,16 @@ account.
     both the sessions and the total), each session's own
     `price_in_per_mtok`, and the run's headline
     `price_in_per_mtok`/`price_out_per_mtok` plus `price_source`.
+  - **Per-cause and per-class totals**, on the sessions, the `total` and the
+    single-session `summary` alike: `causes` (events) and `cause_tokens`
+    (tokens written by the turns each cause explains), `chosen_cold_tokens`
+    (model changes), and `compact_partial_turns`/`compact_partial_tokens` —
+    the compaction turns graded `PARTIAL`, which are in `causes` and
+    `cause_tokens` but in no cold total, so `sum(cause_tokens)` equals
+    `tokens_recached_cold + compact_partial_tokens`. With `--price`,
+    `chosen_premium_usd` rides beside `avoidable_premium_usd` (and in the
+    single-session summary), and the `--all` total adds `cause_premium_usd`,
+    the per-cause figures the priced chart ranks by.
   - **single-session `--json`** — a `summary` object plus one record per turn.
     With `--price` the summary carries `cold_extra_usd` (every cold re-cache,
     session-start write included), `cache_read_usd` and `output_usd`. Note that

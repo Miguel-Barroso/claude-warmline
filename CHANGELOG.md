@@ -4,6 +4,70 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [Unreleased]
+
+The audit's headline figure changes meaning: "avoidable" no longer counts
+compaction or model changes, and causes rank by what they cost, not by how
+often they happened. Existing `--json` keys keep their names and shapes;
+`avoidable_cold_tokens` and `avoidable_premium_usd` now hold the narrower
+figure. Minor version (2.7.0).
+
+### Changed
+- **Compaction writes no longer count as avoidable.** A compaction's write is
+  the newly compacted context being cached for the first time, and once the
+  compaction has happened no timing could have spared it. `/compact`,
+  `auto-compact` and `inactivity+compact` now sit with `session start`
+  outside avoidable cold and the avoidable premium. `inactivity+compact` is a
+  `COLD(ttl)` turn with a compaction inside the gap: what it writes is the
+  compacted context, on this machine 30–56k tokens after a gap that left
+  137–167k behind. The cost the idle time did cause (the compaction's own
+  pass over the old context) is not a request the transcript records usage
+  for, so warmline counts nothing rather than guess.
+- **Model changes are "chosen", not avoidable.** They leave avoidable cold too,
+  but get their own `chosen (model change)` line with tokens and, priced,
+  dollars, so a cost you chose stays visible without being called a leak.
+- **Causes rank by cost.** The `causes:` line and the "where the cold came
+  from" chart are ranked and sized by tokens re-cached (by estimated premium
+  with `--price`), with each cause's event count beside it, and the chart
+  tags the `not avoidable` and `chosen` causes. Ranked by count, one machine's
+  history put `auto-compact` first at 61% of events. Ranked by tokens, idle
+  time past the TTL is nearly two-thirds of the re-caching.
+- **`--json` gains per-cause and per-class totals**: `cause_tokens`,
+  `chosen_cold_tokens` and `compact_partial_turns`/`compact_partial_tokens`
+  on every session, the `--all` total and the single-session summary. Priced,
+  you also get `chosen_premium_usd`, and the `--all` total gets
+  `cause_premium_usd`. Nothing existing was renamed or removed.
+- **Footer lines say exactly what is excluded.** `avoidable cold = ...` names
+  the first write, the three compaction causes and model changes, and the
+  single-session report now prints it too. `premium = ...` prices "the
+  avoidable re-caches".
+
+### Fixed
+- **`--all` totals that looked contradictory now say what they count.** The
+  cause census counted compaction turns graded `PARTIAL` (they read part of
+  their prefix back), while `cold events` and every cold total count `COLD`
+  turns only. So the causes added up to 303 against 114 cold events, and
+  summing every attributed turn's write gave 24.3M tokens against a
+  `tokens_recached_cold` of 17.2M. The `TOTAL` row's 16.4M was the narrower
+  avoidable figure on top of that. The numbers were right; the report never
+  said which was which. `--all` now prints how many compaction `PARTIAL`
+  turns the cause totals include and the full `COLD` re-cache beside the
+  avoidable part.
+
+### Tests
+- `avoidable-classes`: of a session's 70,200 cold tokens only the plain
+  inactivity write counts. The model change is reported as chosen, with its
+  own dollar line.
+- `cause-totals`: `--all --json` per-cause totals equal the per-turn sums of
+  each session's own `--json`, and the compaction `PARTIAL`s are exactly the
+  gap to `tokens_recached_cold`. The human footer states it.
+- `rank-by-cost`: three auto-compacts outnumber everything but rank last.
+  Unpriced, a 5-minute session's 100k rebuild ranks first. Priced, a 1-hour
+  session's 70k rebuild overtakes it (1.9x against 1.15x).
+- `all`, `all-pct`, `all-price`, `all-json`, `histogram`, `premium-line` and
+  `upgrade-cause` updated for the new ranking and the narrower avoidable
+  figure.
+
 ## [2.6.1] — 2026-09-25
 
 A Homebrew upgrade stops printing notes that weren't true. Output only; what

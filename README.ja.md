@@ -172,39 +172,38 @@ warmline はそれを整形して色を付けるだけです。かつてはタ�
 
 ## 説明と測定: 監査
 
-ステータスラインの `HOT` ひとつも有用です。10 週間で 211 回冷えていたと分かることは、
+ステータスラインの `HOT` ひとつも有用です。14 週間で 105 回冷えていたと分かることは、
 もっと有用です。
 
 `warmline audit` は、Claude Code が記録済みの各 API リクエストに書き残した使用量
 フィールドで採点します — ステータスラインと違い、1 ターンの遅れはありません。
 `--all` は同じことをこのマシンの全セッションに対して行い、並べ替えます。(実行される
 のはインストール済みの `warmline-audit` コマンドです。どちらの綴りでも動くので、
-既存のスクリプトはそのまま使えます。) 以下はあるマシンの 10 週間の履歴に対する実際の
+既存のスクリプトはそのまま使えます。) 以下はあるマシンの 14 週間の履歴に対する実際の
 出力です。例を安定させるため一律 `--price 3` で計上しています — 値なしの `--price`
 なら、プロジェクトごとに実際のレートを解いて使います:
 
 ```
 $ warmline-audit --all --price 3
-132 sessions under /Users/mb/.claude/projects  (8 more without API turns; ttl per session from its cache buckets, 60m fallback)
+74 sessions under /Users/mb/.claude/projects  (4 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  96% hot  (13,378 of 13,994 turns)
-cold events   211  (158 rebuilt, 53 ttl) -- 1.5% of all turns
+cache health  █████████████████████████░  97% hot  (18,577 of 19,182 turns)
+cold events   105  (36 rebuilt, 69 ttl) -- <1% of all turns
 
 start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770   9.7%      $7.38
+09-23 17:57  MimirBlue                 287    282     0        1     4       2,635,789    18%     $15.02
    ⋮
-TOTAL                                13994  13378   405      158    53      13,306,845   100%     $75.85
+TOTAL                                19182  18577   500       36    69      14,473,962   100%     $82.50
 
-where the cold came from
-  unknown             ██████████████████████████  83 (29%)
-  auto-compact        ██████████████████████  70 (25%)
-  session start       ██████████████████████  69 (24%)
-  inactivity          ███████████  34 (12%)
-  inactivity+compact  ██████  19 (6.7%)
-  /compact            ██  7 (2.5%)
-  model change        █  1 (<1%)
+where the cold came from  (by estimated premium over warm reads; events beside)
+  inactivity          ██████████████████████████  ~$82.50 (63%)  64 events
+  auto-compact        ███████████  ~$35.07 (27%)  164 events  not avoidable
+  model change        ██  ~$7.47 (5.7%)  6 events  chosen
+  session start       █  ~$3.92 (3.0%)  30 events  not avoidable
+  inactivity+compact  █  ~$1.22 (<1%)  5 events  not avoidable
+  /compact            █  ~$1.21 (<1%)  5 events  not avoidable
 
-estimated avoidable premium ~$75.85  (top 5 sessions: $22.19, other 127: $53.66)
+estimated avoidable premium ~$82.50  (top 5 sessions: $43.86, other 69: $38.64)
 ```
 
 これが、オブザーバビリティと飾りのステータスラインの違いです — 手を打てる (あるいは
@@ -221,18 +220,23 @@ warmline は原因を名指ししないだけです。Anthropic は、記録に�
 全体の拒否、プラグインの有効化/無効化、前置きにツールを読み込む MCP サーバーへの
 接続。どれもここに落ちます。セッション途中の
 CLAUDE.md 編集は該当しません: Anthropic はそれをキャッシュが*保たれる*操作として
-挙げています。このマシンでは `unknown` がコールドの 29% を占めて依然として最大の
-単独バケットであり、最悪の 1 セッションだけで全体の 9.7% です — これは「最大の割合が
-未説明である」と読むべきもので、診断ではなく、調べる理由です。(判定は記録された
+挙げています。`unknown` が大きいときは「最大の割合が未説明である」と読むべきもので、
+診断ではなく、調べる理由です。(この履歴にはたまたま 1 件もありません。) グラフは原因を
+回数ではなくコストの順に並べます: ここでは `auto-compact` が他のどれよりも 2 倍以上
+多く起きていますが、最も多く再キャッシュしたのは TTL を超えて席を外したことで、
+プレミアムに数えられる原因はそれだけです。(判定は記録された
 使用量に基づきますが、`COLD(rebuilt)` と `COLD(ttl)` の切り分けは TTL 次第です — TTL
 はセッションごとに、そのキャッシュバケットの記録から自動検出されます。)
 
 **これらの金額は、あなた自身の記録に残るトークン数から算出した損失の推定であり、
 請求データではありません** — warmline は Anthropic が実際にいくら請求したかを見て
 いませんし、見ることもできません。レポート最終行のラベルは
-`estimated avoidable premium` で、そこでの「avoidable (避けられる)」は*各セッション
-で避けようのない最初の書き込みを除いた*という意味だけを持ちます。実際には防げない
-ものも含まれます — 例えばノートを閉じている間に起きた TTL 失効です。
+`estimated avoidable premium` です。「avoidable (避けられる)」からは、各セッションの
+最初のキャッシュ書き込みと、すべてのコンパクションの書き込み — 圧縮されたコンテキストを
+初めてキャッシュするもので、コンパクションが起きた以上どんなタイミングでも避けられ
+ません — を除き、さらに自分で選んだモデル変更も除いて別の行に示します。それでも数えて
+いるものの中には防げなかったものも含まれます — 例えばノートを閉じている間に起きた
+TTL 失効です。
 
 **warmline は価格表を同梱しません。** 表は古くなりますし、Sonnet から Opus に
 切り替えた瞬間に間違った額を出します。`--price` を値なしで渡すと、Claude Code 自身
