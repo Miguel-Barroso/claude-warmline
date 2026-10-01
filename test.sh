@@ -2056,7 +2056,7 @@ fi
 # tagged, aggregate health bar above the table.
 # (UTF-8 stdout pinned: a Windows pipe is cp1252, which takes the '#' bars
 # that ascii-fallback above already covers)
-out=$(PYTHONIOENCODING=utf-8 ./warmline-audit --all "$ROOT")
+out=$(PYTHONIOENCODING=utf-8 ./warmline-audit --all "$ROOT" | tr -d '\r')
 if [[ "$out" == *"where the cold came from"* \
    && "$out" == *$'\n'"  session start       ██████████████████████████  45k (50%)  2 events  not avoidable"* \
    && "$out" == *$'\n'"  /compact            ██████████  17k (19%)  2 events  not avoidable"* \
