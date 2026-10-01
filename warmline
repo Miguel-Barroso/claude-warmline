@@ -44,6 +44,10 @@ if [ "$WL_WIN" = 1 ]; then SL_CMD="${WL_PY[*]} \"$DEST\""; fi
 SETTINGS="$CLAUDE_DIR/settings.json"
 CLAUDE_MD="$CLAUDE_DIR/CLAUDE.md"
 POLICY="$CLAUDE_DIR/warmline-keep-warm.md"
+# keep-warm transition history, one "UTC-time state" line per change, read by
+# warmline-audit. The statusline appends to it on every change it sees (hand
+# edits included); on/off below record theirs at once. Same format both ways.
+KW_LOG="$CLAUDE_DIR/warmline-keepwarm.log"
 STATE_DIR="$CLAUDE_DIR/warmline-state"
 # AFK mode: opt-in, off until `warmline afk enable` records the user's consent.
 # The dir holds that consent, the rendered procedure and one marker per session
@@ -123,6 +127,33 @@ kw_state() {
   elif [ "$b$e" = 10 ]; then echo begin-only
   elif [ "$b$e" = 01 ]; then echo end-only
   else echo off; fi
+}
+
+# Append the current state to $KW_LOG if it differs from the log's last line.
+# A record that can't be written must never fail the command that changed the
+# state, so every failure here is swallowed.
+kw_record() {
+  local now last=""
+  now="$(kw_state)"
+  case "$now" in on|off) ;; *) now=inconsistent ;; esac
+  [ -d "$CLAUDE_DIR" ] || return 0
+  if [ -f "$KW_LOG" ]; then last="$(tail -n 1 "$KW_LOG" 2>/dev/null || true)"; fi
+  [ "${last##* }" = "$now" ] && return 0
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$now" >> "$KW_LOG" 2>/dev/null || true
+}
+
+# "on at 2026-10-01T12:00:00Z", the last recorded transition; empty with no log
+kw_last_change() {
+  local last=""
+  if [ -f "$KW_LOG" ]; then last="$(tail -n 1 "$KW_LOG" 2>/dev/null || true)"; fi
+  case "$last" in *" "*) echo "${last##* } at ${last%% *}" ;; esac
+}
+
+kw_history() { # status's last line, only once there is a history to point at
+  local c
+  c="$(kw_last_change)"
+  if [ -n "$c" ]; then echo "  history  last recorded: $c  (in $KW_LOG)"; fi
+  return 0
 }
 
 kw_remove_block() { # both markers known present; user text around it survives
@@ -213,20 +244,24 @@ PY
       echo "keep-warm  ON"
       echo "  scope    global -- applies to every project  (block in $CLAUDE_MD)"
       echo "  policy   $pol"
+      kw_history
       return 0 ;;
     off)
       echo "keep-warm  OFF"
       echo "  enable   warmline keep-warm on"
+      kw_history
       return 1 ;;
     begin-only)
       echo "keep-warm  INCONSISTENT"
       echo "  found    begin marker without its end marker in $CLAUDE_MD"
       echo "  fix      warmline keep-warm off  (removes warmline's markers only), then on"
+      kw_history
       return 2 ;;
     end-only)
       echo "keep-warm  INCONSISTENT"
       echo "  found    end marker without its begin marker in $CLAUDE_MD"
       echo "  fix      warmline keep-warm off  (removes warmline's markers only), then on"
+      kw_history
       return 2 ;;
   esac
 }
@@ -442,7 +477,8 @@ PY
 uninstall_usage() {
   cat <<EOF
 warmline uninstall: take claude-warmline back off this machine. Removes
-the statusline and its wiring, the policy file, the keep-warm block from
+the statusline and its wiring, the policy file and the keep-warm history
+log, the keep-warm block from
 $CLAUDE_MD,
 the PATH line install.sh added to your shell startup file, and both
 commands. Everything ./install.sh --uninstall removes, without needing
@@ -507,6 +543,9 @@ cmd_uninstall() {
   setup_remove
   rm -rf "$STATE_DIR"
   [ "$(kw_state)" = off ] || kw_off
+  # after kw_off, which records nothing here: uninstall isn't a keep-warm
+  # decision, and a history nothing will read again is just a leftover
+  rm -f "$KW_LOG"
   path_block_remove
 
   # Then the commands themselves. The copy running this is one candidate; the
@@ -578,6 +617,9 @@ PY
     off) kw_line="OFF  (enable: warmline keep-warm on)" ;;
     *)   kw_line="INCONSISTENT  (details: warmline keep-warm status)" ;;
   esac
+  local kw_last
+  kw_last="$(kw_last_change)"
+  if [ -n "$kw_last" ]; then kw_line="$kw_line -- last recorded: $kw_last"; fi
   local afk_line
   if ! afk_enabled; then
     afk_line="OFF  (opt-in, at your own risk: warmline afk enable)"
@@ -1683,8 +1725,10 @@ case "${1:-}" in
   afk) shift; cmd_afk "$@" ;;
   keep-warm)
     case "${2:-}" in
-      on) kw_on ;;
-      off) kw_off ;;
+      # recorded at once rather than at the statusline's next render; a refused
+      # `on` changed nothing, so it exits before there is anything to record
+      on) kw_on; kw_record ;;
+      off) kw_off; kw_record ;;
       status) kw_status ;;
       ""|--help|-h|help) kw_usage ;;
       *) echo "warmline: unknown keep-warm action '${2}' (see warmline keep-warm --help)" >&2; exit 2 ;;

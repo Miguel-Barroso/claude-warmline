@@ -79,6 +79,14 @@ answers "is it on"; a statusline field that has read the same green `on` for
 three months is wallpaper, and next to a red `cache COLD` it reads as a
 contradiction.
 
+The same reading is also history: when it differs from the last line of
+warmline-keepwarm.log in the config dir, one line -- UTC time and on, off or
+inconsistent -- is appended there, so `warmline audit` can later tell whether
+the policy was in place when a session went cold from inactivity. Only
+transitions are written, so a steady state costs one small read per render;
+the log is never consulted for the display, and a log that can't be read or
+written costs nothing but the record.
+
 The afk field appears only while this session is in AFK mode (`warmline
 afk`, opt-in): someone typed `afk` and walked away, and the session is pinging
 itself to keep the cache warm until they are back:
@@ -88,7 +96,8 @@ itself to keep the cache warm until they are back:
 
 Configuration (environment variables):
   WARMLINE_NO_COLOR   if set (or NO_COLOR), plain output without ANSI colors
-  WARMLINE_NO_KEEPWARM  if set, never show the keep-warm field
+  WARMLINE_NO_KEEPWARM  if set, never show the keep-warm field (its
+                      transitions are still logged for the auditor)
   WARMLINE_NO_QUOTA   if set, never show the rate-limit field
   WARMLINE_NO_AFK     if set, never show the AFK field
   WARMLINE_CTX_WARN_PCT  fixed context-window percentage at which the ctx
@@ -127,6 +136,12 @@ QUOTA_SHOW_PCT, QUOTA_WARN_PCT, QUOTA_CRIT_PCT = 50, 80, 95
 CLAUDE_DIR = os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude")
 KW_BEGIN = "<!-- >>> claude-warmline keep-warm >>> -->"
 KW_END = "<!-- <<< claude-warmline keep-warm <<< -->"
+# keep-warm transition history for the auditor; `warmline keep-warm on|off`
+# appends to the same file in the same format
+KW_LOG = os.path.join(CLAUDE_DIR, "warmline-keepwarm.log")
+# a transition is a few dozen bytes, so this is thousands of them; past it the
+# oldest half goes, and the gaps before what's left read as unknown, not guessed
+KW_LOG_MAX_BYTES = 65536
 SHOW_KEEPWARM = not os.environ.get("WARMLINE_NO_KEEPWARM")
 SHOW_QUOTA = not os.environ.get("WARMLINE_NO_QUOTA")
 SHOW_AFK = not os.environ.get("WARMLINE_NO_AFK")
@@ -283,6 +298,51 @@ def keep_warm_state():
     return "on" if norm(body) == norm(policy) else "stale"
 
 
+def record_keep_warm(state):
+    """Append keep_warm_state()'s reading to KW_LOG if it changed.
+
+    Recorded in the CLI's vocabulary -- on, off, inconsistent -- because the
+    question the log answers is whether a policy was in place, and a stale
+    one still is: the agent reads whatever wording the block holds. Hand
+    edits land here too, at the first render that sees them. Callers must
+    swallow every exception: a history record is never worth a statusline.
+    """
+    logged = {"stale": "on", "?": "inconsistent"}.get(state, state)
+    size, last = 0, None
+    try:
+        with open(KW_LOG, "rb") as f:
+            # the last line is the whole comparison, so read only the end
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 256))
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+        if lines:
+            last = lines[-1].split()[-1].decode("utf-8", "replace")
+    except FileNotFoundError:
+        pass
+    if last == logged:
+        return
+    line = ("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                         logged)).encode("utf-8")
+    if size < KW_LOG_MAX_BYTES:
+        # binary append: LF on every platform, and one small write per line
+        with open(KW_LOG, "ab") as f:
+            f.write(line)
+        return
+    with open(KW_LOG, "rb") as f:
+        old = f.read().splitlines(True)
+    tmp = "%s.%d.tmp" % (KW_LOG, os.getpid())
+    try:
+        with open(tmp, "wb") as f:
+            f.write(b"".join(old[len(old) // 2:]) + line)
+        # Windows refuses this while another render holds the log open; the
+        # transition is then simply recorded by the next render
+        os.replace(tmp, KW_LOG)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def afk_field(session_id):
     """'afk since 13:10, 2 pings' while this session is AFK, else None.
 
@@ -417,8 +477,12 @@ def main():
         if afk:
             parts.append(paint(afk, YELLOW))
 
+    kw = keep_warm_state()
+    try:
+        record_keep_warm(kw)
+    except Exception:
+        pass  # unreadable, unwritable or odd: the line still prints
     if SHOW_KEEPWARM:
-        kw = keep_warm_state()
         # only the states that need doing something about: a correct policy
         # and a deliberate absence are both silent
         if kw in ("stale", "?"):

@@ -36,6 +36,12 @@ it reports INCONSISTENT, with the fix, rather than a false ON; edit the policy
 text in place and it stays ON but reports `policy modified`. For scripts, the
 exit code is the answer: `0` on, `1` off, `2` inconsistent.
 
+From now on the state is also recorded, though never trusted for this
+answer: `warmline keep-warm on|off` and the statusline append each transition to `~/.claude/warmline-keepwarm.log`, so
+[`warmline audit`](AUDIT.md#was-keep-warm-on) can tell whether a session that
+went cold from inactivity did so with the policy on or off. `status` shows the
+last record on a `history` line. It still answers from CLAUDE.md itself.
+
 `policy modified` is also what an upgrade looks like from the inside: the
 installer refreshes `~/.claude/warmline-keep-warm.md`, but the block your
 agent actually reads lives in CLAUDE.md, and it is that block that decides

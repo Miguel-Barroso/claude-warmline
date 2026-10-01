@@ -318,7 +318,8 @@ if os.environ["DEST"] in str(sl.get("command", "")):
     print(f"removed statusLine from {path}")
 PY
   fi
-  rm -f "$DEST" "$CLI" "$AUDIT" "$POLICY" "$AFK_SRC"
+  # warmline-keepwarm.log: the statusline's record of keep-warm transitions
+  rm -f "$DEST" "$CLI" "$AUDIT" "$POLICY" "$AFK_SRC" "$CLAUDE_DIR/warmline-keepwarm.log"
   rm -rf "$STATE_DIR"
   if [ -f "$CLAUDE_MD" ]; then
     MB="$MARK_BEGIN" ME="$MARK_END" python3 - "$CLAUDE_MD" <<'PY'
@@ -379,11 +380,11 @@ fetch warmline "$CLI";          chmod +x "$CLI"
 fetch warmline-audit "$AUDIT";  chmod +x "$AUDIT"
 
 # the statusline used to infer cache state from per-session stamp files; it
-# now reads Claude Code's own prompt_cache fields and keeps no state at all,
+# now reads Claude Code's own prompt_cache fields and keeps no cache state,
 # so an upgrade leaves this directory behind as dead weight
 if [ -d "$STATE_DIR" ]; then
   rm -rf "$STATE_DIR"
-  echo "removed $STATE_DIR (the statusline no longer keeps state)"
+  echo "removed $STATE_DIR (the statusline no longer keeps per-session state)"
 fi
 
 # the block already in CLAUDE.md is what the agent actually reads, so an

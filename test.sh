@@ -287,6 +287,69 @@ else
 fi
 rm -f "$KWMD"
 
+# The same reading is also history for the auditor: a line in
+# warmline-keepwarm.log on every transition, in the CLI's vocabulary (a stale
+# block is still a policy in place; one marker alone is inconsistent), and
+# nothing at all while the state holds. Its own config dir, so the count of
+# lines is exactly the count of transitions below.
+KL="$SCRATCH/kwlog-cfg"; mkdir -p "$KL"
+KLOG="$KL/warmline-keepwarm.log"
+kwr() { printf '%s' "$(mkpayload kl "$(pc 40 1h)")" | CLAUDE_CONFIG_DIR="$KL" "$@" ./statusline.py; }
+kwstates() { [ -f "$KLOG" ] && awk '{print $2}' "$KLOG" | paste -sd, - || echo none; }
+kwr >/dev/null; kwr >/dev/null                        # off, then off again
+s1=$(kwstates)
+printf '%s\npolicy body\n%s\n' "$BLOCK_B" "$BLOCK_E" > "$KL/CLAUDE.md"
+printf 'policy body\n' > "$KL/warmline-keep-warm.md"
+kwr >/dev/null; kwr >/dev/null                        # on, held
+printf 'a later wording\n' > "$KL/warmline-keep-warm.md"
+kwr >/dev/null                                        # stale: still on
+printf '%s\npolicy body\n' "$BLOCK_B" > "$KL/CLAUDE.md"
+kwr env WARMLINE_NO_KEEPWARM=1 >/dev/null             # hidden, still recorded
+rm -f "$KL/CLAUDE.md"
+kwr >/dev/null
+s2=$(kwstates)
+if [[ "$s1" == off && "$s2" == off,on,inconsistent,off ]] \
+   && grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z off$' "$KLOG" \
+   && ! grep -q $'\r' "$KLOG"; then
+  echo "ok   kw-log-transitions: one line per change, none while steady"; pass=$((pass + 1))
+else
+  echo "FAIL kw-log-transitions: $s1 / $s2"; cat "$KLOG"; fail=$((fail + 1))
+fi
+
+# A record that can't be read or written costs the record, never the line:
+# a directory where the log should be, and a log full of junk (appended to,
+# since junk is not the current state).
+rm -f "$KLOG"; mkdir "$KLOG"
+rc=0; out=$(kwr 2>&1) || rc=$?
+rmdir "$KLOG"; printf 'garbage\n\n' > "$KLOG"
+rc2=0; out2=$(kwr 2>&1) || rc2=$?
+if [[ "$rc" == 0 && "$out" == "Test | proj | ctx 43% (85k) | cache HOT (cold ~$(at 40))" \
+   && "$rc2" == 0 && "$out2" == *"cache HOT"* && "$(tail -n 1 "$KLOG")" == *" off" ]]; then
+  echo "ok   kw-log-failure: unwritable log, line unchanged; junk log, appended"; pass=$((pass + 1))
+else
+  echo "FAIL kw-log-failure: rc=$rc ${out@Q} / rc2=$rc2 ${out2@Q}"; fail=$((fail + 1))
+fi
+
+# Bounded: past 64 KiB the oldest half goes, the new transition still lands.
+python3 - "$KLOG" <<'PY'
+import sys
+with open(sys.argv[1], "w", newline="\n") as f:
+    for i in range(3000):
+        f.write("2026-01-01T00:00:00Z %s\n" % ("off" if i % 2 else "on"))
+PY
+before=$(($(wc -c < "$KLOG")))
+printf '%s\npolicy body\n%s\n' "$BLOCK_B" "$BLOCK_E" > "$KL/CLAUDE.md"
+kwr >/dev/null
+after=$(($(wc -c < "$KLOG")))
+rm -f "$KL/CLAUDE.md"
+if [[ "$before" -gt 65536 && "$after" -lt "$before" && "$after" -gt 30000 \
+      && "$(tail -n 1 "$KLOG")" == *" on" ]] \
+   && [ -z "$(find "$KL" -name "*.tmp")" ]; then
+  echo "ok   kw-log-bounded: $before -> $after bytes, newest transition kept"; pass=$((pass + 1))
+else
+  echo "FAIL kw-log-bounded: $before -> $after"; tail -n 2 "$KLOG"; fail=$((fail + 1))
+fi
+
 # Auto-compact proximity: the compaction nobody chooses fires near the top of
 # the window and rewrites the prefix, so ctx goes yellow before it -- at the
 # threshold Claude Code actually uses (window - 33000), not a round guess.
@@ -623,6 +686,71 @@ if [[ "$out" == *"COLD(rebuilt)  <- unknown"* && "$out" != *"claude upgrade"* ]]
   echo "ok   upgrade-nofield: missing version behaves as before (unknown)"; pass=$((pass + 1))
 else
   echo "FAIL upgrade-nofield:"; echo "$out"; fail=$((fail + 1))
+fi
+
+# Keep-warm attribution: each inactivity cold turn (COLD(ttl)) takes the
+# state recorded when its idle gap began -- the previous turn -- and a gap
+# that began before the log's first line is unknown, never back-filled. The
+# rebuild at 06:05 is not inactivity and stays out of the split entirely.
+KWA="$SCRATCH/kwaudit"; mkdir -p "$KWA/projects/p"
+cat > "$KWA/projects/p/kw.jsonl" <<'EOF'
+{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"id":"k0","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":10000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T02:00:00Z","message":{"id":"k1","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":11000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T04:00:00Z","message":{"id":"k2","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":12000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T06:00:00Z","message":{"id":"k3","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":13000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T06:05:00Z","message":{"id":"k4","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":1000,"input_tokens":5}}}
+{"type":"assistant","timestamp":"2026-01-01T08:00:00Z","message":{"id":"k5","usage":{"cache_read_input_tokens":0,"cache_creation_input_tokens":14000,"input_tokens":5}}}
+EOF
+kwa() { CLAUDE_CONFIG_DIR="$KWA" ./warmline-audit "$@"; }
+kwj() { python3 -c 'import json, sys
+d = json.load(sys.stdin); k = d["summary" if "summary" in d else "total"]["keep_warm_inactivity"]
+print(" ".join("%s=%d/%d" % (s, k[s]["events"], k[s]["tokens"])
+               for s in ("on", "off", "inconsistent", "unknown")), k["recorded_since"])'; }
+nolog=$(kwa --json "$KWA/projects/p/kw.jsonl" | kwj)
+nolog_h=$(kwa "$KWA/projects/p/kw.jsonl")
+printf '%s\n' '2026-01-01T01:00:00Z on' 'not a record' '2026-01-01T03:00:00Z off' \
+  '2026-01-01T05:00:00Z inconsistent' > "$KWA/warmline-keepwarm.log"
+one=$(kwa --json "$KWA/projects/p/kw.jsonl" | kwj)
+all=$(kwa --all --json | kwj)
+out=$(kwa "$KWA/projects/p/kw.jsonl")
+outall=$(kwa --all)
+want='on=1/12000 off=1/13000 inconsistent=1/14000 unknown=1/11000 2026-01-01T01:00:00+00:00'
+if [[ "$nolog" == 'on=0/0 off=0/0 inconsistent=0/0 unknown=4/50000 None' \
+   && "$nolog_h" == *"unknown"*"4 (100%)"*"nothing recorded yet"* \
+   && "$nolog_h" != *"'on' means"* \
+   && "$one" == "$want" && "$all" == "$want" \
+   && "$out" == *"keep-warm when each inactivity gap began (4 cold turns):"* \
+   && "$out" == *"keep-warm on        1 (25%)  12,000 tokens re-cached"* \
+   && "$out" == *"keep-warm off       1 (25%)  13,000 tokens re-cached"* \
+   && "$out" == *"block malformed     1 (25%)  14,000"* \
+   && "$out" == *"unknown             1 (25%)  11,000 tokens re-cached  -- before warmline began recording it"* \
+   && "$out" == *"not that it misfired"* \
+   && "$outall" == *"keep-warm on        1 (25%)"* ]]; then
+  echo "ok   audit-keepwarm: inactivity split on/off/malformed/unknown, JSON too"; pass=$((pass + 1))
+else
+  echo "FAIL audit-keepwarm: $nolog / $one / $all"; echo "$out"; fail=$((fail + 1))
+fi
+
+# The log describes only this config dir's own transcripts. The same session
+# copied outside <config>/projects -- or another tree passed to --all, say
+# the other side of a WSL machine -- ran under a CLAUDE.md this log never
+# saw, so the log present above must label none of it.
+KWF="$SCRATCH/kwforeign"; mkdir -p "$KWF/p"
+cp "$KWA/projects/p/kw.jsonl" "$KWF/p/kw.jsonl"
+f_one=$(kwa --json "$KWF/p/kw.jsonl" | kwj)
+f_all=$(kwa --all --json "$KWF" | kwj)
+f_out=$(kwa "$KWF/p/kw.jsonl")
+f_outall=$(kwa --all "$KWF")
+f_flag=$(kwa --json "$KWF/p/kw.jsonl" | python3 -c 'import json, sys
+print(json.load(sys.stdin)["summary"]["keep_warm_inactivity"]["log_applies"])')
+fwant='on=0/0 off=0/0 inconsistent=0/0 unknown=4/50000 None'
+if [[ "$f_one" == "$fwant" && "$f_all" == "$fwant" && "$f_flag" == False \
+   && "$f_out" == *"unknown             4 (100%)  50,000 tokens re-cached  -- not under "*"keep-warm record doesn't cover it"* \
+   && "$f_out" != *"keep-warm on   "* && "$f_out" != *"keep-warm off  "* \
+   && "$f_outall" == *"unknown             4 (100%)"* && "$f_outall" != *"keep-warm on   "* ]]; then
+  echo "ok   audit-keepwarm-foreign: a transcript outside the config dir is all unknown"; pass=$((pass + 1))
+else
+  echo "FAIL audit-keepwarm-foreign: $f_one / $f_all / $f_flag"; echo "$f_out"; fail=$((fail + 1))
 fi
 
 # --all --price: the TOTAL row itself carries the premium (8200 avoidable
@@ -1112,6 +1240,26 @@ if [[ "$ok_nofile" == yes ]] && grep -qF "$MB" "$IROOT/CLAUDE.md"; then
   echo "ok   cli-from-nothing: on works with missing and empty CLAUDE.md"; pass=$((pass + 1))
 else
   echo "FAIL cli-from-nothing: ok_nofile=$ok_nofile"; fail=$((fail + 1))
+fi
+
+# on/off record their transition at once, in the statusline's format, and only
+# a real change: a repeated `on` adds nothing. Both status views then show the
+# last record; before any record they show nothing extra.
+KC="$SCRATCH/kwcli"
+kc() { CLAUDE_CONFIG_DIR="$KC" ./warmline "$@"; }
+pre=$(kc keep-warm status || true)
+kc keep-warm on >/dev/null; kc keep-warm on >/dev/null
+s_on=$(awk '{print $2}' "$KC/warmline-keepwarm.log" | paste -sd, -)
+kc keep-warm off >/dev/null; kc keep-warm off >/dev/null
+s_off=$(awk '{print $2}' "$KC/warmline-keepwarm.log" | paste -sd, -)
+st=$(kc keep-warm status || true); ov=$(kc status)
+if [[ "$s_on" == on && "$s_off" == on,off && "$pre" != *"history"* \
+   && "$st" == *"history  last recorded: off at 20"*"Z  (in $KC/warmline-keepwarm.log)"* \
+   && "$(echo "$ov" | grep keep-warm)" == *" OFF "*"-- last recorded: off at 20"* ]] \
+   && grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z on$' "$KC/warmline-keepwarm.log"; then
+  echo "ok   cli-kw-record: on/off logged at once, repeats not, status shows it"; pass=$((pass + 1))
+else
+  echo "FAIL cli-kw-record: $s_on / $s_off"; echo "$st"; echo "$ov"; fail=$((fail + 1))
 fi
 
 # A hand-edited policy body is still ON (exit 0) but reported as modified;
@@ -1699,10 +1847,13 @@ else
 fi
 fi
 
-# --uninstall removes everything warmline added, keeps the user's own text.
+# --uninstall removes everything warmline added, keeps the user's own text --
+# the keep-warm history included, which the on/off cases above have written.
+had_log=$([ -s "$IROOT/warmline-keepwarm.log" ] && echo y || echo n)
 inst --uninstall >/dev/null
 if [[ ! -e "$IROOT/warmline-statusline.py" && ! -e "$IBIN/warmline" \
-   && ! -e "$IBIN/warmline-audit" && ! -e "$IROOT/warmline-keep-warm.md" ]] \
+   && ! -e "$IBIN/warmline-audit" && ! -e "$IROOT/warmline-keep-warm.md" \
+   && "$had_log" == y && ! -e "$IROOT/warmline-keepwarm.log" ]] \
    && ! grep -q statusLine "$IROOT/settings.json" \
    && ! grep -qF "$MB" "$IROOT/CLAUDE.md" \
    && grep -q 'my own rules' "$IROOT/CLAUDE.md"; then
@@ -2055,9 +2206,12 @@ mkdir -p "$UHOME"; printf '# my zshrc\n' > "$UHOME/.zshrc"
 env HOME="$UHOME" SHELL=/bin/zsh CLAUDE_CONFIG_DIR="$UROOT" WARMLINE_BIN_DIR="$UBIN" \
   ./install.sh --keep-warm --path >/dev/null
 printf 'my own rules\n' >> "$UROOT/CLAUDE.md"
+# --keep-warm went through `warmline keep-warm on`, which recorded it
+had_log=$([ -s "$UROOT/warmline-keepwarm.log" ] && echo y || echo n)
 uout=$(env HOME="$UHOME" CLAUDE_CONFIG_DIR="$UROOT" WARMLINE_BIN_DIR="$UBIN" \
        "$UBIN/warmline" uninstall)
 if [[ "$uout" == *"claude-warmline uninstalled."* \
+   && "$had_log" == y && ! -e "$UROOT/warmline-keepwarm.log" \
    && "$uout" == *"removed $UBIN/warmline"* \
    && "$uout" == *"removed the PATH line from $UHOME/.zshrc"* ]] \
    && [[ ! -e "$UROOT/warmline-statusline.py" && ! -e "$UROOT/warmline-keep-warm.md" \
