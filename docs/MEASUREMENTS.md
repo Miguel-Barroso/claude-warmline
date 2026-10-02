@@ -77,8 +77,8 @@ turns.
 `warmline audit --all` over 147 sessions puts the total estimated avoidable
 premium at **~$69** at Sonnet base input pricing — an estimate of exposure
 computed from token counts in those transcripts, **not billing data**, and one
-that excludes each session's unavoidable first cache write while still counting
-some cold nobody could have prevented (see
+that excluded each session's unavoidable first cache write while still counting
+some cold nobody could have prevented, compaction writes among it (see
 ["avoidable", precisely](AUDIT.md#what-avoidable-means--precisely)). The same
 run attributes 19% of the cold-cause events to compaction and leaves **39%
 unattributed** — a residual bucket the transcript gave no proof for, not a
@@ -89,6 +89,14 @@ project at its own solved rate and each session at its own cache bucket — the
 130 sessions still on disk total **~$63**. The method changed more than the
 history did: a single assumed $3 replaced by real per-project rates, and 1.9×
 replaced by 1.15× wherever a session ran on the 5-minute bucket.
+
+Since v2.7.0 "avoidable" also leaves out every compaction's write (the
+compacted context, cached for the first time) and model changes (chosen, and
+reported on their own line). On the 74 sessions on disk on 2026-10-01, the
+same history at `--price 3` comes to **~$82.50** where the old definition
+said ~$91.19, and at derived rates to ~$137 where it said ~$152. Ranked by
+re-cached tokens instead of event count, idle time past the TTL is 63% of the
+attributed re-caching, though `auto-compact` happened more than twice as often.
 
 ## Every price tier bills the same multiples
 

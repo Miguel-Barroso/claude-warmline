@@ -589,13 +589,17 @@ else
 fi
 
 # --all: discovery (skips subagents + turnless sessions), ranking by
-# avoidable cold tokens, totals, cause census.
+# avoidable cold tokens, totals, cause census. Only alpha's inactivity
+# write (8,200) is avoidable: session start, /compact, inactivity+compact
+# and model change are all excluded.
 out=$(./warmline-audit --all "$ROOT")
 if [[ "$out" == *"2 sessions under"* && "$out" == *"1 more without API turns"* \
-   && "$out" == *"30,200"* && "$out" != *"77,777"* \
-   && "$out" == *"/compact 2"* && "$out" == *"inactivity 1"* \
-   && "$out" == *"inactivity+compact 1"* && "$out" == *"model change 1"* \
-   && "$out" == *"session start 2"* \
+   && "$(echo "$out" | grep '^TOTAL')" == *" 8,200 "* && "$out" != *"77,777"* \
+   && "$out" == *"/compact 17k tok (19%, 2 events)"* \
+   && "$out" == *"inactivity 8k tok (9.1%, 1 event)"* \
+   && "$out" == *"inactivity+compact 9k tok (10.0%, 1 event)"* \
+   && "$out" == *"model change 5k tok (5.5%, 1 event)"* \
+   && "$out" == *"session start 45k tok (50%, 2 events)"* \
    && $(echo "$out" | grep -n proj-alpha | cut -d: -f1) -lt \
       $(echo "$out" | grep -n proj-beta | cut -d: -f1) ]]; then
   echo "ok   all: 2 audited, ranked, subagent excluded, causes counted"; pass=$((pass + 1))
@@ -603,11 +607,11 @@ else
   echo "FAIL all:"; echo "$out"; fail=$((fail + 1))
 fi
 
-# --all percentages: every cause carries its share of cold-cause events
-# (8 total: /compact 2 -> 25%), the cold-events line its share of turns,
-# and each session row its share of all avoidable cold tokens (alpha holds
-# all 30,200 -> 100%; beta none -> 0%).
-if [[ "$out" == *"/compact 2 (25%)"* && "$out" == *"-- 60% of all turns"* \
+# --all percentages: every cause carries its share of attributed tokens
+# (90,200 total: /compact's 17,000 -> 19%), the cold-events line its share
+# of turns, and each session row its share of all avoidable cold tokens
+# (alpha holds all 8,200 -> 100%; beta none -> 0%).
+if [[ "$out" == *"/compact 17k tok (19%"* && "$out" == *"-- 60% of all turns"* \
    && "$out" == *"share"* \
    && "$(echo "$out" | grep proj-alpha)" == *"100%"* \
    && "$(echo "$out" | grep proj-beta)" == *"0%"* ]]; then
@@ -637,7 +641,7 @@ cat > "$AUPG" <<'EOF'
 EOF
 out=$(./warmline-audit "$AUPG")
 if [[ "$out" == *"COLD(rebuilt)  <- claude upgrade"* \
-   && "$out" == *"claude upgrade 1"* ]]; then
+   && "$out" == *"claude upgrade 21k tok (51%, 1 event)"* ]]; then
   echo "ok   upgrade-cause: a build change between turns is attributed"; pass=$((pass + 1))
 else
   echo "FAIL upgrade-cause:"; echo "$out"; fail=$((fail + 1))
@@ -749,15 +753,15 @@ else
   echo "FAIL audit-keepwarm-foreign: $f_one / $f_all / $f_flag"; echo "$f_out"; fail=$((fail + 1))
 fi
 
-# --all --price: the TOTAL row itself carries the premium (30200 avoidable
-# * 1.9 * $10/MTok = $0.57), the estimate disclaimer prints, and the notes
+# --all --price: the TOTAL row itself carries the premium (8200 avoidable
+# * 1.9 * $10/MTok = $0.16), the estimate disclaimer prints, and the notes
 # say which side of the input/output split the premium lives on.
 out=$(./warmline-audit --all --price 10 "$ROOT")
-if [[ "$(echo "$out" | grep '^TOTAL')" == *'$0.57'* && "$out" == *"not billing data"* \
+if [[ "$(echo "$out" | grep '^TOTAL')" == *'$0.16'* && "$out" == *"not billing data"* \
    && "$out" == *'input $10/MTok as given on the command line'* \
    && "$out" == *"per session's own cache bucket"* && "$out" == *"input-side only"* \
    && "$out" == *'$50/MTok warm or cold'* ]]; then
-  echo "ok   all-price: TOTAL premium \$0.57, input/output split labeled"; pass=$((pass + 1))
+  echo "ok   all-price: TOTAL premium \$0.16, input/output split labeled"; pass=$((pass + 1))
 else
   echo "FAIL all-price:"; echo "$out"; fail=$((fail + 1))
 fi
@@ -792,13 +796,13 @@ import json, sys
 d = json.load(sys.stdin)
 assert len(d["sessions"]) == 2, d
 assert d["sessions"][0]["project"] == "proj-alpha"
-assert d["sessions"][0]["avoidable_premium_usd"] == 0.57
+assert d["sessions"][0]["avoidable_premium_usd"] == 0.16
 assert d["sessions"][1]["avoidable_cold_tokens"] == 0
 assert d["sessions"][1]["avoidable_premium_usd"] == 0
 assert d["total"]["turns"] == 10
-assert d["total"]["avoidable_cold_tokens"] == 30200
+assert d["total"]["avoidable_cold_tokens"] == 8200
 assert d["total"]["tokens_recached_cold"] == 75200
-assert d["total"]["avoidable_premium_usd"] == 0.57
+assert d["total"]["avoidable_premium_usd"] == 0.16
 assert d["total"]["skipped"] == 1
 assert d["sessions"][0]["tokens_output"] == 700
 assert d["total"]["tokens_output"] == 1000
@@ -809,6 +813,99 @@ if [[ "$out" == "json-ok" ]]; then
   echo "ok   all-json: sessions ranked, totals and premiums correct"; pass=$((pass + 1))
 else
   echo "FAIL all-json: $out"; fail=$((fail + 1))
+fi
+
+# What counts as avoidable: of alpha's 70,200 cold tokens only the plain
+# inactivity write (8,200) is. Session start (40,000), the cold /compact
+# (8,000) and inactivity+compact (9,000: the compacted context, cached for
+# the first time) are unavoidable; the model change (5,000) is chosen --
+# out of avoidable, but priced on its own line (5000*1.9*$10 = ~$0.10).
+out=$(./warmline-audit --json --price 10 "$ROOT/proj-a/sess1.jsonl" | python3 -c '
+import json, sys
+s = json.load(sys.stdin)["summary"]
+assert s["tokens_recached_cold"] == 70200, s
+assert s["avoidable_cold_tokens"] == 8200, s
+assert s["chosen_cold_tokens"] == 5000, s
+assert s["chosen_premium_usd"] == 0.095, s
+assert s["cause_tokens"] == {"session start": 40000, "/compact": 17000,
+                             "inactivity": 8200, "inactivity+compact": 9000,
+                             "model change": 5000}, s
+assert s["causes"]["/compact"] == 2, s
+assert s["compact_partial_turns"] == 1 and s["compact_partial_tokens"] == 9000, s
+print("json-ok")')
+out2=$(./warmline-audit --price 10 "$ROOT/proj-a/sess1.jsonl")
+if [[ "$out" == "json-ok" \
+   && "$out2" == *"excluding each session's first write, compaction writes (/compact, auto-compact, inactivity+compact"* \
+   && "$out2" == *'chosen (model change): 5,000 tokens re-cached cold, ~$0.10 over warm reads -- not counted as avoidable'* \
+   && "$out2" == *'estimated avoidable premium ~$0.16'* ]]; then
+  echo "ok   avoidable-classes: compaction unavoidable, model change chosen"; pass=$((pass + 1))
+else
+  echo "FAIL avoidable-classes: $out"; echo "$out2"; fail=$((fail + 1))
+fi
+
+# The census, the cold totals and the per-session turns must tell one
+# story: --all's per-cause totals are exactly the per-turn sums of every
+# session's own --json, cold totals cover COLD turns only, and the
+# compaction turns graded PARTIAL are the whole difference -- and the
+# human report says so instead of leaving the gap to be discovered.
+out=$(./warmline-audit --all --json "$ROOT" | python3 -c '
+import json, subprocess, sys
+d = json.load(sys.stdin)
+ev, tok, cold, part = {}, {}, 0, 0
+for s in d["sessions"]:
+    turns = json.loads(subprocess.check_output(
+        [sys.executable, "./warmline-audit", "--json", s["transcript"]]))["turns"]
+    for t in turns:
+        if t["cause"]:
+            ev[t["cause"]] = ev.get(t["cause"], 0) + 1
+            tok[t["cause"]] = tok.get(t["cause"], 0) + t["write"]
+        if t["verdict"].startswith("COLD"):
+            cold += t["write"]
+        elif t["verdict"] == "PARTIAL" and t["cause"]:
+            part += t["write"]
+T = d["total"]
+assert T["causes"] == ev and T["cause_tokens"] == tok, (T, ev, tok)
+assert T["tokens_recached_cold"] == cold == 75200, T
+assert T["compact_partial_tokens"] == part == 15000, T
+assert T["compact_partial_turns"] == 2, T
+assert sum(tok.values()) == cold + part, (tok, cold, part)
+assert T["chosen_cold_tokens"] == 5000, T
+print("json-ok")')
+out2=$(./warmline-audit --all "$ROOT")
+if [[ "$out" == "json-ok" \
+   && "$out2" == *"cause totals include 2 compaction turns graded PARTIAL (15,000 tokens re-written); cold events and the cold totals count COLD turns only"* \
+   && "$out2" == *"of 75,200 tokens re-cached on COLD turns, 8,200 are avoidable cold"* \
+   && "$out2" == *"chosen (model change): 5,000 tokens re-cached cold -- not counted as avoidable"* ]]; then
+  echo "ok   cause-totals: --all totals = per-turn sums, PARTIAL gap explained"; pass=$((pass + 1))
+else
+  echo "FAIL cause-totals: $out"; echo "$out2"; fail=$((fail + 1))
+fi
+
+# Causes rank by what they cost, not by how often they happened. Three
+# small auto-compacts outnumber everything; a 100k overnight rebuild on a
+# 5-minute cache outweighs them in tokens; and priced, a 70k rebuild on a
+# 1-hour cache outweighs it again (70k*1.9 > 100k*1.15).
+RKROOT="$SCRATCH/rank"
+mkdir -p "$RKROOT/proj-5m" "$RKROOT/proj-1h"
+w5() { printf '{"type":"assistant","timestamp":"2026-01-01T%s:00Z","cwd":"/tmp/rank-5m","message":{"id":"%s","usage":{"cache_read_input_tokens":%s,"cache_creation_input_tokens":%s,"input_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":%s,"ephemeral_1h_input_tokens":0}}}}\n' "$1" "$2" "$3" "$4" "$4"; }
+w1() { printf '{"type":"assistant","timestamp":"2026-01-02T%s:00Z","cwd":"/tmp/rank-1h","message":{"id":"%s","usage":{"cache_read_input_tokens":%s,"cache_creation_input_tokens":%s,"input_tokens":5}}}\n' "$1" "$2" "$3" "$4"; }
+ac() { printf '{"type":"system","subtype":"compact_boundary","timestamp":"2026-01-02T%s:00Z","compactMetadata":{"trigger":"auto"}}\n' "$1"; }
+{ w5 00:00 k1 0 1000; w5 00:03 k2 1000 10; w5 00:30 k3 0 100000; } > "$RKROOT/proj-5m/sess.jsonl"
+{ w1 00:00 j1 0 1000; ac 00:01; w1 00:02 j2 500 2000; ac 00:03; w1 00:04 j3 500 2000
+  ac 00:05; w1 00:06 j4 500 2000; w1 00:10 j5 0 70000; } > "$RKROOT/proj-1h/sess.jsonl"
+out=$(PYTHONIOENCODING=utf-8 ./warmline-audit --all "$RKROOT")
+out2=$(PYTHONIOENCODING=utf-8 ./warmline-audit --all --price 10 "$RKROOT")
+order() { echo "$1" | sed -n '/^where the cold came from/,/^$/p' | awk 'NR > 1 && NF {print $1}' | tr '\n' ' '; }
+if [[ "$(order "$out")" == "inactivity unknown auto-compact session " \
+   && "$(order "$out2")" == "unknown inactivity auto-compact session " \
+   && "$out" == *"causes: inactivity 100k tok (56%, 1 event)  unknown 70k tok"* \
+   && "$out" == *"auto-compact        ██  6k (3.4%)  3 events  not avoidable"* \
+   && "$out2" == *"(by estimated premium over warm reads; events beside)"* \
+   && "$out2" == *"unknown             ██████████████████████████  ~\$1.33 ("* \
+   && "$out2" == *'estimated avoidable premium ~$2.48'* ]]; then
+  echo "ok   rank-by-cost: tokens unpriced, premium priced, counts beside"; pass=$((pass + 1))
+else
+  echo "FAIL rank-by-cost: $(order "$out") / $(order "$out2")"; echo "$out"; echo "$out2"; fail=$((fail + 1))
 fi
 
 # --help used to be read as a transcript path and die, which is how --json
@@ -1953,14 +2050,18 @@ else
   echo "FAIL ascii-fallback:"; echo "$out"; fail=$((fail + 1))
 fi
 
-# --all cause histogram: counts right, bars scaled to the max (2 -> 26
-# cells, 1 -> 13), aggregate health bar above the table.
+# --all cause histogram: ranked and sized by tokens re-cached, not by
+# event count (session start 45k -> 26 cells, /compact 17k -> 10, model
+# change 5k -> 3), events beside, the not-avoidable and chosen causes
+# tagged, aggregate health bar above the table.
 # (UTF-8 stdout pinned: a Windows pipe is cp1252, which takes the '#' bars
 # that ascii-fallback above already covers)
-out=$(PYTHONIOENCODING=utf-8 ./warmline-audit --all "$ROOT")
+out=$(PYTHONIOENCODING=utf-8 ./warmline-audit --all "$ROOT" | tr -d '\r')
 if [[ "$out" == *"where the cold came from"* \
-   && "$out" == *$'\n'"  /compact            ██████████████████████████  2"* \
-   && "$out" == *$'\n'"  model change        █████████████  1"* \
+   && "$out" == *$'\n'"  session start       ██████████████████████████  45k (50%)  2 events  not avoidable"* \
+   && "$out" == *$'\n'"  /compact            ██████████  17k (19%)  2 events  not avoidable"* \
+   && "$out" == *$'\n'"  inactivity          █████  8k (9.1%)  1 event"$'\n'* \
+   && "$out" == *$'\n'"  model change        ███  5k (5.5%)  1 event  chosen"* \
    && "$out" == *"(2 of 10 turns)"* ]]; then
   echo "ok   histogram: cause bars + aggregate health"; pass=$((pass + 1))
 else
@@ -1969,7 +2070,7 @@ fi
 
 # --all --price ends on the prominent avoidable-premium line.
 out=$(./warmline-audit --all --price 10 "$ROOT" | tail -1)
-if [[ "$out" == 'estimated avoidable premium ~$0.57' ]]; then
+if [[ "$out" == 'estimated avoidable premium ~$0.16' ]]; then
   echo "ok   premium-line: $out"; pass=$((pass + 1))
 else
   echo "FAIL premium-line: $out"; fail=$((fail + 1))
