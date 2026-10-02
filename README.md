@@ -178,38 +178,37 @@ whatever you do next. The only question is what that one pass buys:
 ## Explain and measure: the audit
 
 A single `HOT` on your statusline is useful. Seeing that your sessions went cold
-211 times in ten weeks is more useful.
+105 times in fourteen weeks is more useful.
 
 `warmline audit` grades every recorded API request of a session from the usage
 fields Claude Code wrote for it — no one-turn lag, unlike the statusline. `--all`
 does the same across every session on this machine and ranks them. (It runs the
 installed `warmline-audit`; both spellings work, and scripts pinned to the
-hyphenated one keep working.) Real output from 10 weeks of history, priced at a
+hyphenated one keep working.) Real output from 14 weeks of history, priced at a
 flat `--price 3` for a stable example — a bare `--price` solves your real rate
 instead, per project:
 
 ```
 $ warmline-audit --all --price 3
-132 sessions under /Users/mb/.claude/projects  (8 more without API turns; ttl per session from its cache buckets, 60m fallback)
+74 sessions under /Users/mb/.claude/projects  (4 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  96% hot  (13,378 of 13,994 turns)
-cold events   211  (158 rebuilt, 53 ttl) -- 1.5% of all turns
+cache health  █████████████████████████░  97% hot  (18,577 of 19,182 turns)
+cold events   105  (36 rebuilt, 69 ttl) -- <1% of all turns
 
 start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770   9.7%      $7.38
+09-23 17:57  MimirBlue                 287    282     0        1     4       2,635,789    18%     $15.02
    ⋮
-TOTAL                                13994  13378   405      158    53      13,306,845   100%     $75.85
+TOTAL                                19182  18577   500       36    69      14,473,962   100%     $82.50
 
-where the cold came from
-  unknown             ██████████████████████████  83 (29%)
-  auto-compact        ██████████████████████  70 (25%)
-  session start       ██████████████████████  69 (24%)
-  inactivity          ███████████  34 (12%)
-  inactivity+compact  ██████  19 (6.7%)
-  /compact            ██  7 (2.5%)
-  model change        █  1 (<1%)
+where the cold came from  (by estimated premium over warm reads; events beside)
+  inactivity          ██████████████████████████  ~$82.50 (63%)  64 events
+  auto-compact        ███████████  ~$35.07 (27%)  164 events  not avoidable
+  model change        ██  ~$7.47 (5.7%)  6 events  chosen
+  session start       █  ~$3.92 (3.0%)  30 events  not avoidable
+  inactivity+compact  █  ~$1.22 (<1%)  5 events  not avoidable
+  /compact            █  ~$1.21 (<1%)  5 events  not avoidable
 
-estimated avoidable premium ~$75.85  (top 5 sessions: $22.19, other 127: $53.66)
+estimated avoidable premium ~$82.50  (top 5 sessions: $43.86, other 69: $38.64)
 ```
 
 That is the difference between observability and a decorative statusline: a
@@ -227,9 +226,11 @@ effort level, turning on fast mode, denying a whole tool, enabling or disabling
 a plugin, connecting an MCP server whose tools load into the prefix — and any
 of them lands here. Editing CLAUDE.md mid-session does not: Anthropic lists
 that under the actions that *keep* the
-cache. Here `unknown` holds 29% of the cold, still the largest single bucket,
-and the worst single session holds 9.7% of the total — read that as "the largest
-share is unexplained", which is a reason to look, not a diagnosis.
+cache. Where `unknown` is large, read it as "the largest share is unexplained",
+which is a reason to look, not a diagnosis. (This history happens to have none.)
+The chart ranks causes by what they cost, not by how often they happened: here
+`auto-compact` fired more than twice as often as anything else, but walking away
+past the TTL re-cached the most, and it is the only cause the premium counts.
 (Verdicts come from recorded usage, but the
 split between `COLD(rebuilt)` and `COLD(ttl)` rests on the TTL, auto-detected
 per session from its own cache-bucket records.)
@@ -237,9 +238,12 @@ per session from its own cache-bucket records.)
 **The dollar figures estimate exposure from token counts in your own
 transcripts. They are not billing data** — warmline never sees, and cannot see,
 what Anthropic actually billed you. The closing line is labeled `estimated
-avoidable premium`, where "avoidable" means only *after each session's
-unavoidable first cache write*: some of what it counts was never preventable,
-such as a TTL expiry while the laptop was asleep.
+avoidable premium`. "Avoidable" leaves out each session's first cache write and
+every compaction's write — the compacted context, cached for the first time,
+which no timing could have spared once the compaction happened — and a model
+change, which you chose and which is reported on its own line. Some of what it
+still counts was never preventable, such as a TTL expiry while the laptop was
+asleep.
 
 **Warmline ships no price sheet.** A baked-in table would go stale, and it
 would be wrong the moment you switched from Sonnet to Opus. A bare `--price`
