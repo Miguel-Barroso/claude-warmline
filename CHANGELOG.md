@@ -4,6 +4,53 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [Unreleased]
+
+`warmline audit` can now say whether keep-warm was on when a session went cold
+from inactivity. That is most of the tokens re-cached cold, and it's what
+keep-warm exists to prevent, but until now nothing could tell whether those
+gaps ran with the policy off or with it on. The state left no trace in the
+transcripts, so warmline records it from now on. Older gaps stay unknown.
+
+### Added
+- **Keep-warm history: `~/.claude/warmline-keepwarm.log`.** One line per
+  transition, UTC time and `on`, `off` or `inconsistent`, in the same
+  vocabulary as `warmline keep-warm status`. The statusline already reads
+  CLAUDE.md on every render, and it now appends a line when that reading
+  differs from the log's last one. That catches hand edits as well as the
+  CLI. A steady state writes nothing. Past 64 KiB the oldest half is dropped.
+  A log that can't be read or written costs the record, never the line.
+  `warmline keep-warm on|off` record their change at once. `WARMLINE_NO_KEEPWARM`
+  hides the field but still records. A block whose wording is out of date
+  (`keep-warm on*`) counts as `on`, because the agent still reads a policy.
+- **`warmline audit` splits inactivity cold turns by keep-warm state**: on,
+  off, block malformed, or unknown. Each `COLD(ttl)` turn gets the state
+  recorded when its idle gap began, meaning the previous turn. A gap that
+  began before the log's first line is unknown, never back-filled. The section
+  says outright that `on` isn't a miss: the policy acts only while the agent
+  waits on background work. The log only labels transcripts under its own
+  config dir's `projects/`, compared by real path. A copied transcript, or
+  another machine's tree passed as `--all DIR`, is all unknown. In `--json`,
+  `keep_warm_inactivity` (events and tokens per state, plus `recorded_since`
+  and `log_applies`) appears in the single-session `summary`, on each `--all`
+  session and in the `--all` total. Keys were added only.
+- `warmline status` and `warmline keep-warm status` show the last recorded
+  transition. `warmline uninstall` and `install.sh --uninstall` remove the log.
+
+### Tests
+- `kw-log-transitions`: off, on, a stale block, a malformed one with the field
+  hidden, then off again come out as exactly four lines, with nothing written
+  while a state holds. `kw-log-failure`: with a directory where the log should
+  be, the line is byte-identical; a junk log is appended to.
+  `kw-log-bounded`: an oversize log is halved, and the new transition lands.
+- `cli-kw-record`: on/off log at once, a repeat logs nothing, and both status
+  views show the last record. `audit-keepwarm`: with no log every gap is
+  unknown; with one, the split covers on, off, malformed and unknown in the
+  human report, `--json` and `--all --json`, and a rebuild inside the TTL
+  stays out of it. `audit-keepwarm-foreign`: with the same log present, the
+  session copied outside the config dir, alone or as `--all DIR`, comes out
+  all unknown in both the human report and `--json`. `ins-uninstall` and `cli-uninstall` assert the log is gone.
+
 ## [2.6.1] — 2026-09-25
 
 A Homebrew upgrade stops printing notes that weren't true. Output only; what

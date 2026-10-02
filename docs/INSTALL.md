@@ -113,6 +113,10 @@ file you also write in is not something an uninstaller should decide —
 | `keep-warm.md` | `~/.claude/warmline-keep-warm.md` (the policy source) |
 | `afk.md` | `~/.claude/warmline-afk.md` (the [AFK mode](AFK.md) procedure source, inert until `warmline afk enable`) |
 
+Once running, the statusline also writes `~/.claude/warmline-keepwarm.log`, a
+line for each keep-warm on/off transition. That history is what
+[`warmline audit`](AUDIT.md#was-keep-warm-on) reads. Uninstalling removes it.
+
 The installer never enables AFK mode, since that takes your own consent. Once
 you have, `warmline afk enable` adds `~/.claude/commands/afk.md`, a
 `UserPromptSubmit` hook and a `Bash(… afk:*)` permission rule to
@@ -374,6 +378,13 @@ Windows sessions with
 ```sh
 CLAUDE_CONFIG_DIR=/mnt/c/Users/you/.claude warmline audit --all
 ```
+
+Setting `CLAUDE_CONFIG_DIR` matters for the keep-warm split as well as for
+finding the sessions. That split comes from the `warmline-keepwarm.log` in the
+config dir, and the log only labels transcripts under that dir's `projects/`.
+`warmline audit --all /mnt/c/Users/you/.claude/projects`, run without the
+variable, still grades every session, but it reports their inactivity gaps as
+`unknown` rather than applying WSL's own log to them.
 
 ### Keeping Windows awake
 

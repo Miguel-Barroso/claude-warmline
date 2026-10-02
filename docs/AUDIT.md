@@ -149,6 +149,43 @@ Causes are attribution, not guesswork:
 | `inactivity+compact` | both happened inside the same gap; either explains it |
 | `unknown` | a rebuild the transcript can't explain — in practice mostly prefix drift (an edited CLAUDE.md, changed git state, MCP availability) |
 
+### Was keep-warm on?
+
+Inactivity is the cause [keep-warm](KEEP-WARM.md) exists to prevent, so the
+report splits the `COLD(ttl)` turns by the policy's state when each idle gap
+began, which is the time of the previous turn:
+
+```
+keep-warm when each inactivity gap began (4 cold turns):
+  keep-warm on        1 (25%)  12,000 tokens re-cached
+  keep-warm off       2 (50%)  27,000 tokens re-cached
+  unknown             1 (25%)  11,000 tokens re-cached  -- before warmline began recording it (10-01 12:00)
+```
+
+Transcripts don't record that state, so warmline does. The record is
+`~/.claude/warmline-keepwarm.log`, one line per transition. The statusline
+appends a line whenever its reading of CLAUDE.md changes, and that includes
+hand edits. `warmline keep-warm on|off` append theirs at once. A gap that began
+before the log's first line is `unknown` and is never back-filled: the first
+line marks when recording started, not when that state did.
+
+Read `keep-warm on` carefully. It means the policy was in CLAUDE.md. It does
+not mean the policy failed: keep-warm acts only while the agent is waiting on
+background work, so walking away from an idle session is a gap it was never
+meant to cover. Two more limits:
+
+- The statusline records a change at its next render, so in practice within
+  the 60-second idle refresh. A session without warmline's statusline (the
+  desktop app, or a different statusline) records only the CLI's changes.
+- The log is the CLAUDE.md file's state. A session that had already started
+  may still have been running on what it loaded at startup.
+- The log only labels transcripts under its own config dir's `projects/`,
+  compared by resolved real path. A transcript copied elsewhere, or another
+  machine's or config's tree passed as `--all DIR`, ran under a CLAUDE.md this
+  log never saw. All of its gaps are `unknown`, and `recorded_since` is
+  `null`. To audit another config dir with its own log, point
+  `CLAUDE_CONFIG_DIR` at it.
+
 ## Where does the money leak? `--all`
 
 `--all` audits every session under `~/.claude/projects` (or a directory you
@@ -375,6 +412,13 @@ account.
     `price_in_per_mtok` ÷ 1e6), which is the figure the human report prints on
     its closing line. `premium_x` and `cache_bucket` are in the summary, so the
     1.9×/1.15× choice never has to be guessed.
+  - **`keep_warm_inactivity`**, in the single-session `summary`, on each
+    `--all` session and in the `--all` total, holds `on`, `off`,
+    `inconsistent` and `unknown`, each `{"events", "tokens"}`, plus
+    `recorded_since` (the log's first line, or `null`) and `log_applies`
+    (`false` when the transcript isn't under this config dir, so nothing
+    recorded here could describe it). See
+    [Was keep-warm on?](#was-keep-warm-on).
 - `--ttl N` forces the cache TTL for every session (also `WARMLINE_TTL_MIN`);
   unset, it is [auto-detected per session](#the-ttl-is-auto-detected).
 - `--help` prints all of the above. (Before v1.8.0 it didn't — `--help` was

@@ -89,6 +89,14 @@ transcript supports one:
                   also happened inside the same gap (either explains it)
   unknown         a rebuild the transcript can't explain (env/prefix drift)
 
+Inactivity cold turns (the COLD(ttl) ones) are also split by whether the
+keep-warm policy was in CLAUDE.md when each idle gap began: keep-warm on,
+off, block malformed, or unknown. The record is
+$CLAUDE_CONFIG_DIR/warmline-keepwarm.log, which the statusline and
+`warmline keep-warm on|off` append to on every change; a gap that began
+before its first line is unknown, never guessed. "on" is not a verdict on
+the policy -- it acts only while the agent waits on background work.
+
 Subagent (sidechain) turns are excluded: they run on separate prefixes,
 and their transcripts live in separate nested files that --all skips.
 
@@ -109,6 +117,7 @@ a terminal; piped/CI output stays plain, and --json never decorates.
 NO_COLOR or WARMLINE_NO_COLOR force plain; WARMLINE_FORCE_COLOR forces
 color without a tty (the opt-outs still win over it).
 """
+import bisect
 import datetime
 import glob
 import json
@@ -125,6 +134,10 @@ TTL_FORCED = "WARMLINE_TTL_MIN" in os.environ
 PROJECTS_DIR = os.path.normpath(os.path.join(
     os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"),
     "projects"))
+# keep-warm transitions as the statusline and `warmline keep-warm on|off`
+# recorded them: "<UTC ISO time> on|off|inconsistent" per line
+KW_LOG = os.path.join(os.path.dirname(PROJECTS_DIR), "warmline-keepwarm.log")
+KW_STATES = ("on", "off", "inconsistent", "unknown")
 # Every Claude pricing tier bills the same multiples of its own base input
 # price: output 5x, a 1-hour cache write 2x, a 5-minute cache write 1.25x, a
 # warm read 0.1x, and $0.01 per web search. Verified identical across all
@@ -374,6 +387,136 @@ def summarize(rows):
             "tokens_output": sum(r["output"] for r in rows)}
 
 
+_KW_HISTORY = None
+
+
+def keepwarm_history():
+    """([times], [states]) from KW_LOG, oldest first, read once per run. A
+    missing or unreadable log is an empty history, and an unparseable line
+    is skipped: either way the gaps it would have covered read as unknown."""
+    global _KW_HISTORY
+    if _KW_HISTORY is None:
+        hist = []
+        try:
+            with open(KW_LOG, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) != 2 or parts[1] not in KW_STATES[:3]:
+                        continue
+                    t = parse_ts(parts[0])
+                    if t is not None:
+                        hist.append((t, parts[1]))
+        except OSError:
+            pass
+        hist.sort(key=lambda x: x[0])
+        _KW_HISTORY = ([t for t, _ in hist], [st for _, st in hist])
+    return _KW_HISTORY
+
+
+def keepwarm_state_at(t):
+    """'on' | 'off' | 'inconsistent' as last recorded at or before t, or
+    'unknown' before the first record. Never extrapolated backwards: the
+    first line is when recording began, not when that state did."""
+    times, states = keepwarm_history()
+    i = bisect.bisect_right(times, t)
+    return states[i - 1] if i else "unknown"
+
+
+def keepwarm_owns(path):
+    """True when the transcript lives under this config dir's projects/ --
+    the only transcripts KW_LOG describes. A copied transcript, or another
+    machine's or config's tree passed as --all DIR, ran under a CLAUDE.md
+    this log never saw. Real paths, case-normalized, so symlinks (macOS's
+    /var -> /private/var) and Windows drive-letter case don't decide it;
+    paths on different Windows drives simply aren't nested."""
+    def norm(p):
+        # an MSYS spelling (/c/Users/...) that reached Windows Python
+        # unconverted names the same file as C:/Users/...
+        if os.name == "nt" and re.match(r"^/[A-Za-z](/|$)", p):
+            p = p[1] + ":" + (p[2:] or "/")
+        return os.path.normcase(os.path.realpath(p))
+    root, p = norm(PROJECTS_DIR), norm(path)
+    try:
+        return os.path.commonpath([root, p]) == root and p != root
+    except ValueError:
+        return False
+
+
+def keepwarm_split(rows, owned=True):
+    """Inactivity cold turns -- the COLD(ttl) verdicts -- split by the
+    keep-warm state in effect when each idle gap began (the previous turn).
+    Keyed on the verdict rather than the cause label, so how causes are
+    named or aggregated doesn't move this. A transcript the log doesn't own
+    is all unknown, with no recorded_since: nothing was recorded for it."""
+    times = keepwarm_history()[0] if owned else []
+    out = {k: {"events": 0, "tokens": 0} for k in KW_STATES}
+    out["recorded_since"] = times[0].isoformat() if times else None
+    # False: this machine's record doesn't describe the transcript at all
+    out["log_applies"] = owned
+    prev = None
+    for r in rows:
+        if r["verdict"] == "COLD(ttl)" and prev is not None:
+            b = out[keepwarm_state_at(prev) if owned else "unknown"]
+            b["events"] += 1
+            b["tokens"] += r["write"]
+        prev = r["time"]
+    return out
+
+
+def keepwarm_merge(splits):
+    """One split from many sessions' -- for the --all total."""
+    out = {k: {"events": 0, "tokens": 0} for k in KW_STATES}
+    out["recorded_since"] = None
+    out["log_applies"] = False
+    for sp in splits:
+        for k in KW_STATES:
+            out[k]["events"] += sp[k]["events"]
+            out[k]["tokens"] += sp[k]["tokens"]
+        out["recorded_since"] = out["recorded_since"] or sp["recorded_since"]
+        out["log_applies"] = out["log_applies"] or sp["log_applies"]
+    return out
+
+
+def keepwarm_lines(split):
+    """The human report's keep-warm section, or [] with nothing to split.
+
+    Worded so as not to overclaim: the policy acts only while the agent is
+    waiting on background work, so 'on' says the instructions were in
+    CLAUDE.md -- not that a ping should have fired across that gap."""
+    n = sum(split[k]["events"] for k in KW_STATES)
+    if not n:
+        return []
+    labels = {"on": "keep-warm on", "off": "keep-warm off",
+              "inconsistent": "block malformed", "unknown": "unknown"}
+    lines = ["keep-warm when each inactivity gap began (%d cold turn%s):"
+             % (n, "" if n == 1 else "s")]
+    for k in KW_STATES:
+        b = split[k]
+        if not b["events"]:
+            continue
+        line = "  %-16s %4d (%s)  %s tokens re-cached" % (
+            labels[k], b["events"], pct(b["events"], n),
+            "{:,}".format(b["tokens"]))
+        if k == "unknown":
+            since = split["recorded_since"]
+            if not split["log_applies"]:
+                why = ("not under %s, so this config's keep-warm record "
+                       "doesn't cover it" % PROJECTS_DIR)
+            elif since:
+                why = "before warmline began recording it (%s)" % \
+                    parse_ts(since).astimezone().strftime("%m-%d %H:%M")
+            else:
+                why = "nothing recorded yet in " + KW_LOG
+            line += paint("  -- " + why, DIM)
+        lines.append(line)
+    if split["on"]["events"]:
+        lines.append(paint(
+            "  'on' means the policy was in CLAUDE.md, not that it misfired: it acts\n"
+            "  only while the agent waits on background work, so an idle gap with\n"
+            "  nothing running is one it was never meant to cover", DIM))
+    return lines
+
+
 def audit_session(path):
     turns, compacts, label, bucket = parse_transcript(path)
     if not turns:
@@ -382,6 +525,7 @@ def audit_session(path):
     ttl = TTL_MIN if TTL_FORCED else (ttl_hint or TTL_MIN)
     rows = grade(turns, compacts, ttl)
     s = summarize(rows)
+    s["keep_warm_inactivity"] = keepwarm_split(rows, keepwarm_owns(path))
     s["transcript"] = path
     s["project"] = label or os.path.basename(os.path.dirname(path))
     # the directory name is the cwd's slug -- the join key to Claude Code's
@@ -694,6 +838,7 @@ def print_single(path, price, as_json):
                "tokens_output": s["tokens_output"]}
     summary["cache_bucket"] = s["bucket"]
     summary["premium_x"] = s["premium_x"]
+    summary["keep_warm_inactivity"] = s["keep_warm_inactivity"]
     if price is not None:
         summary["price_in_per_mtok"] = round(price["in"], 4)
         summary["price_out_per_mtok"] = round(price["out"], 4)
@@ -736,6 +881,13 @@ def print_single(path, price, as_json):
     print("(a cold re-cache bills ~%gx base input on this session's %s cache; "
           "a warm wake reads at ~%gx)"
           % (write_x, s["bucket"] or "1h-assumed", RATIO_READ))
+    # its own section, before the pricing block: the report still closes on
+    # the premium line
+    kw = keepwarm_lines(s["keep_warm_inactivity"])
+    if kw:
+        print()
+        print("\n".join(kw))
+        print()
     if price is not None:
         print(price_note(price))
         print("the cold re-caches cost ~$%.2f more than warm reads of the same "
@@ -772,6 +924,8 @@ def print_all(root, price, as_json):
         for d, src in (("verdicts", s["verdicts"]), ("causes", s["causes"])):
             for k, n in src.items():
                 total[d][k] = total[d].get(k, 0) + n
+    total["keep_warm_inactivity"] = keepwarm_merge(
+        s["keep_warm_inactivity"] for s in sessions)
     price_map = derive_price_map() if price is not None else {}
     if price is not None:
         total["price_in_per_mtok"] = round(price["in"], 4)
@@ -854,6 +1008,12 @@ def print_all(root, price, as_json):
             for ln in hist:
                 print(ln)
             print()
+    # its own section, after the causes it refines and before the notes and
+    # pricing: the report still closes on the premium line
+    kw = keepwarm_lines(total["keep_warm_inactivity"])
+    if kw:
+        print("\n".join(kw))
+        print()
     print("avoidable cold = tokens re-cached cold, excluding each session's "
           "unavoidable first write")
     if price is not None:
