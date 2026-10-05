@@ -89,6 +89,13 @@ transcript supports one:
                   also happened inside the same gap (either explains it)
   unknown         a rebuild the transcript can't explain (env/prefix drift)
 
+Causes are ranked by the tokens they re-cached (by premium with --price),
+not by how often they happened. "Avoidable cold" leaves out every write
+that had to happen once its cause did -- session start, and all compaction
+writes (/compact, auto-compact, inactivity+compact), which cache the newly
+compacted context for the first time -- and model changes, which are
+chosen: reported apart so their cost stays visible.
+
 Inactivity cold turns (the COLD(ttl) ones) are also split by whether the
 keep-warm policy was in CLAUDE.md when each idle gap began: keep-warm on,
 off, block malformed, or unknown. The record is
@@ -212,20 +219,54 @@ def health_line(verdicts, turns):
         "{:,}".format(hot), "{:,}".format(turns))
 
 
-def cause_histogram(causes):
-    """One bar per cause, scaled to the biggest; pointless under two."""
+def fmt_tok(n):
+    """'14.8M', '337k', '980' -- token totals at a glance; JSON has exact."""
+    if n >= 1e6:
+        return "%.1fM" % (n / 1e6)
+    if n >= 1e3:
+        return "%dk" % round(n / 1e3)
+    return "%d" % n
+
+
+def by_cost(causes, weight):
+    """Causes ranked by what they cost (weight), not by how often they
+    happened: one overnight rebuild of 150k outweighs ten small compacts."""
+    return sorted(causes, key=lambda c: (-weight.get(c, 0), -causes[c], c))
+
+
+def cause_histogram(causes, weight, usd=False):
+    """One bar per cause, sized and ranked by weight (tokens, or premium $
+    when priced) with the event count beside it; pointless under two."""
     if len(causes) < 2:
         return []
-    top = max(causes.values())
-    total = sum(causes.values())
-    lines = ["where the cold came from"]
-    for c, n in sorted(causes.items(), key=lambda kv: (-kv[1], kv[0])):
-        b = BAR_FULL * max(1, round(n / top * 26))
-        # session start is the unavoidable one -- dim it, leaks stay loud
-        lines.append("  %-19s %s  %d (%s)" % (
-            c, paint(b, DIM if c == "session start" else YELLOW), n,
-            pct(n, total)))
+    top = max(weight.get(c, 0) for c in causes) or 1
+    total = sum(weight.get(c, 0) for c in causes)
+    lines = ["where the cold came from  (by %s; events beside)" % (
+        "estimated premium over warm reads" if usd else "tokens re-cached")]
+    for c in by_cost(causes, weight):
+        w = weight.get(c, 0)
+        b = BAR_FULL * max(1, round(w / top * 26))
+        cls = cause_class(c)
+        # unavoidable and chosen writes are dimmed and tagged, leaks stay loud
+        lines.append("  %-19s %s  %s (%s)  %d event%s%s" % (
+            c, paint(b, YELLOW if cls == "avoidable" else DIM),
+            ("~$%.2f" % w) if usd else fmt_tok(w), pct(w, total),
+            causes[c], "" if causes[c] == 1 else "s",
+            "" if cls == "avoidable" else
+            "  " + paint("not avoidable" if cls == "unavoidable" else "chosen", DIM)))
     return lines
+
+
+AVOIDABLE_NOTE = (
+    "avoidable cold = tokens re-cached cold, excluding each session's first "
+    "write, compaction writes (/compact, auto-compact, inactivity+compact: the "
+    "compacted context, cached for the first time) and model changes (chosen)")
+
+
+def chosen_line(tokens, usd=None):
+    return "chosen (model change): {:,} tokens re-cached cold{} -- not counted " \
+        "as avoidable".format(tokens, "" if usd is None else
+                              ", ~$%.2f over warm reads" % usd)
 
 
 def premium_line(usd):
@@ -370,19 +411,61 @@ def grade(turns, compacts, ttl_min):
     return rows
 
 
+# What a cause says about whether its re-cache could have been prevented.
+# Unavoidable: a write that had to happen once its cause did -- a session's
+# first write, and a compaction's, which caches the newly compacted context
+# for the first time. inactivity+compact belongs here too: it is a COLD(ttl)
+# turn with a compaction inside the gap, so what it wrote is the compacted
+# context (typically a fraction of the pre-gap one), which a warm cache would
+# have had to write all the same. Whatever the idle time did cost -- the
+# compaction's own pass over the old context -- is not a turn the transcript
+# records usage for, so no number here measures it; counting this write as
+# avoidable would claim something the data can't show.
+# Chosen: a write paid for on purpose (switching models) -- not a leak, but
+# shown apart so its cost stays visible. Everything else is avoidable: TTL
+# expiry, upgrades and prefix drift that different timing might have spared.
+UNAVOIDABLE_CAUSES = ("session start", "/compact", "auto-compact", "compact",
+                      "inactivity+compact")
+CHOSEN_CAUSES = ("model change",)
+
+
+def cause_class(cause):
+    if cause in UNAVOIDABLE_CAUSES:
+        return "unavoidable"
+    return "chosen" if cause in CHOSEN_CAUSES else "avoidable"
+
+
+def cause_totals(rows):
+    """({cause: events}, {cause: tokens}) over every turn the transcript
+    attributes -- the cold ones and the compact-explained PARTIALs alike.
+    The one place per-cause totals are made, so every report agrees."""
+    events, tokens = {}, {}
+    for r in rows:
+        c = r["cause"]
+        if c:
+            events[c] = events.get(c, 0) + 1
+            tokens[c] = tokens.get(c, 0) + r["write"]
+    return events, tokens
+
+
 def summarize(rows):
-    counts, causes = {}, {}
+    counts = {}
     for r in rows:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
-        if r["cause"]:
-            causes[r["cause"]] = causes.get(r["cause"], 0) + 1
+    causes, cause_tokens = cause_totals(rows)
     cold = [r for r in rows if r["verdict"].startswith("COLD")]
-    cold_tokens = sum(r["write"] for r in cold)
-    # a session's first cache write is the price of admission, not a leak
-    avoidable = sum(r["write"] for r in cold if r["cause"] != "session start")
+    partial = [r for r in rows if r["verdict"] == "PARTIAL" and r["cause"]]
     return {"turns": len(rows), "verdicts": counts, "causes": causes,
-            "tokens_recached_cold": cold_tokens,
-            "avoidable_cold_tokens": avoidable,
+            "cause_tokens": cause_tokens,
+            "tokens_recached_cold": sum(r["write"] for r in cold),
+            "avoidable_cold_tokens": sum(
+                r["write"] for r in cold if cause_class(r["cause"]) == "avoidable"),
+            "chosen_cold_tokens": sum(
+                r["write"] for r in cold if cause_class(r["cause"]) == "chosen"),
+            # compaction turns that read some cache back: attributed (so in
+            # causes/cause_tokens) but not cold, so in no cold total
+            "compact_partial_turns": len(partial),
+            "compact_partial_tokens": sum(r["write"] for r in partial),
             "tokens_read_from_cache": sum(r["read"] for r in rows),
             "tokens_output": sum(r["output"] for r in rows)}
 
@@ -805,13 +888,13 @@ def fmt_gap(m):
     return "%dh%02dm" % (m // 60, m % 60)
 
 
-def fmt_causes(causes):
-    order = ["inactivity", "inactivity+compact", "/compact", "auto-compact",
-             "compact", "model change", "claude upgrade", "unknown",
-             "session start"]
-    total = sum(causes.values())
-    return "  ".join("%s %d (%s)" % (c, causes[c], pct(causes[c], total))
-                     for c in order if causes.get(c))
+def fmt_causes(causes, cause_tokens):
+    """'inactivity 14.8M tok (67%, 66 events)  ...', most tokens first."""
+    total = sum(cause_tokens.get(c, 0) for c in causes)
+    return "  ".join("%s %s tok (%s, %d event%s)" % (
+        c, fmt_tok(cause_tokens.get(c, 0)), pct(cause_tokens.get(c, 0), total),
+        causes[c], "" if causes[c] == 1 else "s")
+        for c in by_cost(causes, cause_tokens))
 
 
 def print_single(path, price, as_json):
@@ -838,6 +921,9 @@ def print_single(path, price, as_json):
                "tokens_output": s["tokens_output"]}
     summary["cache_bucket"] = s["bucket"]
     summary["premium_x"] = s["premium_x"]
+    for k in ("cause_tokens", "chosen_cold_tokens", "compact_partial_turns",
+              "compact_partial_tokens"):
+        summary[k] = s[k]
     summary["keep_warm_inactivity"] = s["keep_warm_inactivity"]
     if price is not None:
         summary["price_in_per_mtok"] = round(price["in"], 4)
@@ -845,6 +931,8 @@ def print_single(path, price, as_json):
         summary["price_source"] = price["source"]
         summary["cold_extra_usd"] = round(
             premium_usd(s, price["in"], "tokens_recached_cold"), 4)
+        summary["chosen_premium_usd"] = round(
+            premium_usd(s, price["in"], "chosen_cold_tokens"), 4)
         summary["cache_read_usd"] = round(
             s["tokens_read_from_cache"] * RATIO_READ * price["in"] / 1e6, 4)
         summary["output_usd"] = round(
@@ -873,7 +961,7 @@ def print_single(path, price, as_json):
         for v in ("HOT", "PARTIAL", "COLD(rebuilt)", "COLD(ttl)", "?")
         if v in s["verdicts"])))
     if s["causes"]:
-        print("causes: %s" % fmt_causes(s["causes"]))
+        print("causes: %s" % fmt_causes(s["causes"], s["cause_tokens"]))
     print("tokens re-cached while cold: {:,}   read from cache: {:,}   "
           "output: {:,}".format(s["tokens_recached_cold"],
                                 s["tokens_read_from_cache"], s["tokens_output"]))
@@ -896,6 +984,9 @@ def print_single(path, price, as_json):
         print("output tokens at $%s/MTok: ~$%.2f -- output is never cached; "
               "cache warmth doesn't change this part of the bill"
               % (rate(price["out"]), summary["output_usd"]))
+        print(AVOIDABLE_NOTE)
+        if s["chosen_cold_tokens"]:
+            print(chosen_line(s["chosen_cold_tokens"], summary["chosen_premium_usd"]))
         print(premium_line(premium_usd(s, price["in"])))
 
 
@@ -915,18 +1006,22 @@ def print_all(root, price, as_json):
     total = {"sessions": len(sessions), "skipped": skipped, "turns": 0,
              "verdicts": {}, "causes": {}, "tokens_recached_cold": 0,
              "avoidable_cold_tokens": 0, "tokens_read_from_cache": 0,
-             "tokens_output": 0}
+             "tokens_output": 0, "cause_tokens": {}, "chosen_cold_tokens": 0,
+             "compact_partial_turns": 0, "compact_partial_tokens": 0}
     for s in sessions:
         total["turns"] += s["turns"]
         for k in ("tokens_recached_cold", "avoidable_cold_tokens",
-                  "tokens_read_from_cache", "tokens_output"):
+                  "tokens_read_from_cache", "tokens_output",
+                  "chosen_cold_tokens", "compact_partial_turns",
+                  "compact_partial_tokens"):
             total[k] += s[k]
-        for d, src in (("verdicts", s["verdicts"]), ("causes", s["causes"])):
-            for k, n in src.items():
+        for d in ("verdicts", "causes", "cause_tokens"):
+            for k, n in s[d].items():
                 total[d][k] = total[d].get(k, 0) + n
     total["keep_warm_inactivity"] = keepwarm_merge(
         s["keep_warm_inactivity"] for s in sessions)
     price_map = derive_price_map() if price is not None else {}
+    cause_usd = {}
     if price is not None:
         total["price_in_per_mtok"] = round(price["in"], 4)
         total["price_out_per_mtok"] = round(price["out"], 4)
@@ -937,6 +1032,15 @@ def print_all(root, price, as_json):
         total["avoidable_premium_usd"] = round(
             sum(premium_usd(s, session_price_in(s, price, price_map))
                 for s in sessions), 2)
+        total["chosen_premium_usd"] = round(
+            sum(premium_usd(s, session_price_in(s, price, price_map),
+                            "chosen_cold_tokens") for s in sessions), 2)
+        # the same per-session pricing, per cause, for the histogram
+        for s in sessions:
+            pin = session_price_in(s, price, price_map)
+            for c, n in s["cause_tokens"].items():
+                cause_usd[c] = cause_usd.get(c, 0) + n * s["premium_x"] * pin / 1e6
+        total["cause_premium_usd"] = {c: round(v, 2) for c, v in cause_usd.items()}
 
     if as_json:
         out = []
@@ -946,6 +1050,8 @@ def print_all(root, price, as_json):
                 pin = session_price_in(s, price, price_map)
                 o["price_in_per_mtok"] = round(pin, 4)
                 o["avoidable_premium_usd"] = round(premium_usd(s, pin), 2)
+                o["chosen_premium_usd"] = round(
+                    premium_usd(s, pin, "chosen_cold_tokens"), 2)
             out.append(o)
         print(json.dumps({"root": root, "ttl_min": TTL_MIN,
                           "sessions": out, "total": total}, indent=1))
@@ -1001,25 +1107,40 @@ def print_all(root, price, as_json):
         print(line)
     print()
     if total["causes"]:
-        print("causes: %s" % fmt_causes(total["causes"]))
-        hist = cause_histogram(total["causes"])
+        print("causes: %s" % fmt_causes(total["causes"], total["cause_tokens"]))
+        hist = cause_histogram(
+            total["causes"],
+            cause_usd if price is not None else total["cause_tokens"],
+            usd=price is not None)
         if hist:
             print()
             for ln in hist:
                 print(ln)
             print()
+        if total["compact_partial_turns"]:
+            # the census above counts these; the cold totals below don't
+            print("cause totals include %s compaction turn%s graded PARTIAL "
+                  "(%s tokens re-written); cold events and the cold totals "
+                  "count COLD turns only" % (
+                      "{:,}".format(total["compact_partial_turns"]),
+                      "" if total["compact_partial_turns"] == 1 else "s",
+                      "{:,}".format(total["compact_partial_tokens"])))
     # its own section, after the causes it refines and before the notes and
     # pricing: the report still closes on the premium line
     kw = keepwarm_lines(total["keep_warm_inactivity"])
     if kw:
         print("\n".join(kw))
         print()
-    print("avoidable cold = tokens re-cached cold, excluding each session's "
-          "unavoidable first write")
+    print("of {:,} tokens re-cached on COLD turns, {:,} are avoidable cold".format(
+        total["tokens_recached_cold"], total["avoidable_cold_tokens"]))
+    print(AVOIDABLE_NOTE)
+    if total["chosen_cold_tokens"]:
+        print(chosen_line(total["chosen_cold_tokens"],
+                          None if price is None else total["chosen_premium_usd"]))
     if price is not None:
         used = sorted({s["premium_x"] for s in sessions})
         mults = " and ".join("%gx" % m for m in used)
-        print("premium = estimated avoidable premium of those re-caches vs warm "
+        print("premium = estimated premium of the avoidable re-caches vs warm "
               "reads (%s base input, per session's own cache bucket);" % mults)
         print("an estimate from recorded token counts, not billing data")
         print(price_note(price))

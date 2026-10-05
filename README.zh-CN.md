@@ -156,36 +156,35 @@ Opus 5 | claude-warmline | ctx 64% (127k) | cache HOT (127k, cold ~11:58) | 5h 7
 
 ## 解释与度量：审计
 
-状态栏上的一个 `HOT` 有用。看到你的会话在 10 周里冷掉了 211 次，更有用。
+状态栏上的一个 `HOT` 有用。看到你的会话在 14 周里冷掉了 105 次，更有用。
 
 `warmline audit` 依据 Claude Code 为每个已记录 API 请求写下的用量字段来评分——不像
 状态栏，它没有一轮的滞后。`--all` 则对本机所有会话做同样的事并排序。（它运行的是已
 安装的 `warmline-audit` 命令；两种写法都有效，已经写好的脚本继续可用。）以下是某台
-机器 10 周历史的真实输出，为了让示例稳定而统一按 `--price 3` 计价——不带数值的
+机器 14 周历史的真实输出，为了让示例稳定而统一按 `--price 3` 计价——不带数值的
 `--price` 会按项目求解你真实的单价：
 
 ```
 $ warmline-audit --all --price 3
-132 sessions under /Users/mb/.claude/projects  (8 more without API turns; ttl per session from its cache buckets, 60m fallback)
+74 sessions under /Users/mb/.claude/projects  (4 more without API turns; ttl per session from its cache buckets, 60m fallback)
 
-cache health  █████████████████████████░  96% hot  (13,378 of 13,994 turns)
-cold events   211  (158 rebuilt, 53 ttl) -- 1.5% of all turns
+cache health  █████████████████████████░  97% hot  (18,577 of 19,182 turns)
+cold events   105  (36 rebuilt, 69 ttl) -- <1% of all turns
 
 start        project                 turns    hot  part  rebuilt   ttl  avoidable cold  share    premium
-08-07 14:30  MimirBlue                 201    189     6        4     2       1,294,770   9.7%      $7.38
+09-23 17:57  MimirBlue                 287    282     0        1     4       2,635,789    18%     $15.02
    ⋮
-TOTAL                                13994  13378   405      158    53      13,306,845   100%     $75.85
+TOTAL                                19182  18577   500       36    69      14,473,962   100%     $82.50
 
-where the cold came from
-  unknown             ██████████████████████████  83 (29%)
-  auto-compact        ██████████████████████  70 (25%)
-  session start       ██████████████████████  69 (24%)
-  inactivity          ███████████  34 (12%)
-  inactivity+compact  ██████  19 (6.7%)
-  /compact            ██  7 (2.5%)
-  model change        █  1 (<1%)
+where the cold came from  (by estimated premium over warm reads; events beside)
+  inactivity          ██████████████████████████  ~$82.50 (63%)  64 events
+  auto-compact        ███████████  ~$35.07 (27%)  164 events  not avoidable
+  model change        ██  ~$7.47 (5.7%)  6 events  chosen
+  session start       █  ~$3.92 (3.0%)  30 events  not avoidable
+  inactivity+compact  █  ~$1.22 (<1%)  5 events  not avoidable
+  /compact            █  ~$1.21 (<1%)  5 events  not avoidable
 
-estimated avoidable premium ~$75.85  (top 5 sessions: $22.19, other 127: $53.66)
+estimated avoidable premium ~$82.50  (top 5 sessions: $43.86, other 69: $38.64)
 ```
 
 这就是可观测性与装饰性状态栏的差别：一个你能据以行动、或据以决定不行动的模式。
@@ -197,17 +196,19 @@ Claude Code 构建版本，所以一次 `version` 与上一轮不同的冷重建
 证据，所以 warmline 拒绝给它安一个原因。Anthropic 记录了好几种记录永远看不见的前缀
 失效操作——改变思考强度、打开 fast 模式、拒绝整个工具、启用或停用插件、连接会把工具
 载入前缀的 MCP 服务器——它们都会落到这里。会话中途编辑 CLAUDE.md 不会：Anthropic 把
-那一项列在*保住*缓存的操作里。在这台机器上，`unknown` 占了冷事件的 29%，仍是最大的
-单一类别，而最糟的单个会话独占总量的 9.7%——这应当读作“占比最大的部分尚未得到解释”，
-那是去查的理由，而不是诊断结论。
+那一项列在*保住*缓存的操作里。`unknown` 占比大时，应当读作“占比最大的部分尚未得到
+解释”，那是去查的理由，而不是诊断结论。（这段历史里恰好一个也没有。）图表按代价而不是
+按次数给原因排序：这里 `auto-compact` 发生的次数是其他任何原因的两倍以上，但重新缓存
+最多的是离开超过 TTL，而它也是溢价唯一计入的原因。
 （判定来自记录的用量，但 `COLD(rebuilt)` 与 `COLD(ttl)` 之间的划分取决于 TTL——它按
 会话从各自的缓存分桶记录中自动检测。）
 
 **这些金额是从你自己记录中的 token 数推算出的风险敞口估计，不是账单数据**——
 warmline 从来看不到、也无法看到 Anthropic 实际向你收取了多少。报告最后一行标为
-`estimated avoidable premium`，其中的“avoidable（可避免）”仅指*排除每个会话无法
-避免的首次缓存写入之后*的部分：它统计到的一些情况在实践中并不可预防，例如笔记本
-休眠期间发生的 TTL 过期。
+`estimated avoidable premium`。“avoidable（可避免）”排除了每个会话的首次缓存写入和
+每次压缩的写入——那是压缩后的上下文第一次被缓存，压缩一旦发生，任何时机都省不掉——
+也排除了你自己选择的模型切换，后者单独列在一行。它仍然统计到的一些情况在实践中并不
+可预防，例如笔记本休眠期间发生的 TTL 过期。
 
 **warmline 不附带价目表。** 写死的价格会过时，而且在你从 Sonnet 换到 Opus 的那一刻
 就是错的。不带数值的 `--price` 会直接求解你实际支付的基础输入单价：用 Claude Code
