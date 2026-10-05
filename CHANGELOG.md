@@ -4,13 +4,13 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
-## [Unreleased]
+## [2.7.0] — 2026-10-05
 
 The audit's headline figure changes meaning: "avoidable" no longer counts
 compaction or model changes, and causes rank by what they cost, not by how
 often they happened. Existing `--json` keys keep their names and shapes;
 `avoidable_cold_tokens` and `avoidable_premium_usd` now hold the narrower
-figure. Minor version (2.7.0).
+figure.
 
 `warmline audit` can now say whether keep-warm was on when a session went cold
 from inactivity. That is most of the tokens re-cached cold, and it's what
