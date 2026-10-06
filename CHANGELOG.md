@@ -4,7 +4,7 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
-## [Unreleased]
+## [2.8.0] — 2026-10-06
 
 The gauge reaches the Desktop app. Its Code tab renders no `statusLine`, so
 warmline now ships the same reading as a Claude Code plugin that draws a band
