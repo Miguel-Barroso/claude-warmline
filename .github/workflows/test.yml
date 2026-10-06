@@ -10,6 +10,10 @@ jobs:
         with:
           # the historical keep-warm refresh cases read old tags' policy text
           fetch-depth: 0
+      # The Desktop band is a Claude Code plugin whose checks run inside the
+      # engine (claude plugin validate / test); test.sh runs them only where
+      # `claude` is on PATH, so put it there. Windows skips them.
+      - run: curl -fsSL https://claude.ai/install.sh | bash && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: ./test.sh
   # Claude Code for Windows runs the statusline and hooks through Git Bash with
   # a Windows Python behind them: cp1252 files and pipes, CRLF output, C:/

@@ -68,7 +68,8 @@ Needs `python3` and `bash`, nothing else. On Windows, run it from Git Bash
 (with Python 3.7+ installed) or inside WSL. No `curl`? `wget -qO- <same URL> | bash`
 works the same way, and the installer downloads with whichever one it finds.
 Whichever route you take it is one command: `brew install` wires the statusline
-too, `brew upgrade` re-wires it, and `brew uninstall` unwires it again.
+and the Desktop band too, `brew upgrade` re-wires them, and `brew uninstall`
+unwires them again.
 
 [Install details, flags, pinning a release, package managers, Windows →](docs/INSTALL.md)
 
@@ -344,15 +345,18 @@ nothing to log into.
 | Front end | statusline | `warmline audit` / `watch` | keep-warm / AFK |
 |---|---|---|---|
 | Terminal CLI | ✅ | ✅ | ✅ |
-| Desktop app (local Code tab) | ❌ | ✅ | ✅ |
+| Desktop app (local Code tab) | ✅ as a band above the prompt | ✅ | ✅ |
 | VS Code / JetBrains panel | ❌ | ✅ | ✅ |
 | Cloud / Cowork sessions | ❌ | ❌ | ❌ |
 
-The local graphical front ends don't render custom statuslines
-([open request](https://github.com/anthropics/claude-code/issues/41456)), but they
-run the same engine, share the same `~/.claude` and write the same transcripts, so
-the audit, `warmline watch` and keep-warm work there unchanged. **Cloud and Cowork
-sessions are the exception: no part of warmline reaches them.**
+The graphical front ends don't render custom statuslines
+([open request](https://github.com/anthropics/claude-code/issues/41456)). In the
+Desktop app's Code tab warmline draws the gauge itself, as a band above the
+prompt: a small Claude Code plugin the installer puts in place, grading each
+response the way the audit does. The IDE panels run the same engine, share the
+same `~/.claude` and write the same transcripts, so the audit, `warmline watch`
+and keep-warm work there unchanged. **Cloud and Cowork sessions are the
+exception: no part of warmline reaches them.**
 
 [The full surface matrix, and how it was verified →](docs/SURFACES.md)
 

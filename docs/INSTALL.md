@@ -112,6 +112,7 @@ file you also write in is not something an uninstaller should decide —
 | `warmline-audit` | `~/.local/bin/warmline-audit` |
 | `keep-warm.md` | `~/.claude/warmline-keep-warm.md` (the policy source) |
 | `afk.md` | `~/.claude/warmline-afk.md` (the [AFK mode](AFK.md) procedure source, inert until `warmline afk enable`) |
+| `plugin/` (four files) | `~/.claude/skills/warmline/` (the [Desktop band](SURFACES.md#the-desktop-band), a Claude Code plugin; auto-loads as `warmline@skills-dir`) |
 
 Once running, the statusline also writes `~/.claude/warmline-keepwarm.log`, a
 line for each keep-warm on/off transition. That history is what
@@ -142,6 +143,42 @@ session if it doesn't.
 
 Override the destinations with `CLAUDE_CONFIG_DIR` (config dir) and
 `WARMLINE_BIN_DIR` (commands).
+
+## The Desktop band, from the installer or a marketplace
+
+The gauge for the Desktop app's Code tab is a Claude Code plugin
+([what it shows, and why no expiry](SURFACES.md#the-desktop-band)). Every
+install route above puts it under `~/.claude/skills/warmline/`, where Claude
+Code auto-loads it in each local session — Desktop included — as
+`warmline@skills-dir`. Nothing else to run: `warmline status` reports it on the
+`desktop` line, and every uninstall route removes it.
+
+The second channel is Claude Code's own plugin system, for the Desktop app's
+plugin browser and for a machine with no terminal in the picture. This repo is
+a plugin marketplace:
+
+```sh
+claude plugin marketplace add Miguel-Barroso/claude-warmline
+claude plugin install warmline@claude-warmline
+```
+
+or `/plugin marketplace add Miguel-Barroso/claude-warmline` and
+`/plugin install warmline@claude-warmline` inside a session.
+`claude plugin update warmline@claude-warmline` updates it and
+`claude plugin uninstall warmline@claude-warmline` removes it. That route
+installs the band alone — the statusline, the auditor and keep-warm still come
+from the installer or Homebrew.
+
+One copy, whichever channel: two would draw two bands. The installer and
+`warmline setup` read `~/.claude/plugins/installed_plugins.json`; with a
+marketplace copy listed there they add none of their own, remove one they
+installed earlier, and say so. A `skills/warmline` folder that is not
+warmline's plugin is never written to or deleted. `warmline status` shows
+`INCONSISTENT` on the `desktop` line if both copies are ever present, naming
+the command that fixes it.
+
+A pinned `--ref` older than v2.8.0 installs everything else and notes that the
+band is not there, rather than fail.
 
 ## PATH
 
@@ -234,8 +271,8 @@ at nothing. An update never turns AFK mode on.
 warmline uninstall          # or, from a checkout: ./install.sh --uninstall
 ```
 
-Removes the statusline and its wiring, both commands, the policy file, the
-state directory, the `PATH` line if you let the installer add one, the
+Removes the statusline and its wiring, the Desktop band, both commands, the
+policy file, the state directory, the `PATH` line if you let the installer add one, the
 keep-warm block from your CLAUDE.md — leaving the rest of that file untouched —
 and, if you enabled it, AFK mode: `/afk`, its hook and permission rule, and the
 recorded consent. Your own hooks and permission rules stay.

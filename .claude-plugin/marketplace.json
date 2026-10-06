@@ -1,0 +1,22 @@
+{
+  "name": "claude-warmline",
+  "owner": {
+    "name": "Miguel Barroso",
+    "url": "https://github.com/Miguel-Barroso"
+  },
+  "metadata": {
+    "description": "warmline makes Claude Code's prompt-cache state visible. This marketplace carries the Desktop band, the gauge as a Claude Code plugin for the Desktop app's Code tab. The statusline, the auditor and the keep-warm policy install with install.sh or Homebrew: https://github.com/Miguel-Barroso/claude-warmline"
+  },
+  "plugins": [
+    {
+      "name": "warmline",
+      "source": "./plugin",
+      "description": "Claude Code's prompt-cache state, drawn above the prompt where no statusline renders: the Desktop app's Code tab. Each response graded as `warmline audit` grades it, from its real cache-read and cache-write counts.",
+      "author": { "name": "Miguel Barroso" },
+      "homepage": "https://github.com/Miguel-Barroso/claude-warmline",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": ["prompt-cache", "statusline", "desktop"]
+    }
+  ]
+}

@@ -4,6 +4,48 @@ This project follows [semantic versioning](https://semver.org). The "public API"
 is the statusline output, the CLI of `warmline-audit` and `install.sh`, and the
 `WARMLINE_*` environment variables.
 
+## [Unreleased]
+
+The gauge reaches the Desktop app. Its Code tab renders no `statusLine`, so
+warmline now ships the same reading as a Claude Code plugin that draws a band
+above the prompt there. The installer and the Homebrew cask put it in place
+with everything else; a plugin marketplace in this repo is the second channel.
+
+### Added
+- **The Desktop band** (`plugin/`): a Claude Code plugin of function hooks —
+  one TypeScript module the engine runs in-process — that grades every
+  main-thread response from its real cache-read and cache-write counts, by
+  `warmline audit`'s rule, and draws one row above the prompt: the last
+  response's grade and cache traffic, how long ago it landed (refreshed each
+  minute), the session's HOT/PARTIAL/COLD tally, and a Hide button. It prints
+  no expiry: the plugin API exposes none of Claude Code's `prompt_cache`
+  object, and warmline does not infer a TTL. On the terminal it yields when
+  warmline's `statusLine` is wired. Verified in the Desktop app's Code tab
+  (engine 2.1.286); the terminal needs Claude Code 2.1.287 or later.
+  [Where it works](docs/SURFACES.md#the-desktop-band) has the details.
+- **Installed with everything else.** `install.sh`, `brew install` and
+  `warmline setup` copy the plugin to `~/.claude/skills/warmline/`, which
+  Claude Code auto-loads in every local session as `warmline@skills-dir`.
+  `--uninstall`, `brew uninstall`, `warmline setup --remove` and
+  `warmline uninstall` remove it. A pinned `--ref` from before this release
+  installs the rest and says the band is missing, rather than fail.
+- **A plugin marketplace** at `.claude-plugin/marketplace.json`:
+  `claude plugin marketplace add Miguel-Barroso/claude-warmline`, then
+  `claude plugin install warmline@claude-warmline` — the channel for the
+  Desktop app's plugin browser and for machines without a terminal.
+- **One copy, whichever channel.** With a marketplace copy listed in
+  `installed_plugins.json`, the installer and `warmline setup` add none of
+  their own and remove one they installed before; a `skills/warmline` folder
+  that isn't warmline's is never touched. `warmline status` gains a `desktop`
+  line: the copy that draws, `OFF` with both install commands, or
+  `INCONSISTENT` when both copies are present.
+- **Tests:** installer cases for the band (fresh, symlink, marketplace guard,
+  foreign folder, `setup`, a ref from before it), and the plugin's own
+  `claude plugin validate --strict` and `claude plugin test` wherever `claude`
+  is on `PATH` — CI installs it on Linux.
+- **Release:** `scripts/release.sh` refuses to tag a release whose
+  `plugin/.claude-plugin/plugin.json` version differs from the tag.
+
 ## [2.7.0] — 2026-10-05
 
 The audit's headline figure changes meaning: "avoidable" no longer counts

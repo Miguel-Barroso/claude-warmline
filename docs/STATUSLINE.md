@@ -289,8 +289,10 @@ historical turns where no such field was ever recorded.
 4. **`cache ?` that never changes:** check `claude --version`. The cache fields
    need v2.1.251 or later; before that warmline has nothing authoritative to
    read and says so rather than guessing.
-5. **You're not in a terminal.** The desktop app and the IDE extensions don't
-   render custom statuslines at all — see [where warmline works](SURFACES.md).
+5. **You're not in a terminal.** The IDE extensions don't render custom
+   statuslines at all, and neither does the desktop app — there warmline draws
+   a band above the prompt instead; see
+   [where warmline works](SURFACES.md#the-desktop-band).
 6. **Managed settings can disable it.** If your organization sets
    `disableAllHooks` or `allowManagedHooksOnly`, Claude Code runs only a
    statusline that comes from managed settings, and yours silently vanishes.

@@ -142,6 +142,15 @@ if [ "$head_commit" != "$remote_main" ]; then
   fi
 fi
 
+# The Desktop band ships as a Claude Code plugin whose manifest carries its own
+# version, and `claude plugin update` compares that one. It is bumped by hand
+# in the version commit, like the CHANGELOG heading; this only refuses to tag
+# a release whose plugin still says the previous version.
+plugin_manifest="$REPO_DIR/plugin/.claude-plugin/plugin.json"
+plugin_version="$(sed -nE 's/^ *"version": *"([^"]+)".*/\1/p' "$plugin_manifest" 2>/dev/null | head -n 1)"
+[ "$plugin_version" = "$VERSION" ] \
+  || refuse "plugin/.claude-plugin/plugin.json says version '$plugin_version', not '$VERSION' -- set it in the version commit"
+
 # --- tag ---------------------------------------------------------------------
 
 say "== tag"

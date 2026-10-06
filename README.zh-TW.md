@@ -62,7 +62,7 @@ brew install Miguel-Barroso/warmline/warmline
 只需要 `python3` 與 `bash`，沒有別的依賴。在 Windows 上，請在 Git Bash 中執行（需要 Python 3.7+），
 或在 WSL 裡執行。沒有 `curl` 也行：`wget -qO- <同一個 URL> | bash`
 效果一樣，安裝器自己下載檔案時也會用它找得到的那一個。無論走哪條路都只有一條指令：
-`brew install` 連狀態列一起接好，`brew upgrade` 會換到新版本，`brew uninstall` 會拆掉。
+`brew install` 連狀態列和桌面橫條一起接好，`brew upgrade` 會換到新版本，`brew uninstall` 會拆掉。
 
 [安裝細節、參數、鎖定發行版、套件管理器、Windows →](docs/INSTALL.md)（英文）
 
@@ -289,14 +289,15 @@ warmline 只在你自己的機器上執行。它不向外傳送資料、不收�
 | 前端 | 狀態列 | `warmline audit`／`watch` | keep-warm |
 |---|---|---|---|
 | 終端機 CLI | ✅ | ✅ | ✅ |
-| 桌面應用程式（本機 Code 分頁） | ❌ | ✅ | ✅ |
+| 桌面應用程式（本機 Code 分頁） | ✅ 以提示框上方橫條的形式 | ✅ | ✅ |
 | VS Code／JetBrains 面板 | ❌ | ✅ | ✅ |
 | 雲端／Cowork 工作階段 | ❌ | ❌ | ❌ |
 
-本機的圖形前端不會繪製自訂狀態列（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)），
-但它們在本機跑同一個引擎、共用同一個 `~/.claude`、寫出同樣的紀錄檔，因此稽核工具、
-`warmline watch` 與保溫策略在那裡照常運作。**唯一的例外是雲端／Cowork 工作階段：
-warmline 的任何部分都碰不到它們。**
+圖形前端不會繪製自訂狀態列（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)）。
+在桌面應用程式的 Code 分頁裡，warmline 自己把儀表畫出來：一條位於提示框上方的橫條，由安裝器
+放好的一個小型 Claude Code 外掛繪製，按稽核的規則替每次回應評分。IDE 面板在本機跑同一個引擎、
+共用同一個 `~/.claude`、寫出同樣的紀錄檔，因此稽核工具、`warmline watch` 與保溫策略在那裡
+照常運作。**唯一的例外是雲端／Cowork 工作階段：warmline 的任何部分都碰不到它們。**
 
 [完整對照表與驗證方式 →](docs/SURFACES.md)（英文）
 
