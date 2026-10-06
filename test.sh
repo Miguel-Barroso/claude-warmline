@@ -1146,12 +1146,19 @@ fi
 # checkout it pointed at is not touched.
 PLINK="$SCRATCH/plugin-link-target"; cp -R plugin "$PLINK"
 rm -rf "$PD"; ln -s "$PLINK" "$PD"
+# Git Bash without symlink privileges copies instead of linking, so there is
+# no symlink to replace; the case means nothing there
+if [ ! -L "$PD" ]; then
+  echo "skip ins-plugin-symlink: ln -s made a copy, not a link (Windows)"
+  rm -rf "$PD"; inst >/dev/null
+else
 out=$(inst)
 if [[ ! -L "$PD" && -d "$PD" && "$out" == *"replaced the symlink at "*"/skills/warmline with a copy"* ]] && psame \
    && cmp -s plugin/hooks/register.tsx "$PLINK/hooks/register.tsx"; then
   echo "ok   ins-plugin-symlink: link replaced by a copy, target untouched"; pass=$((pass + 1))
 else
   echo "FAIL ins-plugin-symlink:"; echo "$out"; ls -la "$IROOT/skills"; fail=$((fail + 1))
+fi
 fi
 
 # The marketplace channel wins: with warmline@<marketplace> in
