@@ -1134,8 +1134,9 @@ wls() { CLAUDE_CONFIG_DIR="$IROOT" WARMLINE_SHARE_DIR="${WLS_SHARE:-$PWD}" "$IBI
 psame() { local f; for f in "${PFILES[@]}"; do cmp -s "plugin/$f" "$PD/$f" || return 1; done; }
 out=$(inst)
 sout=$(wl status)
-if psame && [[ "$out" == *"installed $PD"* && "$out" == *"warmline@skills-dir"* \
-   && "$(echo "$sout" | grep desktop)" == *" ON   $PD"* ]]; then
+# Windows prints the config dir as C:/Users/..., the test holds /tmp/...: match the tail
+if psame && [[ "$out" == *"installed "*"/skills/warmline  (the Desktop band"* && "$out" == *"warmline@skills-dir"* \
+   && "$(echo "$sout" | grep desktop)" == *" ON   "*"/skills/warmline  (a band above the prompt"* ]]; then
   echo "ok   ins-plugin-fresh: the four plugin files land under skills/, status ON"; pass=$((pass + 1))
 else
   echo "FAIL ins-plugin-fresh:"; echo "$out"; echo "$sout"; ls -R "$PD" 2>&1 | head; fail=$((fail + 1))
@@ -1146,7 +1147,7 @@ fi
 PLINK="$SCRATCH/plugin-link-target"; cp -R plugin "$PLINK"
 rm -rf "$PD"; ln -s "$PLINK" "$PD"
 out=$(inst)
-if [[ ! -L "$PD" && -d "$PD" && "$out" == *"replaced the symlink at $PD"* ]] && psame \
+if [[ ! -L "$PD" && -d "$PD" && "$out" == *"replaced the symlink at "*"/skills/warmline with a copy"* ]] && psame \
    && cmp -s plugin/hooks/register.tsx "$PLINK/hooks/register.tsx"; then
   echo "ok   ins-plugin-symlink: link replaced by a copy, target untouched"; pass=$((pass + 1))
 else
@@ -1180,10 +1181,10 @@ json.dump(d, open(p, "w"), indent=2)
 PY
 uout=$(inst --uninstall)
 rm -f "$IROOT/plugins/installed_plugins.json"
-if [[ "$out" == *"removed $PD"* && "$out" == *"marketplace copy draws the Desktop band now"* && ! -e "$PD" \
+if [[ "$out" == *"removed "*"/skills/warmline (the Desktop band)"* && "$out" == *"marketplace copy draws the Desktop band now"* && ! -e "$PD" \
    && "$(echo "$s1" | grep desktop)" == *" ON   warmline@claude-warmline  (from a plugin marketplace"* \
    && "$(echo "$s2" | grep desktop)" == *"INCONSISTENT  two copies"* \
-   && "$out2" == *"removed $PD"* && ! -e "$PD" \
+   && "$out2" == *"removed "*"/skills/warmline (the Desktop band)"* && ! -e "$PD" \
    && "$(echo "$s3" | grep desktop)" == *" OFF  warmline@claude-warmline (disabled)"* \
    && "$(echo "$s3" | grep desktop)" == *"claude plugin enable warmline@claude-warmline"* \
    && "$uout" == *"claude plugin uninstall warmline@claude-warmline"* ]]; then
@@ -1196,8 +1197,8 @@ fi
 mkdir -p "$PD"; printf '# my own warmline skill\n' > "$PD/SKILL.md"
 out=$(inst)
 uout=$(inst --uninstall)
-if [[ "$out" == *"$PD exists and isn't warmline's -- left alone"* \
-   && "$uout" == *"kept $PD -- not warmline's plugin"* ]] \
+if [[ "$out" == *"/skills/warmline exists and isn't warmline's -- left alone"* \
+   && "$uout" == *"kept "*"/skills/warmline -- not warmline's plugin"* ]] \
    && [ -f "$PD/SKILL.md" ] && [ ! -e "$PD/hooks" ]; then
   echo "ok   ins-plugin-foreign: a foreign skills/warmline is left alone both ways"; pass=$((pass + 1))
 else
@@ -1214,7 +1215,8 @@ out=$(wls setup --remove 2>&1) || out="FAILED($?): $out"
 gone=$([ ! -e "$PD" ] && echo y || echo n)
 out2=$(wls setup 2>&1) || out2="FAILED($?): $out2"
 out3=$(WLS_SHARE="$SD" wls setup 2>&1) || out3="FAILED($?): $out3"
-if [[ "$out" == *"removed $PD"* && "$gone" == y && "$out2" == *"installed $PD"* ]] && psame \
+if [[ "$out" == *"removed "*"/skills/warmline (the Desktop band)"* && "$gone" == y \
+   && "$out2" == *"installed "*"/skills/warmline  (the Desktop band"* ]] && psame \
    && [[ "$out3" == *"no plugin/.claude-plugin/plugin.json beside this command"* ]]; then
   echo "ok   ins-plugin-setup: setup copies it, --remove removes it, an old share dir is reported"; pass=$((pass + 1))
 else
