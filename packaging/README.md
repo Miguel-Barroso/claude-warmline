@@ -1,8 +1,9 @@
 # Packaging
 
-warmline is three scripts and two markdown files. There is nothing to compile, so
-a package's whole job is to put `warmline` and `warmline-audit` on `PATH` and
-`statusline.py`, `keep-warm.md` and `afk.md` somewhere the command can find them.
+warmline is three scripts, two markdown files and one small plugin folder. There
+is nothing to compile, so a package's whole job is to put `warmline` and
+`warmline-audit` on `PATH` and `statusline.py`, `keep-warm.md`, `afk.md` and
+`plugin/` somewhere the command can find them.
 
 Layout a package should produce:
 
@@ -12,6 +13,10 @@ Layout a package should produce:
 <prefix>/share/warmline/statusline.py
 <prefix>/share/warmline/keep-warm.md
 <prefix>/share/warmline/afk.md
+<prefix>/share/warmline/plugin/.claude-plugin/plugin.json
+<prefix>/share/warmline/plugin/hooks/hooks.json
+<prefix>/share/warmline/plugin/hooks/register.tsx
+<prefix>/share/warmline/plugin/types/index.d.ts
 ```
 
 `warmline setup` resolves that layout by following symlinks from the command

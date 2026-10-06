@@ -1122,6 +1122,135 @@ else
   echo "FAIL ins-refresh: r60=$r60 r25=$r25 r0=$r0"; echo "$out"; echo "$out0"; fail=$((fail + 1))
 fi
 
+# ---- the Desktop band: the plugin folder under skills/ ----
+# The gauge for the Desktop app's Code tab is a Claude Code plugin; the
+# installer drops it under skills/, where every local session auto-loads it.
+# One copy, whichever channel put it there, and never someone else's folder.
+PD="$IROOT/skills/warmline"
+PFILES=(.claude-plugin/plugin.json hooks/hooks.json hooks/register.tsx types/index.d.ts)
+# `warmline setup` needs a share dir to copy from; the installed copy has none
+# beside it, so the checkout stands in -- same config dir as wl()
+wls() { CLAUDE_CONFIG_DIR="$IROOT" WARMLINE_SHARE_DIR="${WLS_SHARE:-$PWD}" "$IBIN/warmline" "$@"; }
+psame() { local f; for f in "${PFILES[@]}"; do cmp -s "plugin/$f" "$PD/$f" || return 1; done; }
+out=$(inst)
+sout=$(wl status)
+if psame && [[ "$out" == *"installed $PD"* && "$out" == *"warmline@skills-dir"* \
+   && "$(echo "$sout" | grep desktop)" == *" ON   $PD"* ]]; then
+  echo "ok   ins-plugin-fresh: the four plugin files land under skills/, status ON"; pass=$((pass + 1))
+else
+  echo "FAIL ins-plugin-fresh:"; echo "$out"; echo "$sout"; ls -R "$PD" 2>&1 | head; fail=$((fail + 1))
+fi
+
+# A developer's symlink into a checkout is replaced by a real copy; the
+# checkout it pointed at is not touched.
+PLINK="$SCRATCH/plugin-link-target"; cp -R plugin "$PLINK"
+rm -rf "$PD"; ln -s "$PLINK" "$PD"
+out=$(inst)
+if [[ ! -L "$PD" && -d "$PD" && "$out" == *"replaced the symlink at $PD"* ]] && psame \
+   && cmp -s plugin/hooks/register.tsx "$PLINK/hooks/register.tsx"; then
+  echo "ok   ins-plugin-symlink: link replaced by a copy, target untouched"; pass=$((pass + 1))
+else
+  echo "FAIL ins-plugin-symlink:"; echo "$out"; ls -la "$IROOT/skills"; fail=$((fail + 1))
+fi
+
+# The marketplace channel wins: with warmline@<marketplace> in
+# installed_plugins.json the installer removes its own copy and adds none,
+# status says which copy draws, and both at once is reported as the
+# inconsistency it is. Disabled there, status says so too.
+mkdir -p "$IROOT/plugins"
+cat > "$IROOT/plugins/installed_plugins.json" <<'EOF'
+{"version": 2, "plugins": {"warmline@claude-warmline": [{"scope": "user", "version": "2.8.0"}]}}
+EOF
+out=$(inst)
+s1=$(wl status)
+mkdir -p "$PD/.claude-plugin"; cp plugin/.claude-plugin/plugin.json "$PD/.claude-plugin/"
+s2=$(wl status)
+out2=$(wls setup 2>&1) || out2="FAILED($?): $out2"
+python3 - "$IROOT/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["enabledPlugins"] = {"warmline@claude-warmline": False}
+json.dump(d, open(p, "w"), indent=2)
+PY
+s3=$(wl status)
+python3 - "$IROOT/settings.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d.pop("enabledPlugins", None)
+json.dump(d, open(p, "w"), indent=2)
+PY
+uout=$(inst --uninstall)
+rm -f "$IROOT/plugins/installed_plugins.json"
+if [[ "$out" == *"removed $PD"* && "$out" == *"marketplace copy draws the Desktop band now"* && ! -e "$PD" \
+   && "$(echo "$s1" | grep desktop)" == *" ON   warmline@claude-warmline  (from a plugin marketplace"* \
+   && "$(echo "$s2" | grep desktop)" == *"INCONSISTENT  two copies"* \
+   && "$out2" == *"removed $PD"* && ! -e "$PD" \
+   && "$(echo "$s3" | grep desktop)" == *" OFF  warmline@claude-warmline (disabled)"* \
+   && "$(echo "$s3" | grep desktop)" == *"claude plugin enable warmline@claude-warmline"* \
+   && "$uout" == *"claude plugin uninstall warmline@claude-warmline"* ]]; then
+  echo "ok   ins-plugin-marketplace: one copy, the marketplace's; status and uninstall name it"; pass=$((pass + 1))
+else
+  echo "FAIL ins-plugin-marketplace:"; echo "$out"; echo "$s1"; echo "$s2"; echo "$out2"; echo "$s3"; echo "$uout"; fail=$((fail + 1))
+fi
+
+# Someone else's skill named warmline is never overwritten or deleted.
+mkdir -p "$PD"; printf '# my own warmline skill\n' > "$PD/SKILL.md"
+out=$(inst)
+uout=$(inst --uninstall)
+if [[ "$out" == *"$PD exists and isn't warmline's -- left alone"* \
+   && "$uout" == *"kept $PD -- not warmline's plugin"* ]] \
+   && [ -f "$PD/SKILL.md" ] && [ ! -e "$PD/hooks" ]; then
+  echo "ok   ins-plugin-foreign: a foreign skills/warmline is left alone both ways"; pass=$((pass + 1))
+else
+  echo "FAIL ins-plugin-foreign:"; echo "$out"; echo "$uout"; fail=$((fail + 1))
+fi
+rm -rf "$PD"
+
+# `warmline setup` from a share dir copies the same four files; --remove takes
+# them back; a share dir without a plugin folder (an older layout) says so and
+# installs the rest.
+inst >/dev/null
+SD="$SCRATCH/share-noplugin"; mkdir -p "$SD"; cp statusline.py keep-warm.md afk.md "$SD/"
+out=$(wls setup --remove 2>&1) || out="FAILED($?): $out"
+gone=$([ ! -e "$PD" ] && echo y || echo n)
+out2=$(wls setup 2>&1) || out2="FAILED($?): $out2"
+out3=$(WLS_SHARE="$SD" wls setup 2>&1) || out3="FAILED($?): $out3"
+if [[ "$out" == *"removed $PD"* && "$gone" == y && "$out2" == *"installed $PD"* ]] && psame \
+   && [[ "$out3" == *"no plugin/.claude-plugin/plugin.json beside this command"* ]]; then
+  echo "ok   ins-plugin-setup: setup copies it, --remove removes it, an old share dir is reported"; pass=$((pass + 1))
+else
+  echo "FAIL ins-plugin-setup: gone=$gone"; echo "$out"; echo "$out2"; echo "$out3"; fail=$((fail + 1))
+fi
+
+# A pinned ref from before the band installs everything else and says why the
+# band is missing -- one soft note, exit 0, nothing half-installed. (Network:
+# fetches v2.7.0's files from GitHub, like ins-ref above.)
+rm -rf "$PD"
+rc=0; out=$(inst --ref v2.7.0 2>&1) || rc=$?
+if [[ "$rc" == 0 && "$out" == *"v2.7.0 has no plugin/.claude-plugin/plugin.json"* \
+   && "$out" == *"the band is not installed"* && ! -e "$PD" ]] \
+   && [ -s "$IROOT/warmline-statusline.py" ]; then
+  echo "ok   ins-plugin-old-ref: a ref before the band installs the rest, notes the gap"; pass=$((pass + 1))
+else
+  echo "FAIL ins-plugin-old-ref: rc=$rc"; echo "$out"; fail=$((fail + 1))
+fi
+inst >/dev/null   # back to this checkout's files for the tests below
+
+# The plugin's own checks run inside the engine, so they need Claude Code on
+# PATH: the manifest and module validated strictly, the mod's tests, and the
+# marketplace manifest at the repo root.
+if command -v claude >/dev/null 2>&1; then
+  v1=$(claude plugin validate --strict plugin 2>&1) || v1="FAILED: $v1"
+  v2=$(claude plugin validate --strict . 2>&1) || v2="FAILED: $v2"
+  v3=$(claude plugin test plugin 2>&1) || v3="FAILED: $v3"
+  if [[ "$v1" != FAILED:* && "$v2" != FAILED:* && "$v3" != FAILED:* && "$v3" == *" 0 fail"* ]]; then
+    echo "ok   plugin-self: validate --strict (plugin, marketplace) and claude plugin test pass"; pass=$((pass + 1))
+  else
+    echo "FAIL plugin-self:"; echo "$v1"; echo "$v2"; echo "$v3"; fail=$((fail + 1))
+  fi
+else
+  echo "skip plugin-self: no claude on PATH (claude plugin validate / test)"
+fi
+
 # --ref pins the install to one tag: it is refused unless it names something
 # fetchable, it never quietly falls back to the checkout it was run from (a
 # release page that installs main's tip is the bug this flag exists to fix),
@@ -2215,11 +2344,12 @@ if [[ "$uout" == *"claude-warmline uninstalled."* \
    && "$uout" == *"removed $UBIN/warmline"* \
    && "$uout" == *"removed the PATH line from $UHOME/.zshrc"* ]] \
    && [[ ! -e "$UROOT/warmline-statusline.py" && ! -e "$UROOT/warmline-keep-warm.md" \
+   && ! -e "$UROOT/skills/warmline" \
    && ! -e "$UBIN/warmline" && ! -e "$UBIN/warmline-audit" ]] \
    && ! grep -q statusLine "$UROOT/settings.json" \
    && ! grep -qF "$MB" "$UROOT/CLAUDE.md" && grep -q 'my own rules' "$UROOT/CLAUDE.md" \
    && ! grep -qF "$PB" "$UHOME/.zshrc" && grep -q 'my zshrc' "$UHOME/.zshrc"; then
-  echo "ok   cli-uninstall: files, wiring, block, PATH line and both commands"; pass=$((pass + 1))
+  echo "ok   cli-uninstall: files, wiring, band, block, PATH line and both commands"; pass=$((pass + 1))
 else
   echo "FAIL cli-uninstall:"; echo "$uout"; ls -a "$UROOT" "$UBIN"; fail=$((fail + 1))
 fi

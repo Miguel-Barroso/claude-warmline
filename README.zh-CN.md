@@ -62,7 +62,7 @@ brew install Miguel-Barroso/warmline/warmline
 只需要 `python3` 和 `bash`，没有别的依赖。在 Windows 上，请在 Git Bash 中运行（需要 Python 3.7+），
 或在 WSL 里运行。没有 `curl` 也行：`wget -qO- <同一个 URL> | bash`
 效果一样，安装器自己下载文件时也会用它找得到的那一个。无论走哪条路都只有一条命令：
-`brew install` 连状态栏一起接好，`brew upgrade` 会换到新版本，`brew uninstall` 会拆掉。
+`brew install` 连状态栏和桌面横条一起接好，`brew upgrade` 会换到新版本，`brew uninstall` 会拆掉。
 
 [安装细节、参数、锁定发行版、包管理器、Windows →](docs/INSTALL.md)（英文）
 
@@ -288,14 +288,15 @@ warmline 只在你自己的机器上运行。它不向外发送数据、不收�
 | 前端 | 状态栏 | `warmline audit` / `watch` | keep-warm |
 |---|---|---|---|
 | 终端 CLI | ✅ | ✅ | ✅ |
-| 桌面应用（本地 Code 标签页） | ❌ | ✅ | ✅ |
+| 桌面应用（本地 Code 标签页） | ✅ 以提示框上方横条的形式 | ✅ | ✅ |
 | VS Code / JetBrains 面板 | ❌ | ✅ | ✅ |
 | 云端 / Cowork 会话 | ❌ | ❌ | ❌ |
 
-本地的图形前端不会渲染自定义状态栏（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)），
-但它们在本地运行同一个引擎、共享同一个 `~/.claude`、写出同样的记录文件，因此审计
-工具、`warmline watch` 和保温策略在那里照常工作。**唯一的例外是云端 / Cowork 会话：
-warmline 的任何部分都触及不到它们。**
+图形前端不会渲染自定义状态栏（[已提出的需求](https://github.com/anthropics/claude-code/issues/41456)）。
+在桌面应用的 Code 标签页里，warmline 自己把仪表画出来：一条位于提示框上方的横条，由安装器
+放好的一个小型 Claude Code 插件绘制，按审计的规则给每次响应打分。IDE 面板在本地运行同一个
+引擎、共享同一个 `~/.claude`、写出同样的记录文件，因此审计工具、`warmline watch` 和保温
+策略在那里照常工作。**唯一的例外是云端 / Cowork 会话：warmline 的任何部分都触及不到它们。**
 
 [完整对照表与验证方式 →](docs/SURFACES.md)（英文）
 

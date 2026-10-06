@@ -55,6 +55,14 @@ STATE_DIR="$CLAUDE_DIR/warmline-state"
 AFK_DIR="$CLAUDE_DIR/warmline-afk"
 AFK_SRC="$CLAUDE_DIR/warmline-afk.md"
 AFK_CMD="$CLAUDE_DIR/commands/afk.md"
+# The Desktop band: the cache gauge as a Claude Code plugin ("mod"), drawn above
+# the prompt where no statusLine renders -- the Desktop app's Code tab. Under
+# skills/ it auto-loads in every local session as warmline@skills-dir; a
+# marketplace install (warmline@claude-warmline) is the other channel, and
+# exactly one of the two may be present -- two copies draw two bands.
+PLUGIN_DIR="$CLAUDE_DIR/skills/warmline"
+PLUGIN_FILES=(.claude-plugin/plugin.json hooks/hooks.json hooks/register.tsx types/index.d.ts)
+INSTALLED_PLUGINS="$CLAUDE_DIR/plugins/installed_plugins.json"
 AFK_TAG="claude-warmline afk:"
 # bump when the disclosure below changes in substance: consent is to a text
 AFK_TERMS=1
@@ -76,8 +84,9 @@ claude-warmline: cache-aware statusline, session auditor, keep-warm policy.
 The installer (install.sh) installs and updates; this command controls.
 
   warmline status              what is installed and enabled right now
-  warmline setup               wire the statusline into Claude Code (what
-                               install.sh does; run it after brew or a package)
+  warmline setup               wire the statusline and the Desktop band into
+                               Claude Code (what install.sh does; run it after
+                               brew or a package)
   warmline watch [-n SECS]     live warmth view of every session, refreshed
                                every 10s (or SECS) until ctrl-c
   warmline awake [CMD...]      no-sleep mode: run 'claude' (or CMD) with
@@ -301,6 +310,95 @@ share_dir() {
   return 1
 }
 
+# ---- the Desktop band -------------------------------------------------------
+# Same four functions in install.sh -- keep them identical. Only the install
+# step differs: the installer fetches, this copies from the share dir.
+
+# "warmline@<marketplace>" when a plugin marketplace installed the band,
+# "(disabled)" appended when settings.json turned it off; nothing otherwise.
+plugin_marketplace_id() {
+  [ -f "$INSTALLED_PLUGINS" ] || return 0
+  SETTINGS="$SETTINGS" python3 - "$INSTALLED_PLUGINS" <<'PY'
+import json, os, sys
+try:
+    plugins = json.load(open(sys.argv[1])).get("plugins") or {}
+except Exception:
+    sys.exit(0)
+enabled = {}
+try:
+    enabled = json.load(open(os.environ["SETTINGS"])).get("enabledPlugins") or {}
+except Exception:
+    pass
+for key in plugins:
+    if key.startswith("warmline@") and not key.endswith(("@skills-dir", "@inline")):
+        print(key + ("" if enabled.get(key, True) else " (disabled)"))
+        break
+PY
+}
+
+# The folder under skills/ is warmline's own plugin, and not someone's skill
+# that happens to share the name: its manifest says so.
+plugin_ours() {
+  local m="$PLUGIN_DIR/.claude-plugin/plugin.json"
+  [ -f "$m" ] && grep -q '"name": *"warmline"' "$m" && grep -qF "Miguel-Barroso/claude-warmline" "$m"
+}
+
+plugin_remove() {
+  local mk
+  if [ -L "$PLUGIN_DIR" ]; then
+    # a developer's link into a checkout: take the link, never what it points at
+    if plugin_ours; then rm -f "$PLUGIN_DIR"; echo "removed the symlink $PLUGIN_DIR (its target is untouched)"
+    else echo "kept $PLUGIN_DIR -- a symlink, and not to warmline's plugin"; fi
+  elif [ -d "$PLUGIN_DIR" ]; then
+    if plugin_ours; then rm -rf "$PLUGIN_DIR"; echo "removed $PLUGIN_DIR (the Desktop band)"
+    else echo "kept $PLUGIN_DIR -- not warmline's plugin"; fi
+  fi
+  mk="$(plugin_marketplace_id)"
+  if [ -n "$mk" ]; then
+    echo "note: the Desktop band from a plugin marketplace stays: claude plugin uninstall ${mk%% *}"
+  fi
+  return 0
+}
+
+# One copy, whichever channel installed it. A marketplace install wins: it was
+# asked for by name, and `claude plugin update` keeps it current, so setup
+# removes its own copy rather than add a second band. $1 is the folder to copy
+# from (share dir + /plugin); a share dir without one predates the band.
+plugin_install_from() {
+  local src="$1" mk f
+  mk="$(plugin_marketplace_id)"
+  if [ -n "$mk" ]; then
+    if plugin_ours; then
+      plugin_remove
+      echo "  the marketplace copy draws the Desktop band now"
+    else
+      echo "Desktop band: installed from a plugin marketplace ($mk) -- no second copy under $PLUGIN_DIR"
+    fi
+    return 0
+  fi
+  for f in "${PLUGIN_FILES[@]}"; do
+    [ -f "$src/$f" ] || { echo "note: no plugin/$f beside this command -- the Desktop band is not installed"; return 0; }
+  done
+  if [ -L "$PLUGIN_DIR" ]; then
+    if plugin_ours; then
+      rm -f "$PLUGIN_DIR"
+      echo "replaced the symlink at $PLUGIN_DIR with a copy"
+    else
+      echo "note: $PLUGIN_DIR is a symlink to something that isn't warmline's -- left alone; the Desktop band is not installed"
+      return 0
+    fi
+  elif [ -e "$PLUGIN_DIR" ] && ! plugin_ours; then
+    echo "note: $PLUGIN_DIR exists and isn't warmline's -- left alone; the Desktop band is not installed"
+    return 0
+  fi
+  for f in "${PLUGIN_FILES[@]}"; do
+    mkdir -p "$PLUGIN_DIR/$(dirname "$f")"
+    cp "$src/$f" "$PLUGIN_DIR/$f"
+    chmod 644 "$PLUGIN_DIR/$f"
+  done
+  echo "installed $PLUGIN_DIR  (the Desktop band: a Claude Code plugin, loads as warmline@skills-dir)"
+}
+
 # The undo half of setup: the statusLine entry, but only when it is warmline's,
 # and the two files setup installed. `warmline uninstall` starts here and goes
 # on to the things setup never touched.
@@ -323,6 +421,7 @@ if os.environ["DEST"] in str(sl.get("command", "")):
 PY
   fi
   rm -f "$DEST" "$POLICY"
+  plugin_remove
   # a hook pointing at a command about to be deleted fails on every prompt;
   # the consent stays, so an upgrade's remove-then-setup puts it straight back
   if afk_enabled || afk_hook_wired || afk_cmd_ours; then afk_unwire; fi
@@ -334,7 +433,8 @@ setup_usage() {
 warmline setup: wire the statusline into Claude Code (and, if you enabled
 AFK mode, re-wire /afk and its hook to this install).
 
-  warmline setup            install the statusline and policy text, wire settings.json
+  warmline setup            install the statusline, the policy text and the
+                            Desktop band (a plugin under skills/), wire settings.json
   warmline setup --force    with install: replace a statusLine that isn't warmline's
   warmline setup --remove   unwire it and remove the files this command installed
   warmline setup --package  run by a package manager's hook: with --remove, skip
@@ -389,6 +489,7 @@ cmd_setup() {
     cp "$src/keep-warm.md" "$POLICY"
     echo "installed $POLICY"
     if [ -f "$src/afk.md" ]; then cp "$src/afk.md" "$AFK_SRC"; echo "installed $AFK_SRC"; fi
+    plugin_install_from "$src/plugin"
     # the block already in CLAUDE.md is what the agent reads, so refreshing only
     # $POLICY would leave every session on the previous release's wording
     if [ -f "$CLAUDE_MD" ]; then
@@ -477,8 +578,9 @@ PY
 uninstall_usage() {
   cat <<EOF
 warmline uninstall: take claude-warmline back off this machine. Removes
-the statusline and its wiring, the policy file and the keep-warm history
-log, the keep-warm block from
+the statusline and its wiring, the Desktop band (the plugin under
+skills/), the policy file and the keep-warm history log, the keep-warm
+block from
 $CLAUDE_MD,
 the PATH line install.sh added to your shell startup file, and both
 commands. Everything ./install.sh --uninstall removes, without needing
@@ -628,6 +730,20 @@ PY
   else
     afk_line="INCONSISTENT  consented but unwired (repair: warmline afk enable)"
   fi
+  local desktop_line mk
+  mk="$(plugin_marketplace_id)"
+  if plugin_ours && [ -n "$mk" ]; then
+    desktop_line="INCONSISTENT  two copies, $PLUGIN_DIR and $mk, draw two bands (repair: warmline setup keeps the marketplace one)"
+  elif plugin_ours; then
+    desktop_line="ON   $PLUGIN_DIR  (a band above the prompt in the Desktop app's Code tab)"
+  elif [ -n "$mk" ]; then
+    case "$mk" in
+      *"(disabled)") desktop_line="OFF  $mk -- from a plugin marketplace; enable: claude plugin enable ${mk%% *}" ;;
+      *) desktop_line="ON   $mk  (from a plugin marketplace; a band above the prompt in the Desktop app's Code tab)" ;;
+    esac
+  else
+    desktop_line="OFF  (install: warmline setup -- or, from the plugin marketplace: claude plugin marketplace add Miguel-Barroso/claude-warmline && claude plugin install warmline@claude-warmline)"
+  fi
   audit_path="$(find_audit)"
   if [ -n "$audit_path" ]; then
     audit_line="ON   $audit_path"
@@ -649,8 +765,8 @@ PY
     fi
   fi
   echo "claude-warmline status  (config: $CLAUDE_DIR)"
-  printf '  %-10s  %s\n' statusline "$sl_line" keep-warm "$kw_line" \
-    afk "$afk_line" auditor "$audit_line" ttl "$ttl_line"
+  printf '  %-10s  %s\n' statusline "$sl_line" desktop "$desktop_line" \
+    keep-warm "$kw_line" afk "$afk_line" auditor "$audit_line" ttl "$ttl_line"
   [ -n "$refresh_line" ] && printf '  %-10s  %s\n' refresh "$refresh_line"
   return 0
 }

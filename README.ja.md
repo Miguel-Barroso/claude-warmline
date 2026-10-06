@@ -65,8 +65,8 @@ brew install Miguel-Barroso/warmline/warmline
 依存は `python3` と `bash` だけです。Windows では Git Bash から(Python 3.7 以上が必要)、
 または WSL の中で実行してください。`curl` がなければ `wget -qO- <同じ URL> | bash`
 でも同じように動き、インストーラ自身のダウンロードも見つかった方を使います。どの経路でも
-コマンドは 1 つです——`brew install` はステータスラインの配線までやり、`brew upgrade`
-は新しい版に張り替え、`brew uninstall` は配線を外します。
+コマンドは 1 つです——`brew install` はステータスラインとデスクトップバンドの配線まで
+やり、`brew upgrade` は新しい版に張り替え、`brew uninstall` は配線を外します。
 
 [インストールの詳細・フラグ・リリースの固定・パッケージマネージャ・Windows →](docs/INSTALL.md)(英語)
 
@@ -327,16 +327,18 @@ Claude Code がステータスラインに渡す JSON と、`~/.claude/projects`
 | フロントエンド | ステータスライン | `warmline audit` / `watch` | keep-warm |
 |---|---|---|---|
 | ターミナル CLI | ✅ | ✅ | ✅ |
-| デスクトップアプリ (ローカルの Code タブ) | ❌ | ✅ | ✅ |
+| デスクトップアプリ (ローカルの Code タブ) | ✅ プロンプト上のバンドとして | ✅ | ✅ |
 | VS Code / JetBrains パネル | ❌ | ✅ | ✅ |
 | クラウド / Cowork セッション | ❌ | ❌ | ❌ |
 
-ローカルの GUI フロントエンドはカスタムステータスラインを描画しません
+GUI フロントエンドはカスタムステータスラインを描画しません
 ([要望は提出済み](https://github.com/anthropics/claude-code/issues/41456))。
-ただし同じエンジンをローカルで動かし、同じ `~/.claude` を共有し、同じ記録ファイルを
-書き出すため、監査ツール・`warmline watch`・キープウォームポリシーはそこでも普通に
-動きます。**例外はクラウド / Cowork セッションだけで、warmline はその一部たりとも
-届きません。**
+デスクトップアプリの Code タブでは、warmline がゲージを自前で描きます——プロンプトの
+上のバンドとして。インストーラが配置する小さな Claude Code プラグインで、監査と同じ
+基準で各レスポンスを採点します。IDE パネルは同じエンジンをローカルで動かし、同じ
+`~/.claude` を共有し、同じ記録ファイルを書き出すため、監査ツール・`warmline watch`・
+キープウォームポリシーはそこでも普通に動きます。**例外はクラウド / Cowork セッション
+だけで、warmline はその一部たりとも届きません。**
 
 [完全な対応表と検証方法 →](docs/SURFACES.md)(英語)
 
